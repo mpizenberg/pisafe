@@ -48,6 +48,11 @@ those capabilities from becoming general access to the Mac.
   updates are offered to the user rather than applied automatically.
 - Ignored and untracked source files are excluded initially unless explicitly
   selected.
+- Secret-bearing files such as `.env` are included only through that same
+  explicit selection flow, after a strong warning. There is no separate secret
+  injection mechanism.
+- Repositories may contain Git submodules; staging must support them. Git LFS
+  is out of scope initially.
 - ChatGPT subscription login persists.
 - Other providers such as Kimi or DeepSeek may be added later.
 - No access to host-local services is currently needed.
@@ -71,7 +76,8 @@ The trusted computing base is deliberately small:
 - The approval and credential broker.
 - The VM and container runtimes.
 - A pinned base image.
-- A small, pinned Pi provider/mediation extension.
+- A minimal provider integration: a `models.json` entry plus, if needed, a
+  thin pinned extension.
 - The staging and Git import/export code.
 
 Pi itself and its catalog extensions run inside the isolated environment. This
@@ -173,6 +179,7 @@ pisafe connect <run>
 pisafe zed <run>
 pisafe diff <run>
 pisafe log <run>
+pisafe cp <run>:<path> [dest]
 pisafe approvals
 pisafe apply <run>
 pisafe discard <run>
@@ -187,8 +194,10 @@ pisafe tool install <package>
 ```
 
 `connect` resumes Pi or opens a shell. `zed` prints the path and opens Zed.
-`discard` is explicit and destructive, so it identifies the exact run before
-deleting it.
+`cp` copies a file or directory out of a run — build artifacts, logs,
+screenshots that do not belong in Git history — after showing exactly what
+will be copied. `discard` is explicit and destructive, so it identifies the
+exact run before deleting it.
 
 ## Staging and Git behavior
 
@@ -206,12 +215,28 @@ changes, deletions, executable bits, and symlinks. Commit it first as:
 pisafe: imported working-tree baseline
 ```
 
-This commit is followed by the agent's own commits.
+This commit is followed by the agent's own commits. Flattening the working
+tree into one commit loses the staged/unstaged distinction; `pisafe run`
+should say so when it happens.
 
 Untracked and ignored inputs are not silently copied. Selection should show
 file names, types, and sizes, reject special files and escaping symlinks, and
-warn about likely secrets. Explicitly included input files become part of the
-baseline commit.
+warn about likely secrets. A file that looks like a secret, such as `.env`,
+may still be included when the user insists; the warning must state that
+everything in the run — dependencies, extensions, and downloaded code — can
+read it. Explicitly included input files become part of the baseline commit.
+
+### Submodules
+
+Git bundles do not carry submodule contents. Staging must therefore bundle
+the superproject and each initialized submodule, reconstruct the same layout
+in the staged repository, and point submodule fetch URLs at the mediated Git
+proxy. `pisafe apply` imports the superproject branch and the referenced
+submodule histories into the corresponding local repositories, and reports
+which submodule commits the imported branch expects.
+
+Git LFS is explicitly out of scope for now; a repository using it should be
+detected and refused with a clear message rather than staged incompletely.
 
 ### Uncommitted changes at the end
 
@@ -234,8 +259,10 @@ current branch. It imports the completed history as:
 refs/heads/pisafe/<run>
 ```
 
-The branch is transferred as a Git bundle. Preserve the agent's commits
-individually.
+The branch is transferred as an incremental Git bundle containing only
+commits new since the captured HEAD, fetched into a temporary ref and moved
+into place only after verification, so an interrupted transfer cannot leave a
+partial branch. Preserve the agent's commits individually.
 
 If a dirty baseline commit exists, prompt:
 
@@ -270,7 +297,7 @@ purpose:
 | Global tools | all runs | no |
 | ChatGPT/provider credentials | Mac broker | not present |
 | GitHub credentials | host `gh` store/broker | not present |
-| Pi sessions | project | yes |
+| Pi sessions | project store, run-local copy | yes |
 | Dependency caches | project | yes |
 | Staged repository | run | yes |
 | Temporary downloads | run | yes |
@@ -289,7 +316,13 @@ available updates, release notes, source, and version diff, then wait for
 approval.
 
 Per-project sessions meet the persistence requirement without allowing one
-project to read another project's transcripts by default.
+project to read another project's transcripts by default. Each run starts
+from a snapshot of the project's session store and writes to a run-local
+session directory that is merged back when the run stops, so concurrent runs
+never read one another's live transcripts.
+
+Per-project dependency caches need locking or a run-local overlay so that two
+concurrent installs cannot corrupt them.
 
 ## Network policy
 
@@ -302,6 +335,9 @@ Use a controller-owned forward proxy plus container/VM firewalling:
 - Loopback, link-local, metadata, private LAN, and host-service destinations are
   denied by default.
 - The only internal destinations are the narrowly scoped proxy and broker.
+- `github.com` is never reachable as a raw TLS tunnel; it is served only
+  through the broker's terminating Git/API proxy, so reads and writes stay
+  distinguishable and attacker-supplied credentials cannot push data out.
 - HTTPS CONNECT requests can be held while awaiting approval.
 - Policy applies to Pi, extensions, shell commands, dependencies, Zed remote
   tooling, and language servers.
@@ -309,7 +345,9 @@ Use a controller-owned forward proxy plus container/VM firewalling:
 Do not rely only on Pi tool hooks or shell wrappers; malicious code can bypass
 in-process checks. Hooks are useful for explaining a request and attaching a
 command-duration capability, while the external proxy is the enforcement
-point.
+point. Explanations originate inside the untrusted container, so the approval
+UI must visually separate broker-verified facts — exact host, port, and
+requesting process — from that untrusted rationale text.
 
 ### Approval scopes
 
@@ -323,7 +361,9 @@ Store an approval as exact scheme/host/port plus its scope:
 Avoid wildcard subdomains by default. “Always” should visibly warn that any
 future project-readable data could be sent to that destination.
 
-When no user is present, keep the originating operation paused. Show pending
+When no user is present, keep the originating operation paused. Run
+wall-clock limits stop counting while a run is blocked on approval, so an
+overnight wait cannot kill the run. Show pending
 requests in the run terminal, through `pisafe approvals`, and preferably through
 a macOS notification. Approval from any controller terminal resumes it.
 
@@ -332,8 +372,9 @@ a macOS notification. Approval from any controller terminal resumes it.
 Automatic:
 
 - Model traffic to the internal inference broker.
-- Unauthenticated public GitHub reads.
-- Public Git clone/fetch over HTTPS.
+- Unauthenticated public GitHub reads through the broker.
+- Public GitHub clone/fetch through the broker's Git proxy. Other Git hosts
+  are ordinary destination approvals.
 - Required signed/pinned `pisafe` infrastructure downloads.
 
 Approval required:
@@ -366,10 +407,18 @@ macOS Keychain or a broker-only encrypted store.
 Pi normally stores OAuth tokens in `~/.pi/agent/auth.json`. Do not put that file
 in the run container. Instead:
 
-1. A pinned provider extension sends structured model requests to the broker.
-2. The broker refreshes OAuth and calls the provider.
-3. It streams the model response back.
+1. The broker is declared in Pi's `models.json` as a local provider endpoint
+   speaking a supported standard API (OpenAI Responses/Completions or
+   Anthropic Messages).
+2. The broker attaches credentials, refreshes OAuth, and calls the provider.
+3. It streams the model response back unchanged.
 4. The run receives only a revocable, run-scoped broker capability.
+
+Speaking a standard wire format instead of a custom pisafe protocol keeps
+streaming and tool-call fidelity upstream's problem, not ours. Pi's extension
+API is pre-1.0 and changes often, so any extension code (for example, for the
+capability handshake) stays thin; the `models.json` route is the primary
+integration.
 
 Untrusted code can consume inference while its run is active, because Pi must
 be able to do so, but it cannot extract the reusable OAuth token. Apply rate,
@@ -395,6 +444,11 @@ The broker provides:
 `gh api` GET requests may be read operations; POST, PUT, PATCH, DELETE, GraphQL
 mutations, and ambiguous commands require approval. Git-over-SSH is disabled by
 default because no SSH key or agent is shared.
+
+No raw tunnel to `github.com` exists in any mode. Without termination at the
+broker, "public reads are automatic" would hand malicious code an exfiltration
+channel: it could push project data to an attacker-owned repository using
+credentials embedded in the malicious code itself.
 
 This is more work than copying `hosts.yml` into the container, but it is
 necessary to satisfy both “persistent GitHub login” and “no push without
@@ -431,11 +485,14 @@ Run states:
 creating → active → stopped → imported | discarded | expired
 ```
 
-- Active/stopped runs are resumable.
+- Active/stopped runs are resumable. Resuming issues a fresh short-lived
+  broker capability rather than extending the old one.
 - Successful `apply` marks a run imported but keeps it recoverable for seven
   days.
 - `discard` deletes only after exact run confirmation.
-- `pisafe gc` removes imported/discarded runs older than seven days.
+- `pisafe gc` removes imported/discarded runs older than seven days, and
+  reports or prunes long-unused per-project caches and session stores, which
+  otherwise grow without bound.
 - Never expire a run with unimported commits merely because it is old. Warn and
   require explicit discard.
 - Keep branch/import metadata after workspace deletion so an imported branch
@@ -489,35 +546,38 @@ secrets are not readable by extensions.
 
 ## Implementation order
 
-### Phase 1: safe workspace and editor
+### Phase 1: safe workspace, editor, and brokered inference
 
 - Dedicated mountless Lima VM.
 - Pinned ARM64 run image and current Pi package.
 - Per-run containers and volumes.
-- Git bundle staging/import.
+- Git bundle staging/import, including submodules.
 - Dirty baseline choices.
 - Zed Remote SSH.
+- Minimal ChatGPT OAuth inference broker with macOS Keychain persistence,
+  registered as a standard-API `models.json` provider.
 - Run listing, resume, diff, apply, discard, and seven-day GC.
 
 This phase already provides the largest host-filesystem safety improvement.
-Keep network off except for explicitly temporary manual access until Phase 2.
+The inference broker is in Phase 1 because Pi cannot function without model
+access, and raw credentials must never enter the container, even temporarily.
+The broker endpoint is the only egress; all other network access stays off
+until Phase 2.
 
 ### Phase 2: mediated useful networking
 
 - Controller proxy and approval queue.
 - Once/session/project/always policy database.
 - Private/local-address denial.
-- Public GitHub reads.
+- Public GitHub reads through the terminating broker proxy.
 - Command-duration package installation approvals.
 - Notifications and `pisafe approvals`.
 
 ### Phase 3: persistent safe credentials
 
-- ChatGPT OAuth inference broker.
-- macOS Keychain persistence.
 - Host `gh` integration and read/write mediation.
 - Other provider onboarding.
-- Usage limits and credential audit events.
+- Inference rate/spend limits and credential audit events.
 
 ### Phase 4: managed persistence
 
@@ -552,6 +612,10 @@ The first usable release should prove:
 13. Two simultaneous runs cannot see or overwrite one another.
 14. Interrupted transfer/import cannot create a silently partial branch.
 15. Cleanup never deletes an unimported run without explicit confirmation.
+16. Raw TLS tunnels to `github.com` are refused while broker-mediated clone,
+    fetch, and API reads succeed.
+17. A repository with submodules stages, runs, and applies with superproject
+    and submodule commits preserved.
 
 ## Residual risks
 
@@ -566,6 +630,13 @@ The first usable release should prove:
   underlying OAuth token is hidden.
 - Zed is a trusted local application and necessarily receives file contents.
 - User-approved GitHub or cloud mutations can still be harmful.
+- Frequent approval prompts can train reflexive approval; scoped grants and
+  clear prompts reduce but do not eliminate this.
+- Driving the ChatGPT subscription OAuth flow from a non-official client may
+  sit in a gray area of the provider's terms of use.
+- The subscription backend is an unofficial surface that can change without
+  notice; inference then fails closed and loudly until the pinned `pi-ai`
+  dependency ships a fix and is updated.
 
 ## Primary references
 
