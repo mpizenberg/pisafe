@@ -200,6 +200,8 @@ pisafe gc
 pisafe doctor
 
 pisafe login chatgpt
+
+# Phase 2 (persistent profile management):
 pisafe extension install <package>
 pisafe extension update [package]
 pisafe tool install <package>
@@ -290,10 +292,13 @@ partial branch. Preserve the agent's commits individually.
 Because superproject and submodule refs live in separate repositories with no
 cross-repository transaction, `apply` is journaled and idempotent: import and
 verify every object set first, record the intended old/new refs in the run
-manifest, then update refs one repository at a time. An interrupted `apply`
-either finishes the recorded operation or restores the recorded old refs on
-the next attempt, and the run is marked imported only when every ref matches
-the manifest.
+manifest, then update refs one repository at a time. Every forward and
+rollback update is compare-and-swap (`git update-ref <ref> <new>
+<expected-old>`): a step whose ref already holds the new value is complete, a
+rollback restores the old value only while the ref still holds the recorded
+new value, and a ref matching neither stops recovery for manual
+reconciliation rather than overwriting a change the user made meanwhile. The
+run is marked imported only when every ref matches the manifest.
 
 If a dirty baseline commit exists, prompt:
 
@@ -367,6 +372,9 @@ VM-root nftables rules:
 - Deny IPv4 loopback, link-local (including the metadata address
   `169.254.169.254`), RFC1918, CGNAT (`100.64.0.0/10`), multicast, broadcast,
   and the VM's own gateway and host-side addresses.
+- Additionally deny the Mac's directly connected on-link prefixes, gathered
+  at VM start/resume, so a LAN using globally routed IPv4 space is still
+  covered; fail closed if they cannot be determined.
 - Allow one exact exception: the inference broker relay address and port.
 - Deny inbound connections except the per-run SSH endpoint.
 - Allow everything else, over any protocol.
@@ -437,6 +445,14 @@ Lima SSH supports static forwarding), the VM exposes a single dedicated relay
 address and port to containers — the firewall's one exception — and the relay
 speaks only the standard inference API, requires the run-scoped capability,
 and cannot reach any other host address or port.
+
+Relay implementation notes: the reverse forward binds only the dedicated
+container-reachable VM address, with `sshd` configured to permit exactly that
+binding, and the firewall must admit it in every hook the rootless `pasta`
+connection traverses. The relay closes when the controller exits, rejects
+capabilities of stopped runs immediately (resume issues a fresh one), and
+fails closed on unknown paths or methods, oversized requests, and any attempt
+to use it as a general proxy.
 
 Untrusted code can consume inference while its run is active, because Pi must
 be able to do so, but it cannot extract the reusable OAuth token. A simple
@@ -598,10 +614,13 @@ The first usable release should prove:
 3. Container escape into the VM user still finds no host filesystem mount.
 4. No `pisafe`-supplied credential other than the run-scoped inference
    capability is readable in the VM or container: no Keychain or provider
-   refresh/access tokens, no `gh` token, no SSH keys, no cloud credentials.
-5. The Mac, LAN, link-local, metadata, and loopback destinations are
+   refresh/access tokens, no `gh` token, no host-user SSH private key or
+   forwarded agent, no cloud credentials. (Sandbox SSH host keys and
+   authorized public keys are expected.)
+5. The Mac, LAN, link-local, metadata, and VM- and Mac-loopback services are
    unreachable from a run — including via DNS names resolving to them, raw
-   TCP/UDP, numeric IPs, and redirects — while the broker relay works.
+   TCP/UDP, numeric IPs, and redirects — while container-local loopback and
+   the broker relay work.
 6. `npm install` and a public GitHub clone work with no prompt; a push to the
    user's repository fails because no host credential is ever offered.
 7. Zed terminal and Pi see the same staged files and toolchain.
@@ -626,7 +645,8 @@ The first usable release should prove:
   submodules, sessions, caches, explicitly included files, and run outputs —
   can be exfiltrated to any internet destination, silently. This is the
   deliberate trade of open egress and is acceptable only while the projects
-  involved are non-secret and no credentials enter runs.
+  involved are non-confidential and no reusable user credential is supplied
+  to the run, except through the explicitly unsafe override.
 - Open egress also permits outbound abuse — scanning, spam, cryptomining,
   bandwidth waste — that harms third parties or the connection's reputation
   rather than the user's data. Static bandwidth/connection caps, or
@@ -662,7 +682,6 @@ The first usable release should prove:
 - Lima SSH: <https://lima-vm.io/docs/usage/ssh/>
 - Podman machine volume behavior:  
   <https://docs.podman.io/en/latest/markdown/podman-machine-init.1.html>
-- Podman rootless `pasta` networking:  
-  <https://docs.podman.io/en/stable/markdown/podman-network.1.html>
+- Podman rootless `pasta` networking: <https://docs.podman.io/en/stable/markdown/podman-network.1.html>
 - Zed Remote Development: <https://zed.dev/docs/remote-development>
 
