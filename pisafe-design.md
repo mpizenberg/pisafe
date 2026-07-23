@@ -26,8 +26,10 @@ The recommended design is:
 This deliberately trades exfiltration resistance for simplicity and zero
 network prompts. Pi can edit files, browse, download, and install anything
 without asking. The security boundary instead guarantees two things: a run
-cannot touch the Mac or the original checkout, and a run holds no credentials,
-so it cannot act as the user anywhere. An earlier draft of this design
+cannot touch the Mac or the original checkout, and `pisafe` never hands a run
+any reusable user credential, so nothing it executes can act as the user. The
+only credential `pisafe` creates is a revocable, run-scoped inference
+capability. An earlier draft of this design
 included a dynamic approval proxy and a GitHub credential broker; they were
 removed as a maintenance and interruption cost disproportionate to the mostly
 public, non-secret projects this tool targets.
@@ -42,12 +44,14 @@ public, non-secret projects this tool targets.
 - The staged files must be viewable and editable in Zed.
 - Zed Remote SSH is acceptable.
 - `git push`, publishing, deployment, and cloud CLI mutations must not happen
-  autonomously. Satisfied structurally: no credentials exist in the sandbox,
-  so these operations are only possible from the Mac, by the user.
+  as the user autonomously. Satisfied structurally: `pisafe` supplies no user
+  credentials to the sandbox, so acting on the user's accounts is only
+  possible from the Mac. Code may still write anonymously or with credentials
+  it carries itself; that is part of the accepted exfiltration surface.
 - Public GitHub and general internet reads are automatic (open egress).
-- Private GitHub repositories and registries are not reachable from inside a
-  run. If this becomes a real need, it reopens the credential-broker question
-  and is out of scope for now.
+- The user's private GitHub repositories and registries are unavailable
+  through `pisafe`. If this becomes a real need, it reopens the
+  credential-broker question and is out of scope for now.
 - Package and tool installation needs no approval; it downloads over the open
   network into the sandbox.
 - Global tools may persist inside the isolated environment; installation and
@@ -112,7 +116,8 @@ macOS
         ├── staged Git repository
         ├── run-local writable home
         ├── Zed remote server, terminal, tasks, and language servers
-        └── no credentials of any kind
+        └── no reusable user credentials; only a run-scoped
+            inference capability
 ```
 
 ### VM backend
@@ -206,8 +211,11 @@ screenshots that do not belong in Git history — after showing exactly what
 will be copied. Because `cp` writes to the Mac from untrusted content, it must
 reject absolute and `..` paths, escaping symlinks and hard links, and special
 files, must not write through existing destination symlinks, and must confirm
-before overwriting. `discard` is explicit and destructive, so it identifies
-the exact run before deleting it.
+before overwriting. It also enforces limits on total expanded bytes, file
+count, and individual file size, and extracts with
+directory-descriptor-relative operations so the destination cannot be swapped
+for a symlink mid-copy. `discard` is explicit and destructive, so it
+identifies the exact run before deleting it.
 
 ## Staging and Git behavior
 
@@ -232,9 +240,11 @@ should say so when it happens.
 Untracked and ignored inputs are not silently copied. Selection should show
 file names, types, and sizes, reject special files and escaping symlinks, and
 warn about likely secrets. A file that looks like a secret, such as `.env`,
-may still be included when the user insists; the warning must state that
-everything in the run — dependencies, extensions, and downloaded code — can
-read it. Explicitly included input files become part of the baseline commit.
+may still be included when the user insists, but the prompt must present it
+as an unsafe override: under open egress, everything in the run —
+dependencies, extensions, and downloaded code — can read, use, and exfiltrate
+those credentials, so including one voids the run's credential isolation.
+Explicitly included input files become part of the baseline commit.
 
 ### Submodules
 
@@ -244,8 +254,9 @@ layout in the staged repository; uninitialized submodules stay uninitialized.
 `pisafe apply` imports the superproject branch and the referenced submodule
 histories into the corresponding local repositories, creating a
 `pisafe/<run>` ref in each changed submodule so its commits stay reachable,
-and reports which submodule commits the imported branch expects. Verify all
-transfers before updating any repository's refs.
+and reports which submodule commits the imported branch expects. Ref updates
+across the superproject and submodules follow the journaled `apply` protocol
+below.
 
 Git LFS is explicitly out of scope for now; a repository using it should be
 detected and refused with a clear message rather than staged incompletely.
@@ -275,6 +286,14 @@ The branch is transferred as an incremental Git bundle containing only
 commits new since the captured HEAD, fetched into a temporary ref and moved
 into place only after verification, so an interrupted transfer cannot leave a
 partial branch. Preserve the agent's commits individually.
+
+Because superproject and submodule refs live in separate repositories with no
+cross-repository transaction, `apply` is journaled and idempotent: import and
+verify every object set first, record the intended old/new refs in the run
+manifest, then update refs one repository at a time. An interrupted `apply`
+either finishes the recorded operation or restores the recorded old refs on
+the next attempt, and the run is marked imported only when every ref matches
+the manifest.
 
 If a dirty baseline commit exists, prompt:
 
@@ -327,37 +346,61 @@ available updates rather than applying them automatically.
 
 Per-project sessions meet the persistence requirement without allowing one
 project to read another project's transcripts by default. Each run starts
-from a snapshot of the project's session store and writes to a run-local
-session directory that is merged back when the run stops, so concurrent runs
-never read one another's live transcripts.
+from an immutable snapshot of the project's session store and writes new
+run-specific session IDs to a run-local directory; on stop, new IDs are
+appended to the project store and an existing ID is never overwritten.
+Concurrent runs never read one another's live transcripts.
 
-Per-project dependency caches need locking or a run-local overlay so that two
-concurrent installs cannot corrupt them.
+Per-project dependency caches are mounted as run-local writable overlays;
+content-addressed entries may be merged back under a lock, while mutable or
+conflicting entries stay run-local. Until this exists (Phase 2), runs get
+private caches rather than a shared writable volume.
 
 ## Network policy
 
 Internet egress is open. There is no proxy, no approval queue, and no
 per-destination policy. The policy is a static packet filter, written once as
-VM-root nftables rules and applied to all container traffic:
+VM-root nftables rules:
 
-- Deny loopback, link-local, cloud-metadata, and RFC1918/LAN destination
-  addresses, including the Mac and anything on the home network.
+- IPv6 is disabled in the VM initially; it can return later with an
+  equivalently tested ruleset.
+- Deny IPv4 loopback, link-local (including the metadata address
+  `169.254.169.254`), RFC1918, CGNAT (`100.64.0.0/10`), multicast, broadcast,
+  and the VM's own gateway and host-side addresses.
+- Allow one exact exception: the inference broker relay address and port.
 - Deny inbound connections except the per-run SSH endpoint.
 - Allow everything else, over any protocol.
+
+Two implementation details are load-bearing:
+
+- Rules must filter all VM egress (output and forward hooks), not only
+  forwarded container packets: rootless Podman's default `pasta` networking
+  emits container traffic from a userspace process in the VM, which a
+  forward-only ruleset never sees.
+- The VM's resolver must be a public DNS server, since the usual default
+  resolver is the private gateway address the deny set blocks. A container
+  may use its own loopback freely; VM and Mac loopback services stay
+  unreachable.
 
 Because filtering happens at the packet level on resolved destination
 addresses, DNS tricks such as rebinding cannot reach denied ranges; a name
 that resolves to a LAN address is simply unreachable. The rules apply
 uniformly to Pi, extensions, shell commands, dependencies, Zed remote
 tooling, and language servers, and there is nothing dynamic to maintain.
+Bypass tests should cover raw TCP and UDP, numeric IPs, DNS answers pointing
+at private ranges, HTTP redirects, and `host.containers.internal`.
 
 The accepted consequence, stated plainly: any code in a run — including a
 malicious dependency — can send anything the run can read to any internet
-destination, without record or interruption. What a run can read is the
-staged project, explicitly included files, and its own outputs. Keeping
-secrets out of runs is therefore the load-bearing control, which is why
-`.env`-style inclusion carries a strong warning and no credentials of any
-kind exist inside the sandbox.
+destination, without record or interruption. A run can read more than the
+working tree: the staged repository's full reachable history, initialized
+submodule histories, project-local Pi resources, its snapshot of prior
+project sessions, the per-project dependency cache, and the read-only global
+profile. The non-confidentiality assumption therefore covers the repository
+*including its history* and persisted project state, not just today's files.
+Keeping secrets out of all of that is the load-bearing control. A best-effort
+warning scan of the tree and selected inputs is useful, but it is a reminder,
+not proof of absence.
 
 If a genuinely secret project ever needs sandboxing, the answer is not to
 bolt approvals back on; it is to run that project with the VM's egress
@@ -388,6 +431,13 @@ API is pre-1.0 and changes often, so any extension code (for example, for the
 capability handshake) stays thin; the `models.json` route is the primary
 integration.
 
+The broker lives on the Mac, which the firewall denies, so its path into runs
+is explicit: the controller opens one reverse SSH relay into the VM (plain
+Lima SSH supports static forwarding), the VM exposes a single dedicated relay
+address and port to containers — the firewall's one exception — and the relay
+speaks only the standard inference API, requires the run-scoped capability,
+and cannot reach any other host address or port.
+
 Untrusted code can consume inference while its run is active, because Pi must
 be able to do so, but it cannot extract the reusable OAuth token. A simple
 per-run concurrency cap and the provider's own subscription limits bound the
@@ -403,16 +453,19 @@ agent socket ever enters the VM or container, and `pisafe` stores no GitHub
 credentials anywhere.
 
 - Public clones, fetches, and API reads work directly over the open network.
-- Private repositories are unreachable from inside a run.
-- Pushing, publishing, and every authenticated mutation happen on the Mac,
-  by the user, typically after `pisafe apply` — exactly as for any local
-  branch.
+- The user's private repositories are unavailable through `pisafe`.
+- Pushing, publishing, and every authenticated mutation as the user happen on
+  the Mac, typically after `pisafe apply` — exactly as for any local branch.
 
-This one decision is what makes open egress acceptable: a run that holds no
-credentials cannot push, publish, or deploy as the user no matter what code
-it executes. The guarantee is structural rather than enforced, so there is
-nothing to test, bypass, or maintain. Copying credentials into the sandbox
-"just for convenience" would silently void it and must remain out of scope.
+This one decision is what makes open egress acceptable: a run that receives
+no user credentials cannot push, publish, or deploy *as the user* no matter
+what code it executes. Malicious code can still write anonymously or use
+credentials it carries itself, reaching whatever those credentials authorize
+— that is part of the accepted exfiltration surface, not a breach of this
+guarantee. The guarantee is structural rather than enforced, so there is
+nothing to test, bypass, or maintain. Copying user credentials into the
+sandbox "just for convenience" would silently void it and must remain out of
+scope.
 
 ## Zed Remote
 
@@ -516,7 +569,9 @@ reusable secret is readable by anything in the sandbox.
 
 The inference broker is in Phase 1 because Pi cannot function without model
 access, and raw credentials must never enter the container, even temporarily.
-Phase 1 is a complete, usable product: everything after it is quality of
+Phase 1 is a complete MVP whose configuration is ephemeral per run:
+persistent extensions, tools, sessions, and caches — and their management
+commands — arrive only in Phase 2. Everything after Phase 1 is quality of
 life, not safety.
 
 ### Phase 2: managed persistence
@@ -541,31 +596,43 @@ The first usable release should prove:
 1. Deleting `/work/<project>` cannot alter the original checkout.
 2. The run cannot read arbitrary `/Users/...` files.
 3. Container escape into the VM user still finds no host filesystem mount.
-4. No credential — ChatGPT token or otherwise — is readable anywhere in the
-   VM or container.
+4. No `pisafe`-supplied credential other than the run-scoped inference
+   capability is readable in the VM or container: no Keychain or provider
+   refresh/access tokens, no `gh` token, no SSH keys, no cloud credentials.
 5. The Mac, LAN, link-local, metadata, and loopback destinations are
-   unreachable from a run, including via DNS names resolving to them.
-6. `npm install` and a public GitHub clone work with no prompt; a push
-   attempt fails for lack of credentials.
+   unreachable from a run — including via DNS names resolving to them, raw
+   TCP/UDP, numeric IPs, and redirects — while the broker relay works.
+6. `npm install` and a public GitHub clone work with no prompt; a push to the
+   user's repository fails because no host credential is ever offered.
 7. Zed terminal and Pi see the same staged files and toolchain.
 8. Dirty baseline keep/drop behavior preserves later commits or fails safely.
 9. `pisafe apply` creates a new local branch and does not touch the current
    index or working tree.
 10. Two simultaneous runs cannot see or overwrite one another.
-11. Interrupted transfer/import cannot create a silently partial branch.
+11. `apply` interrupted at any point, including between per-repository ref
+    updates, either completes or restores prior refs on retry; no silently
+    partial branch or half-updated repository set is possible.
 12. Cleanup never deletes an unimported run without explicit confirmation.
 13. A repository with submodules stages, runs, and applies with superproject
     and submodule commits preserved and reachable via per-submodule
     `pisafe/<run>` refs.
 14. `pisafe cp` refuses traversal paths, escaping symlinks, and special
-    files, and never overwrites without confirmation.
+    files, enforces size and count limits, and never overwrites without
+    confirmation.
 
 ## Residual risks
 
-- Anything a run can read — the staged project, explicitly included files,
-  and run outputs — can be exfiltrated to any internet destination, silently.
-  This is the deliberate trade of open egress and is acceptable only while
-  the projects involved are non-secret and no credentials enter runs.
+- Anything a run can read — the staged project and its full Git history,
+  submodules, sessions, caches, explicitly included files, and run outputs —
+  can be exfiltrated to any internet destination, silently. This is the
+  deliberate trade of open egress and is acceptable only while the projects
+  involved are non-secret and no credentials enter runs.
+- Open egress also permits outbound abuse — scanning, spam, cryptomining,
+  bandwidth waste — that harms third parties or the connection's reputation
+  rather than the user's data. Static bandwidth/connection caps, or
+  restricting ordinary runs to DNS and TCP 80/443, would shrink this without
+  reintroducing prompts; both are optional tightenings, not Phase 1
+  requirements.
 - The selected model provider receives repository content sent as context.
 - A malicious dependency can damage the staged repository or poison its
   per-project cache.
@@ -595,5 +662,7 @@ The first usable release should prove:
 - Lima SSH: <https://lima-vm.io/docs/usage/ssh/>
 - Podman machine volume behavior:  
   <https://docs.podman.io/en/latest/markdown/podman-machine-init.1.html>
+- Podman rootless `pasta` networking:  
+  <https://docs.podman.io/en/stable/markdown/podman-network.1.html>
 - Zed Remote Development: <https://zed.dev/docs/remote-development>
 
