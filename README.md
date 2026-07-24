@@ -74,6 +74,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
 ./pisafe stop RUN
 ./pisafe resume RUN
 ./pisafe discard RUN --confirm RUN
+./pisafe login chatgpt
 ./pisafe broker
 ```
 
@@ -81,10 +82,10 @@ The release layout places `pisafe-guest-linux-arm64` beside `pisafe`. During
 development, `PISAFE_GUEST_HELPER=/absolute/path/to/helper` may select the
 sidecar explicitly. The Containerfile is compiled into the controller.
 
-Pi inference works while `pisafe broker` runs on the Mac. Until
-`pisafe login` exists, the upstream provider is configured through
-`PISAFE_INFERENCE_UPSTREAM`, `PISAFE_INFERENCE_API`, `PISAFE_INFERENCE_KEY`,
-and `PISAFE_INFERENCE_MODELS`; the key never enters the VM or a run.
+Pi inference works while `pisafe broker` runs on the Mac. Run
+`pisafe login chatgpt` once to store a ChatGPT Plus/Pro subscription login in
+the macOS Keychain; the broker refreshes and attaches those tokens itself,
+and no provider credential ever enters the VM or a run.
 
 The gated live suite creates or reuses the dedicated `pisafe` VM and exercises
 the mount, rootless-container, and network boundaries:

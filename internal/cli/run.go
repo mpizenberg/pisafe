@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/mpizenberg/pisafe/internal/broker"
+	"github.com/mpizenberg/pisafe/internal/chatgpt"
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/hostnet"
 	"github.com/mpizenberg/pisafe/internal/lima"
@@ -38,7 +39,7 @@ func runCreate(ctx context.Context, out io.Writer) error {
 			err,
 		)
 	}
-	provider, err := broker.FromEnvironment()
+	provider, err := chatgpt.LoadProvider(ctx)
 	if err != nil {
 		return err
 	}
@@ -130,7 +131,7 @@ func printRunResult(out io.Writer, result runstart.Result, inferenceConfigured b
 	if inferenceConfigured {
 		fmt.Fprintln(out, "Pi:        keep `pisafe broker` running on this Mac to serve inference")
 	} else {
-		fmt.Fprintln(out, "Pi:        inference unavailable; set PISAFE_INFERENCE_* and use pisafe broker")
+		fmt.Fprintln(out, "Pi:        inference unavailable; run pisafe login chatgpt, then pisafe broker")
 	}
 	return nil
 }

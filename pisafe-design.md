@@ -749,12 +749,55 @@ The first usable release should prove:
   not retained because the boundary deliberately grants the VM user no
   firewall-mutation privilege, and one fixed port is all the design needs.
   Changing the port or address requires VM recreation.
-- Until `pisafe login` exists, the broker upstream is configured on the Mac
-  through `PISAFE_INFERENCE_UPSTREAM/API/KEY/MODELS`. Waiting for the OAuth
-  broker before shipping the relay, or injecting a raw credential into runs,
-  were not retained: the environment key stays on the Mac exactly where the
-  future Keychain-backed credential will live, so the boundary is unchanged
-  and the configuration surface is cheap to replace.
+- The relay initially shipped with an interim
+  `PISAFE_INFERENCE_UPSTREAM/API/KEY/MODELS` environment configuration
+  (waiting for the OAuth broker, or injecting a raw credential into runs,
+  were not retained: the environment key stayed on the Mac exactly where the
+  Keychain-backed credential now lives). `pisafe login chatgpt` replaced it
+  entirely; keeping the environment path alongside the Keychain credential
+  was not retained because two configuration surfaces for one upstream would
+  have to be reconciled on every future provider change.
+- The ChatGPT OAuth flow is reimplemented in Go from the pinned Pi AI
+  client's constants (endpoints, client ID, PKCE parameters, refresh
+  request), not run through Node. Shelling out to the Pi package on the Mac
+  was not retained because the controller is dependency-free and the Mac has
+  no pinned Node runtime; the trade is that upstream flow changes must be
+  re-mirrored when the Pi pin moves.
+- Tokens persist in the login keychain through `/usr/bin/security`, written
+  over its interactive stdin and base64-wrapped, with account `chatgpt` and
+  service `pisafe`. Security.framework bindings (cgo) and a broker-only
+  encrypted file were not retained: the CLI keeps the build dependency-free
+  and the Keychain provides at-rest encryption plus user-visible audit.
+  Passing the secret as a command argument was rejected because argv is
+  visible to every local process.
+- Runs speak Pi's `openai-codex-responses` API against the broker. The
+  pinned client refuses an apiKey that does not parse as a JWT carrying a
+  `chatgpt_account_id` claim, so the run capability is wrapped in an
+  unsigned JWT shape whose payload holds only the placeholder account ID
+  `pisafe` and whose signature segment is the capability; the broker strips
+  the wrapper before constant-time matching and always sets the real
+  Authorization and chatgpt-account-id headers itself. Translating between
+  the standard Responses API and the Codex backend inside the broker was not
+  retained because body rewriting would own streaming and tool-call
+  fidelity, which the design explicitly leaves upstream.
+- `pisafe-guest configure-inference` also pins `transport: "sse"` in the
+  run's Pi settings (merging, not replacing, settings Pi wrote itself):
+  Pi's default auto transport dials a WebSocket first, which the HTTP relay
+  cannot speak, and would otherwise pay a failed dial plus diagnostic per
+  session before falling back to SSE.
+- Access tokens refresh proactively inside the broker when within five
+  minutes of expiry, serialized, and the rotated refresh token is persisted
+  before use; a reactive refresh-on-401 path was not retained because the
+  provider rotates refresh tokens and a retry layer would complicate the
+  streaming relay for no additional safety. The browser flow is the only
+  login method; the device-code variant was not retained because the
+  controller always runs on a Mac with a browser.
+- The run-side model list is a curated catalog embedded from the pinned Pi
+  AI Codex data (context windows, cost rates, thinking-level maps) with
+  per-model `api`/`provider`/`baseUrl`/`headers` stripped so a models.json
+  entry can never route a run around the broker. Live catalog refresh from
+  the package was not retained; the catalog moves with the Pi pin in the
+  same commit.
 - Run manifests moved to version 4: the inference capability is a manifest
   field bound to the active state, issued at activation, rotated on resume,
   and cleared on stop/discard. The broker validates every request against the

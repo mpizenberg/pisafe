@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/mpizenberg/pisafe/internal/broker"
+	"github.com/mpizenberg/pisafe/internal/chatgpt"
 	"github.com/mpizenberg/pisafe/internal/hostnet"
 	"github.com/mpizenberg/pisafe/internal/lima"
 	"github.com/mpizenberg/pisafe/internal/runctl"
@@ -73,7 +73,7 @@ func prepareLifecycle(ctx context.Context) (runctl.Controller, error) {
 	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
 		return runctl.Controller{}, fmt.Errorf("pisafe lifecycle commands require macOS on ARM64")
 	}
-	provider, err := broker.FromEnvironment()
+	provider, err := chatgpt.LoadProvider(ctx)
 	if err != nil {
 		return runctl.Controller{}, err
 	}

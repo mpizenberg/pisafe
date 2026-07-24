@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/broker"
+	"github.com/mpizenberg/pisafe/internal/chatgpt"
 	"github.com/mpizenberg/pisafe/internal/hostnet"
 	"github.com/mpizenberg/pisafe/internal/lima"
 	"github.com/mpizenberg/pisafe/internal/runstate"
@@ -22,9 +23,16 @@ func runBroker(ctx context.Context, out io.Writer) error {
 	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
 		return fmt.Errorf("pisafe broker requires macOS on ARM64")
 	}
-	provider, err := broker.FromEnvironment()
+	provider, err := chatgpt.LoadProvider(ctx)
 	if err != nil {
 		return err
+	}
+	if provider != nil {
+		// Force a credential check (and any pending refresh) now so a dead
+		// login fails the broker at startup instead of failing runs later.
+		if _, err := provider.Credentials.UpstreamAuth(ctx); err != nil {
+			return fmt.Errorf("verify the stored ChatGPT login: %w", err)
+		}
 	}
 	prefixes, err := hostnet.OnLinkIPv4(ctx)
 	if err != nil {
@@ -79,8 +87,7 @@ func runBroker(ctx context.Context, out io.Writer) error {
 		fmt.Fprintf(
 			out,
 			"Warning: no upstream provider is configured; runs will receive errors.\n"+
-				"         Set PISAFE_INFERENCE_UPSTREAM, PISAFE_INFERENCE_API,\n"+
-				"         PISAFE_INFERENCE_KEY, and PISAFE_INFERENCE_MODELS, then restart.\n",
+				"         Run pisafe login chatgpt, then restart the broker.\n",
 		)
 	} else {
 		fmt.Fprintf(out, "Relaying %s\n", provider.Describe())

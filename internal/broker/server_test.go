@@ -1,11 +1,11 @@
 package broker
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +23,21 @@ func (runs fakeRuns) List() ([]runstate.Manifest, error) {
 	return runs.manifests, runs.err
 }
 
+type staticCredentials struct {
+	header string
+	value  string
+	err    error
+}
+
+func (credentials staticCredentials) UpstreamAuth(context.Context) (http.Header, error) {
+	if credentials.err != nil {
+		return nil, credentials.err
+	}
+	headers := http.Header{}
+	headers.Set(credentials.header, credentials.value)
+	return headers, nil
+}
+
 func activeRun(runID, capability string) runstate.Manifest {
 	started := time.Now().UTC().Add(-time.Minute)
 	deadline := started.Add(8 * time.Hour)
@@ -33,20 +48,6 @@ func activeRun(runID, capability string) runstate.Manifest {
 		ActiveLimitSeconds:  8 * 60 * 60,
 		ActiveStartedAt:     &started,
 		ActiveDeadline:      &deadline,
-	}
-}
-
-func testProvider(t *testing.T, upstream string, api string) *Provider {
-	t.Helper()
-	parsed, err := url.Parse(upstream)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &Provider{
-		Upstream: parsed,
-		API:      api,
-		Key:      "upstream-secret",
-		Models:   []string{"model-a"},
 	}
 }
 
@@ -295,6 +296,85 @@ func TestServerCapsConcurrentRequestsPerRun(t *testing.T) {
 	waiting.Wait()
 	if status != http.StatusTooManyRequests {
 		t.Fatalf("saturated run status = %d", status)
+	}
+}
+
+// The Codex client authenticates with the JWT-wrapped capability and relies
+// on the broker to replace its placeholder account header with the real one.
+func TestServerRelaysCodexWithAccountHeaderAndForwardsClientHeaders(t *testing.T) {
+	var seen struct {
+		path       string
+		auth       string
+		account    string
+		beta       string
+		encoding   string
+		originator string
+		session    string
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(
+		func(writer http.ResponseWriter, request *http.Request) {
+			seen.path = request.URL.Path
+			seen.auth = request.Header.Get("Authorization")
+			seen.account = request.Header.Get("chatgpt-account-id")
+			seen.beta = request.Header.Get("OpenAI-Beta")
+			seen.encoding = request.Header.Get("Content-Encoding")
+			seen.originator = request.Header.Get("originator")
+			seen.session = request.Header.Get("session-id")
+			writer.WriteHeader(http.StatusOK)
+		},
+	))
+	defer upstream.Close()
+
+	provider := testProvider(t, upstream.URL, APIOpenAICodexResponses)
+	provider.Credentials = codexCredentials{}
+	runs := fakeRuns{manifests: []runstate.Manifest{activeRun("run-a", testCapability())}}
+	server := NewServer(runs, provider)
+
+	wrapped := provider.runAPIKey(testCapability())
+	request := httptest.NewRequest(http.MethodPost, "/codex/responses", strings.NewReader("{}"))
+	request.Header.Set("Authorization", "Bearer "+wrapped)
+	request.Header.Set("chatgpt-account-id", "pisafe")
+	request.Header.Set("OpenAI-Beta", "responses=experimental")
+	request.Header.Set("Content-Encoding", "zstd")
+	request.Header.Set("originator", "pi")
+	request.Header.Set("session-id", "session-1")
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", recorder.Code, recorder.Body)
+	}
+	if seen.path != "/codex/responses" ||
+		seen.auth != "Bearer real-access-token" ||
+		seen.account != "real-account-id" {
+		t.Fatalf("upstream saw %#v", seen)
+	}
+	if seen.beta != "responses=experimental" || seen.encoding != "zstd" ||
+		seen.originator != "pi" || seen.session != "session-1" {
+		t.Fatalf("client headers were not forwarded: %#v", seen)
+	}
+}
+
+type codexCredentials struct{}
+
+func (codexCredentials) UpstreamAuth(context.Context) (http.Header, error) {
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer real-access-token")
+	headers.Set("Chatgpt-Account-Id", "real-account-id")
+	return headers, nil
+}
+
+func TestServerFailsClosedWhenCredentialsUnavailable(t *testing.T) {
+	provider := testProvider(t, "https://upstream.example", APIAnthropicMessages)
+	provider.Credentials = staticCredentials{err: errors.New("refresh failed")}
+	runs := fakeRuns{manifests: []runstate.Manifest{activeRun("run-a", testCapability())}}
+	server := NewServer(runs, provider)
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, requestWithKey(testCapability()))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	if strings.Contains(recorder.Body.String(), "refresh failed") {
+		t.Fatalf("error detail leaked to the run: %s", recorder.Body)
 	}
 }
 

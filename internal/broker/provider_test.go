@@ -1,78 +1,52 @@
 package broker
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"net/url"
 	"strings"
 	"testing"
 )
-
-func setProviderEnvironment(t *testing.T, upstream, api, key, models string) {
-	t.Helper()
-	t.Setenv(upstreamEnvironment, upstream)
-	t.Setenv(apiEnvironment, api)
-	t.Setenv(keyEnvironment, key)
-	t.Setenv(modelsEnvironment, models)
-}
 
 func testCapability() string {
 	return "pisafe-cap-" + strings.Repeat("ab", 32)
 }
 
-func TestFromEnvironmentUnsetMeansNoProvider(t *testing.T) {
-	setProviderEnvironment(t, "", "", "", "")
-	provider, err := FromEnvironment()
-	if err != nil || provider != nil {
-		t.Fatalf("provider = %#v, err = %v", provider, err)
+func testModels(ids ...string) []json.RawMessage {
+	models := make([]json.RawMessage, 0, len(ids))
+	for _, id := range ids {
+		models = append(models, json.RawMessage(`{"id":"`+id+`"}`))
 	}
+	return models
 }
 
-func TestFromEnvironmentRejectsPartialOrInvalidConfiguration(t *testing.T) {
-	for name, environment := range map[string][4]string{
-		"missing key":    {"https://api.anthropic.com", APIAnthropicMessages, "", "claude-x"},
-		"missing models": {"https://api.anthropic.com", APIAnthropicMessages, "secret", ""},
-		"unknown api":    {"https://api.anthropic.com", "grpc", "secret", "claude-x"},
-		"plain http":     {"http://api.anthropic.com", APIAnthropicMessages, "secret", "claude-x"},
-		"query upstream": {"https://api.anthropic.com?x=1", APIAnthropicMessages, "secret", "claude-x"},
-		"userinfo":       {"https://user@api.anthropic.com", APIAnthropicMessages, "secret", "claude-x"},
-		"bad model":      {"https://api.anthropic.com", APIAnthropicMessages, "secret", "model with space"},
-		"newline in key": {"https://api.anthropic.com", APIAnthropicMessages, "se\ncret", "claude-x"},
-		"only commas":    {"https://api.anthropic.com", APIAnthropicMessages, "secret", ", ,"},
-	} {
-		setProviderEnvironment(t, environment[0], environment[1], environment[2], environment[3])
-		if _, err := FromEnvironment(); err == nil {
-			t.Errorf("%s was accepted", name)
-		}
-	}
-}
-
-func TestFromEnvironmentAllowsLoopbackHTTPForTesting(t *testing.T) {
-	setProviderEnvironment(
-		t,
-		"http://127.0.0.1:8999",
-		APIOpenAICompletions,
-		"secret",
-		"model-a, model-b",
-	)
-	provider, err := FromEnvironment()
+func testProvider(t *testing.T, upstream string, api string) *Provider {
+	t.Helper()
+	parsed, err := url.Parse(upstream)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(provider.Models) != 2 || provider.Models[0] != "model-a" {
-		t.Fatalf("models = %#v", provider.Models)
+	header := "Authorization"
+	value := "Bearer upstream-secret"
+	if api == APIAnthropicMessages {
+		header, value = "X-Api-Key", "upstream-secret"
+	}
+	return &Provider{
+		Upstream:    parsed,
+		API:         api,
+		Models:      testModels("model-a"),
+		Credentials: staticCredentials{header: header, value: value},
 	}
 }
 
 func TestCanonicalPathAndEndpointPerAPI(t *testing.T) {
 	for api, expected := range map[string][2]string{
-		APIAnthropicMessages: {"/v1/messages", "https://upstream.example/v1/messages"},
-		APIOpenAICompletions: {"/v1/chat/completions", "https://upstream.example/v1/chat/completions"},
-		APIOpenAIResponses:   {"/v1/responses", "https://upstream.example/v1/responses"},
+		APIAnthropicMessages:    {"/v1/messages", "https://upstream.example/v1/messages"},
+		APIOpenAICompletions:    {"/v1/chat/completions", "https://upstream.example/v1/chat/completions"},
+		APIOpenAIResponses:      {"/v1/responses", "https://upstream.example/v1/responses"},
+		APIOpenAICodexResponses: {"/codex/responses", "https://upstream.example/codex/responses"},
 	} {
-		setProviderEnvironment(t, "https://upstream.example/", api, "secret", "model-a")
-		provider, err := FromEnvironment()
-		if err != nil {
-			t.Fatal(err)
-		}
+		provider := testProvider(t, "https://upstream.example", api)
 		if provider.CanonicalPath() != expected[0] {
 			t.Errorf("%s path = %q", api, provider.CanonicalPath())
 		}
@@ -83,20 +57,15 @@ func TestCanonicalPathAndEndpointPerAPI(t *testing.T) {
 }
 
 func TestModelsJSONContainsOnlyTheRunCapability(t *testing.T) {
-	setProviderEnvironment(
-		t,
-		"https://api.anthropic.com",
-		APIAnthropicMessages,
-		"upstream-secret",
-		"claude-x",
-	)
-	provider, err := FromEnvironment()
-	if err != nil {
-		t.Fatal(err)
-	}
+	provider := testProvider(t, "https://api.anthropic.com", APIAnthropicMessages)
 	if _, err := provider.ModelsJSON("garbage"); err == nil {
 		t.Fatal("invalid capability was accepted")
 	}
+	provider.Models = nil
+	if _, err := provider.ModelsJSON(testCapability()); err == nil {
+		t.Fatal("provider without models was accepted")
+	}
+	provider.Models = testModels("claude-x")
 	content, err := provider.ModelsJSON(testCapability())
 	if err != nil {
 		t.Fatal(err)
@@ -129,22 +98,56 @@ func TestModelsJSONContainsOnlyTheRunCapability(t *testing.T) {
 	}
 
 	// The OpenAI clients expect the /v1 prefix inside the base URL.
-	setProviderEnvironment(
-		t,
-		"https://api.openai.com",
-		APIOpenAIResponses,
-		"upstream-secret",
-		"gpt-x",
-	)
-	provider, err = FromEnvironment()
-	if err != nil {
-		t.Fatal(err)
-	}
+	provider = testProvider(t, "https://api.openai.com", APIOpenAIResponses)
 	content, err = provider.ModelsJSON(testCapability())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(content), `"baseUrl": "http://192.0.2.1:18080/v1"`) {
 		t.Fatalf("content = %s", content)
+	}
+}
+
+// The pinned Pi Codex client requires a JWT-shaped apiKey carrying a
+// chatgpt_account_id claim it can decode with atob, and appends
+// /codex/responses to the base URL itself.
+func TestModelsJSONWrapsCodexCapabilityAsJWT(t *testing.T) {
+	provider := testProvider(t, "https://chatgpt.com/backend-api", APIOpenAICodexResponses)
+	content, err := provider.ModelsJSON(testCapability())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Providers map[string]struct {
+			BaseURL string `json:"baseUrl"`
+			APIKey  string `json:"apiKey"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(content, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	entry := parsed.Providers["pisafe"]
+	if entry.BaseURL != "http://192.0.2.1:18080" {
+		t.Fatalf("baseUrl = %q", entry.BaseURL)
+	}
+	parts := strings.Split(entry.APIKey, ".")
+	if len(parts) != 3 || parts[2] != testCapability() {
+		t.Fatalf("apiKey = %q", entry.APIKey)
+	}
+	payload, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("payload does not decode: %v", err)
+	}
+	var claims map[string]struct {
+		ChatGPTAccountID string `json:"chatgpt_account_id"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatal(err)
+	}
+	if claims["https://api.openai.com/auth"].ChatGPTAccountID != "pisafe" {
+		t.Fatalf("claims = %#v", claims)
+	}
+	if presentedCapability(entry.APIKey) != testCapability() {
+		t.Fatalf("unwrapped = %q", presentedCapability(entry.APIKey))
 	}
 }

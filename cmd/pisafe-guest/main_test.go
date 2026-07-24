@@ -205,6 +205,65 @@ func TestConfigureInferenceInstallsAndReplacesModelsConfig(t *testing.T) {
 	}
 }
 
+func TestConfigureInferencePinsSSETransportPreservingSettings(t *testing.T) {
+	home := t.TempDir()
+	models := `{"providers":{}}`
+	settingsPath := filepath.Join(home, ".pi", "agent", "settings.json")
+
+	if err := configureInference(home, strings.NewReader(models)); err != nil {
+		t.Fatal(err)
+	}
+	assertSettings := func(expected map[string]any) {
+		t.Helper()
+		content, err := os.ReadFile(settingsPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(settingsPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("settings.json mode = %#o", info.Mode().Perm())
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal(content, &parsed); err != nil {
+			t.Fatal(err)
+		}
+		if len(parsed) != len(expected) {
+			t.Fatalf("settings = %v, want %v", parsed, expected)
+		}
+		for key, value := range expected {
+			if parsed[key] != value {
+				t.Fatalf("settings[%q] = %v, want %v", key, parsed[key], value)
+			}
+		}
+	}
+	assertSettings(map[string]any{"transport": "sse"})
+
+	// Settings Pi wrote during the run survive the resume-time rewrite.
+	if err := os.WriteFile(
+		settingsPath,
+		[]byte(`{"theme":"dark","transport":"auto"}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := configureInference(home, strings.NewReader(models)); err != nil {
+		t.Fatal(err)
+	}
+	assertSettings(map[string]any{"theme": "dark", "transport": "sse"})
+
+	// A corrupt settings file is replaced instead of breaking resume.
+	if err := os.WriteFile(settingsPath, []byte("{corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := configureInference(home, strings.NewReader(models)); err != nil {
+		t.Fatal(err)
+	}
+	assertSettings(map[string]any{"transport": "sse"})
+}
+
 func TestConfigureInferenceFailsClosed(t *testing.T) {
 	for name, input := range map[string]string{
 		"not json":   "providers",

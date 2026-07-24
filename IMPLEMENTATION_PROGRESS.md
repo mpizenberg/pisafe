@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-07-24
+Last updated: 2026-07-25
 
 This file is the durable handoff for continuing `pisafe` from a fresh session.
 The design authority remains [`pisafe-design.md`](pisafe-design.md); this file
@@ -9,7 +9,7 @@ next.
 
 ## Current milestone
 
-Phase 1 is in progress. Seven implementation slices now exist:
+Phase 1 is in progress. Eight implementation slices now exist:
 
 1. The Go controller skeleton and single-repository Git isolation core.
 2. The dedicated Lima VM backend, host-network discovery, and initial static
@@ -28,6 +28,10 @@ Phase 1 is in progress. Seven implementation slices now exist:
    revocable capabilities in the manifest lifecycle, the Mac-side `pisafe
    broker` relay with fail-closed request contract, and run-side Pi provider
    configuration.
+8. `pisafe login chatgpt`: the ChatGPT subscription OAuth flow with macOS
+   Keychain persistence, the Codex upstream with broker-side token refresh,
+   and the curated run-side model catalog. This replaced the interim
+   `PISAFE_INFERENCE_*` environment configuration.
 
 `pisafe run` now uses the tested mountless path and materializes inside private
 quota-backed VM storage. Do not add a local-workspace fallback.
@@ -226,15 +230,14 @@ quota-backed VM storage. Do not add a local-workspace fallback.
   run is rejected immediately with the same uniform 401. Matching is
   constant-time over SHA-256 digests.
 - The relay accepts exactly one method and path derived from the configured
-  API (`POST /v1/messages`, `/v1/chat/completions`, or `/v1/responses`),
-  rejects unknown paths/methods, caps request bodies at 64 MiB, caps each run
-  at 4 concurrent upstream requests, refuses upstream redirects, and streams
-  responses (SSE-safe flushing) without rewriting them.
-- Until `pisafe login` exists, the upstream is configured on the Mac through
-  `PISAFE_INFERENCE_UPSTREAM`, `PISAFE_INFERENCE_API` (`anthropic-messages`,
-  `openai-completions`, or `openai-responses`), `PISAFE_INFERENCE_KEY`, and
-  `PISAFE_INFERENCE_MODELS` (comma-separated IDs). HTTPS is required except
-  for loopback test upstreams.
+  API (`POST /v1/messages`, `/v1/chat/completions`, `/v1/responses`, or
+  `/codex/responses`), rejects unknown paths/methods, caps request bodies at
+  64 MiB, caps each run at 4 concurrent upstream requests, refuses upstream
+  redirects, and streams responses (SSE-safe flushing) without rewriting
+  them. Client Content-Type/Accept/Content-Encoding, the Anthropic and
+  OpenAI beta/version headers, originator, session-id, x-client-request-id,
+  and User-Agent are forwarded; credentials never are, because the broker
+  sets its own from a per-request credential source.
 - `pisafe broker` runs in the foreground: it verifies the VM boundary, serves
   the relay on an ephemeral `127.0.0.1` port, and publishes it at
   `192.0.2.1:18080` inside the VM through a dedicated
@@ -245,13 +248,40 @@ quota-backed VM storage. Do not add a local-workspace fallback.
   from inside the VM.
 - Run creation and resume exec `pisafe-guest configure-inference`, which
   atomically installs a validated `~/.pi/agent/models.json` (mode 0600) whose
-  `apiKey` is the run's current capability. The pinned Pi clients were
-  inspected to fix the base URLs: `http://192.0.2.1:18080` for
-  anthropic-messages and `http://192.0.2.1:18080/v1` for the OpenAI APIs.
-- The upstream auth header matches the API (`x-api-key` for
-  anthropic-messages, `Authorization: Bearer` otherwise); client auth headers
-  are never forwarded upstream, and the relay works whether Pi presents the
-  capability as `x-api-key` or a Bearer token.
+  `apiKey` is the run's current capability, and pins `transport: "sse"` in
+  the run's Pi settings (merging, because Pi writes that file too) since
+  Pi's default auto transport dials a WebSocket the HTTP relay cannot speak.
+  The pinned Pi clients were inspected to fix the base URLs:
+  `http://192.0.2.1:18080` for anthropic-messages and the Codex API,
+  `http://192.0.2.1:18080/v1` for the standard OpenAI APIs.
+- The relay accepts the capability as `x-api-key`, a Bearer token, or the
+  JWT-wrapped Bearer token the Codex client requires (the capability rides
+  as the signature segment and is stripped before constant-time matching).
+
+### ChatGPT subscription login
+
+- `pisafe login chatgpt` runs the browser OAuth flow: PKCE S256 against
+  `auth.openai.com` with the exact client ID, scope, redirect URI
+  (`localhost:1455`), and authorize parameters of the pinned Pi AI client;
+  the callback page is served locally with escaped output and a strict state
+  check, and the code exchange yields access/refresh tokens plus the ChatGPT
+  account ID extracted from the access-token JWT claim.
+- The credential persists in the login keychain (`security` service
+  `pisafe`, account `chatgpt`), written over `/usr/bin/security`'s
+  interactive stdin base64-wrapped so tokens never appear in argv. A missing
+  item maps to a distinct not-logged-in error that the CLI turns into a
+  `pisafe login chatgpt` prompt.
+- The broker holds a serialized credential source: access tokens refresh
+  proactively within five minutes of expiry and the rotated refresh token is
+  persisted before use. `pisafe broker` forces one credential check at
+  startup so a dead login fails there, loudly, not inside runs. Upstream
+  requests to `https://chatgpt.com/backend-api/codex/responses` carry
+  `Authorization: Bearer` plus the real `chatgpt-account-id`; the run only
+  ever sees the placeholder account ID `pisafe` in its wrapped capability.
+- Runs receive a curated model catalog embedded from the pinned Pi AI Codex
+  data (context windows, cost rates, thinking-level maps) with per-model
+  `api`/`provider`/`baseUrl`/`headers` stripped so models.json can never
+  route a run around the broker.
 
 ### Run records and internal controller
 
@@ -314,9 +344,10 @@ Current package coverage at this milestone:
 
 ```text
 pisafe        0.0%
-pisafe-guest  56.9%
+pisafe-guest  59.9%
 broker        96.2%
-cli           20.3%
+chatgpt       70.1%
+cli           19.1%
 gitstage      68.8%
 hostnet       50.0%
 lima          68.0%
@@ -334,6 +365,13 @@ records (unknown, malformed, stopped, and deadline-exhausted capabilities all
 return the same 401), missing-provider 503, method/path/oversize fail-closed
 responses, upstream credential injection without leaking the client header,
 SSE streaming fidelity, redirect refusal, and the per-run concurrency cap.
+The Codex path additionally covers the JWT-wrapped capability, the
+account-id header replacement, forwarded client headers, and the 503 (with
+no detail leak) when credentials cannot be refreshed. The chatgpt package
+covers the full login exchange and state rejection against a stub token
+endpoint, proactive refresh with persistence of the rotated refresh token,
+Keychain round-trips through a fake `security` runner, and the embedded
+catalog's no-routing-override invariant.
 
 The generated YAML is checked by the installed Lima validator in the normal
 test suite.
@@ -521,14 +559,13 @@ sandboxed result.
 - Selected untracked/ignored input archive handling is missing.
 - Submodule staging and journaled multi-repository apply are missing.
 - The relay and capability are live-verified against a loopback stub
-  upstream; the real provider handshake remains untested until `pisafe login`
-  exists.
-- No ChatGPT OAuth or Keychain integration exists yet. The interim
-  `PISAFE_INFERENCE_*` environment configuration keeps the key on the Mac but
-  is meant to be replaced by `pisafe login` backed by `pi-ai` OAuth and the
-  Keychain.
-- Broker model entries carry only IDs; context-window and cost metadata fall
-  back to Pi's defaults until the login flow curates them.
+  upstream, but the ChatGPT login flow, Keychain persistence, token refresh,
+  and the real Codex handshake are covered only by unit tests against stubs;
+  none of it has run against the real provider yet.
+- The OAuth flow and the embedded model catalog mirror the pinned Pi AI
+  0.82.0 client; both must be re-checked whenever the Pi pin moves, and the
+  subscription backend can change underneath them (inference then fails
+  closed and loudly).
 - While no broker is connected, a process escaped to the unprivileged VM user
   could bind `192.0.2.1:18080` itself. It gains nothing beyond what that user
   already has (it relays pasta traffic and can read run storage), and a real
@@ -550,10 +587,12 @@ sandboxed result.
 
 Continue Phase 1 without weakening the boundary:
 
-1. Implement `pisafe login chatgpt`: the `pi-ai`-based OAuth broker upstream
-   with Keychain persistence, replacing the `PISAFE_INFERENCE_*` interim
-   configuration. Its live check doubles as the first real-upstream
-   inference test through the broker.
+1. Live-verify the ChatGPT slice end to end with a real subscription:
+   `pisafe login chatgpt`, broker startup credential check, and a run whose
+   Pi answers through the Codex relay. This doubles as the first
+   real-upstream inference test. The guest helper changed (settings pin), so
+   the next `pisafe run` builds a new managed image; the e2e test command
+   above then needs its new immutable ID.
 2. Then add selected untracked inputs and submodule-aware journaled apply
    before exposing `pisafe apply`.
 3. Add `diff`, hardened `cp`, and seven-day GC after the apply transaction is

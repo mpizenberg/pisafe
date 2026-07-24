@@ -25,7 +25,24 @@ const (
 	anthropicKeyHeader   = "X-Api-Key"
 	unauthorizedMessage  = "unknown, stopped, or expired run capability"
 	unconfiguredUpstream = "no upstream inference provider is configured on the Mac"
+	credentialFailure    = "upstream inference credentials are unavailable on the Mac"
 )
+
+// forwardedRequestHeaders is the complete set of client headers the relay
+// passes upstream; credentials are never among them because the broker sets
+// its own.
+var forwardedRequestHeaders = []string{
+	"Content-Type",
+	"Content-Encoding",
+	"Accept",
+	"Anthropic-Version",
+	"Anthropic-Beta",
+	"OpenAI-Beta",
+	"Originator",
+	"Session-Id",
+	"X-Client-Request-Id",
+	"User-Agent",
+}
 
 // RunSource yields the current durable run records. The broker reads them on
 // every request so a stopped or discarded run is rejected immediately.
@@ -108,20 +125,18 @@ func (server *Server) relay(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	upstream.ContentLength = request.ContentLength
-	for _, header := range []string{
-		"Content-Type",
-		"Accept",
-		"Anthropic-Version",
-		"Anthropic-Beta",
-	} {
+	for _, header := range forwardedRequestHeaders {
 		if value := request.Header.Get(header); value != "" {
 			upstream.Header.Set(header, value)
 		}
 	}
-	if server.provider.API == APIAnthropicMessages {
-		upstream.Header.Set(anthropicKeyHeader, server.provider.Key)
-	} else {
-		upstream.Header.Set(authorizationHeader, bearerPrefix+server.provider.Key)
+	credentials, err := server.provider.Credentials.UpstreamAuth(request.Context())
+	if err != nil {
+		server.writeError(writer, http.StatusServiceUnavailable, credentialFailure)
+		return
+	}
+	for header, values := range credentials {
+		upstream.Header[header] = values
 	}
 
 	response, err := server.client.Do(upstream)
@@ -167,6 +182,7 @@ func (server *Server) authorize(request *http.Request) (string, bool) {
 			capability = strings.TrimPrefix(bearer, bearerPrefix)
 		}
 	}
+	capability = presentedCapability(capability)
 	if !runstate.ValidInferenceCapability(capability) {
 		return "", false
 	}

@@ -77,7 +77,9 @@ func usageError() error {
 
 // configureInference replaces ~/.pi/agent/models.json with the content piped
 // from the Mac controller. It replaces atomically because resume rotates the
-// run capability while Pi may already be installed and configured.
+// run capability while Pi may already be installed and configured. It also
+// pins Pi's transport to SSE: the default auto transport first dials a
+// WebSocket, which the broker's HTTP relay cannot speak.
 func configureInference(home string, in io.Reader) error {
 	content, err := io.ReadAll(io.LimitReader(in, modelsConfigSizeLimit+1))
 	if err != nil {
@@ -100,10 +102,48 @@ func configureInference(home string, in io.Reader) error {
 	if err := os.MkdirAll(agentDirectory, 0o700); err != nil {
 		return fmt.Errorf("create Pi agent directory: %w", err)
 	}
-	target := filepath.Join(agentDirectory, "models.json")
-	temporary, err := os.CreateTemp(agentDirectory, ".models-*.tmp")
+	if err := writeAgentFile(agentDirectory, "models.json", content); err != nil {
+		return err
+	}
+	settings, err := pinnedTransportSettings(filepath.Join(agentDirectory, "settings.json"))
 	if err != nil {
-		return fmt.Errorf("create temporary models configuration: %w", err)
+		return err
+	}
+	if settings == nil {
+		return nil
+	}
+	return writeAgentFile(agentDirectory, "settings.json", settings)
+}
+
+// pinnedTransportSettings merges transport=sse into the existing settings,
+// returning nil when the pin is already in place. Settings Pi wrote during
+// the run are preserved; an unreadable file is replaced rather than allowed
+// to break resume.
+func pinnedTransportSettings(path string) ([]byte, error) {
+	settings := map[string]any{}
+	if existing, err := os.ReadFile(path); err == nil &&
+		int64(len(existing)) <= modelsConfigSizeLimit {
+		var parsed map[string]any
+		if json.Unmarshal(existing, &parsed) == nil {
+			settings = parsed
+		}
+	}
+	if settings["transport"] == "sse" {
+		return nil, nil
+	}
+	settings["transport"] = "sse"
+	merged, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encode agent settings: %w", err)
+	}
+	return append(merged, '\n'), nil
+}
+
+func writeAgentFile(agentDirectory, name string, content []byte) error {
+	target := filepath.Join(agentDirectory, name)
+	temporary, err := os.CreateTemp(agentDirectory, "."+name+"-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary %s: %w", name, err)
 	}
 	temporaryPath := temporary.Name()
 	complete := false
@@ -114,19 +154,19 @@ func configureInference(home string, in io.Reader) error {
 		}
 	}()
 	if err := temporary.Chmod(0o600); err != nil {
-		return fmt.Errorf("restrict models configuration: %w", err)
+		return fmt.Errorf("restrict %s: %w", name, err)
 	}
 	if _, err := temporary.Write(content); err != nil {
-		return fmt.Errorf("write models configuration: %w", err)
+		return fmt.Errorf("write %s: %w", name, err)
 	}
 	if err := temporary.Sync(); err != nil {
-		return fmt.Errorf("sync models configuration: %w", err)
+		return fmt.Errorf("sync %s: %w", name, err)
 	}
 	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close models configuration: %w", err)
+		return fmt.Errorf("close %s: %w", name, err)
 	}
 	if err := os.Rename(temporaryPath, target); err != nil {
-		return fmt.Errorf("install models configuration: %w", err)
+		return fmt.Errorf("install %s: %w", name, err)
 	}
 	complete = true
 	return nil
