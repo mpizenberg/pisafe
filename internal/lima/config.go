@@ -1,6 +1,8 @@
 package lima
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -38,6 +40,7 @@ func RenderConfig(options ConfigOptions) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	securityProfile := securityProfileDigest(prefixes)
 
 	replacements := strings.NewReplacer(
 		"@@CPUS@@", fmt.Sprintf("%d", options.CPUs),
@@ -45,8 +48,22 @@ func RenderConfig(options ConfigOptions) ([]byte, error) {
 		"@@DISK@@", fmt.Sprintf("%dGiB", options.DiskGiB),
 		"@@HOST_PREFIXES@@", strings.Join(prefixes, ", "),
 		"@@HOST_PREFIX_LINES@@", strings.Join(prefixes, "\n    "),
+		"@@SECURITY_PROFILE_DIGEST@@", securityProfile,
 	)
 	return []byte(replacements.Replace(configTemplate)), nil
+}
+
+// securityProfileDigest changes whenever the generated VM definition or its
+// immutable host-network deny set changes. Resource values are deliberately
+// excluded so supported CPU/memory/disk tuning does not look like security
+// drift.
+func securityProfileDigest(prefixes []string) string {
+	digest := sha256.New()
+	_, _ = digest.Write([]byte("pisafe-lima-security-profile-v1\x00"))
+	_, _ = digest.Write([]byte(configTemplate))
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write([]byte(strings.Join(prefixes, "\n")))
+	return "sha256:" + hex.EncodeToString(digest.Sum(nil))
 }
 
 func canonicalIPv4Prefixes(prefixes []netip.Prefix) ([]string, error) {
@@ -228,6 +245,11 @@ provision:
     @@HOST_PREFIX_LINES@@
     PISAFE_PREFIXES
     chmod 0444 /etc/pisafe/host-prefixes
+
+    tee /etc/pisafe/security-profile >/dev/null <<'PISAFE_SECURITY_PROFILE'
+    @@SECURITY_PROFILE_DIGEST@@
+    PISAFE_SECURITY_PROFILE
+    chmod 0444 /etc/pisafe/security-profile
 
     tee /usr/local/sbin/pisafe-firewall >/dev/null <<'PISAFE_FIREWALL'
     #!/bin/bash

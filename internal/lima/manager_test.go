@@ -61,29 +61,7 @@ func TestManagerCreateValidatesBeforeCreating(t *testing.T) {
 func TestManagerStartIsIdempotent(t *testing.T) {
 	runner := &fakeRunner{outputs: [][]byte{
 		[]byte("pisafe\tRunning\n"),
-		nil,
-		[]byte("192.168.2.0/24\n"),
-	}}
-	manager := Manager{instance: InstanceName, runner: runner}
-
-	if err := manager.Start(context.Background(), []string{"192.168.2.0/24"}); err != nil {
-		t.Fatal(err)
-	}
-	if len(runner.calls) != 3 {
-		t.Fatalf("calls = %#v", runner.calls)
-	}
-	assertArgs(t, runner.calls[1], "shell", "pisafe", "sudo", "/usr/local/sbin/pisafe-clock-step")
-	assertArgs(
-		t,
-		runner.calls[2],
-		"shell", "pisafe", "cat", "/etc/pisafe/host-prefixes",
-	)
-}
-
-func TestManagerStartRefreshesAfterResume(t *testing.T) {
-	runner := &fakeRunner{outputs: [][]byte{
-		[]byte("pisafe\tStopped\n"),
-		nil,
+		[]byte(securityProfileDigest([]string{"192.168.2.0/24"}) + "\n"),
 		nil,
 		[]byte("192.168.2.0/24\n"),
 	}}
@@ -95,13 +73,74 @@ func TestManagerStartRefreshesAfterResume(t *testing.T) {
 	if len(runner.calls) != 4 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
-	assertArgs(t, runner.calls[1], "--tty=false", "start", "pisafe")
+	assertArgs(
+		t, runner.calls[1],
+		"shell", "pisafe", "cat", "/etc/pisafe/security-profile",
+	)
 	assertArgs(t, runner.calls[2], "shell", "pisafe", "sudo", "/usr/local/sbin/pisafe-clock-step")
 	assertArgs(
 		t,
 		runner.calls[3],
 		"shell", "pisafe", "cat", "/etc/pisafe/host-prefixes",
 	)
+}
+
+func TestManagerStartRefreshesAfterResume(t *testing.T) {
+	runner := &fakeRunner{outputs: [][]byte{
+		[]byte("pisafe\tStopped\n"),
+		nil,
+		[]byte(securityProfileDigest([]string{"192.168.2.0/24"}) + "\n"),
+		nil,
+		[]byte("192.168.2.0/24\n"),
+	}}
+	manager := Manager{instance: InstanceName, runner: runner}
+
+	if err := manager.Start(context.Background(), []string{"192.168.2.0/24"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 5 {
+		t.Fatalf("calls = %#v", runner.calls)
+	}
+	assertArgs(t, runner.calls[1], "--tty=false", "start", "pisafe")
+	assertArgs(
+		t, runner.calls[2],
+		"shell", "pisafe", "cat", "/etc/pisafe/security-profile",
+	)
+	assertArgs(t, runner.calls[3], "shell", "pisafe", "sudo", "/usr/local/sbin/pisafe-clock-step")
+	assertArgs(
+		t,
+		runner.calls[4],
+		"shell", "pisafe", "cat", "/etc/pisafe/host-prefixes",
+	)
+}
+
+func TestManagerStartFailsClosedOnSecurityProfileDrift(t *testing.T) {
+	runner := &fakeRunner{outputs: [][]byte{
+		[]byte("pisafe\tRunning\n"),
+		[]byte("sha256:stale\n"),
+	}}
+	manager := Manager{instance: InstanceName, runner: runner}
+
+	err := manager.Start(context.Background(), []string{"192.168.2.0/24"})
+	if err == nil || !strings.Contains(err.Error(), "security profile is stale") {
+		t.Fatalf("error = %v", err)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("Start continued after detecting drift: %#v", runner.calls)
+	}
+}
+
+func TestManagerStartFailsClosedWhenSecurityProfileIsMissing(t *testing.T) {
+	runner := &errorRunner{
+		outputs: [][]byte{[]byte("pisafe\tRunning\n")},
+		errors:  []error{nil, fmt.Errorf("missing")},
+	}
+	manager := Manager{instance: InstanceName, runner: runner}
+
+	err := manager.Start(context.Background(), []string{"192.168.2.0/24"})
+	if err == nil || !strings.Contains(err.Error(), "recreate") {
+		t.Fatalf("error = %v", err)
+	}
 }
 
 func TestManagerStartFailsBeforeLimaWhenPrefixesAreMissing(t *testing.T) {
@@ -163,4 +202,27 @@ func assertArgs(t *testing.T, call recordedCall, want ...string) {
 	if fmt.Sprint(call.args) != fmt.Sprint(want) {
 		t.Fatalf("args = %#v, want %#v", call.args, want)
 	}
+}
+
+type errorRunner struct {
+	outputs [][]byte
+	errors  []error
+}
+
+func (runner *errorRunner) Run(
+	_ context.Context,
+	_ io.Reader,
+	_ ...string,
+) ([]byte, error) {
+	var output []byte
+	if len(runner.outputs) > 0 {
+		output = runner.outputs[0]
+		runner.outputs = runner.outputs[1:]
+	}
+	var err error
+	if len(runner.errors) > 0 {
+		err = runner.errors[0]
+		runner.errors = runner.errors[1:]
+	}
+	return output, err
 }

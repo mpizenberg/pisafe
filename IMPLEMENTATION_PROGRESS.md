@@ -78,6 +78,10 @@ inside a private rootless container volume.
 - Provisioning runs `podman system migrate` after assigning those ranges.
 - Chrony is enabled, and every start/resume calls a narrowly privileged clock
   step because plain mode has no guest-agent time correction.
+- Every provisioned VM records a root-owned SHA-256 fingerprint derived from
+  the complete generated Lima definition and immutable host-network set.
+  `Manager.Start` checks it before clock or firewall verification, so an older
+  or locally modified security definition fails closed.
 - IPv6 is disabled.
 - A dedicated `192.0.2.1/32` dummy address is reserved for the future
   inference-broker reverse relay.
@@ -135,6 +139,15 @@ inside a private rootless container volume.
 - Pi is pinned to `@earendil-works/pi-coding-agent@0.82.0`; the downloaded
   package tarball is checked against its registry SHA-512 integrity before
   installation.
+- `runimage.Installer` derives a recipe digest from the exact Containerfile and
+  static guest-helper bytes, streams a tar context containing only those two
+  files, and passes that digest into an image label.
+- A mutable, recipe-derived local tag is used only as a cache key. Reuse
+  requires matching recipe, base, and Pi labels, Linux/ARM64 platform, and a
+  valid immutable SHA-256 image ID. Run containers continue to receive only
+  that immutable ID.
+- Artifact loading rejects symlinks, file swaps, oversize inputs, non-ELF or
+  non-ARM64 helpers, dynamic interpreters, and imported shared libraries.
 - The image contains Git, OpenSSH, Tini, Pi, and the static ARM64 guest helper.
 - Build-time SSH host keys are removed. Per-run keys/configuration are not
   implemented yet.
@@ -180,10 +193,11 @@ pisafe-guest  64.3%
 cli           26.0%
 gitstage      68.7%
 hostnet       50.0%
-lima          68.5%
+lima          70.8%
 runcontainer  72.7%
 runctl        73.6%
 runid        100.0%
+runimage      74.4%
 runstate      68.3%
 ```
 
@@ -195,6 +209,7 @@ VM and may download images:
 
 ```sh
 PISAFE_LIVE_LIMA=1 go test -v ./internal/lima
+PISAFE_LIVE_LIMA=1 go test -v ./internal/runimage
 ```
 
 Verified against a real ARM64 VM:
@@ -214,10 +229,13 @@ Verified against a real ARM64 VM:
 - The final local image has:
 
   ```text
-  image ID:        sha256:cfd331bd6b1884869620885efa08c60eca6a522e1c6eeef07bb821be22039220
-  manifest digest: sha256:127564ea34633ba52f838631afcb17988f3b98f7a32cf1f0e1f09c368ff6d1b8
+  recipe digest:   sha256:b43217fe1c358fe8b01e7355f1888ce691863c857b39297103ca3b932830bc56
+  image ID:        sha256:f3d9de4937cef75c3f333affcd2afd26015edce04f2fc2dfc67fcca6f9c697e4
+  manifest digest: sha256:3df3e2d488cf9f6e105ee3dedf52a590b7449a192a5edea7693187f7c5df07e5
   ```
 
+- The managed installer built that image from its two-file tar stream,
+  validated its labels/platform/immutable ID, and reused it on the next call.
 - A direct runtime check verified UID 1000, zero effective/bounding
   capabilities, `NoNewPrivs=1`, read-only root, 4 GiB memory, 512 PIDs,
   Pi 0.82.0, and public HTTPS.
@@ -230,16 +248,30 @@ Run that end-to-end test with:
 
 ```sh
 PISAFE_LIVE_LIMA=1 \
-PISAFE_LIVE_RUN_IMAGE=sha256:cfd331bd6b1884869620885efa08c60eca6a522e1c6eeef07bb821be22039220 \
+PISAFE_LIVE_RUN_IMAGE=sha256:f3d9de4937cef75c3f333affcd2afd26015edce04f2fc2dfc67fcca6f9c697e4 \
 go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
 ```
 
 ## Live VM state
 
 A persistent Lima instance named `pisafe` was left running. It contains no
-project runs or user data. It now contains cached base/test images, the local
-`localhost/pisafe-run:0.1-dev` image above, and a temporary image build
-directory.
+project runs or user data. It was freshly provisioned from the current
+generated configuration and contains only cached base/test images plus the
+managed `localhost/pisafe-run:managed-b43217fe1c358fe8` image above.
+
+Fresh provisioning verified all security-sensitive setup together:
+
+- automatic subordinate UID/GID assignment and `podman system migrate`;
+- the clock-step and firewall-status helpers work through their exact sudo
+  rules;
+- unrestricted `sudo -n true` is denied;
+- the root-owned security-profile record is mode 0444 and currently contains
+  `sha256:ebb0446c0c2b37610a54e5784c51e2a7866c7cf5172d4e88ce49942fc8a7cb8a`;
+- the full container network suite passes; and
+- the managed image install/reuse and end-to-end staging tests pass.
+
+The final cleanup audit found no run-labelled containers, run volumes, or
+VM-side staging directories.
 
 The VM was recreated while fixing live-only provisioning issues. Those issues
 were:
@@ -258,18 +290,9 @@ were:
    controller helpers.
 8. Fedora Podman not supporting `podman cp --chown`; stage transfer now uses
    the documented rootless local-volume import path.
-
-Important: the current running VM predates the new restricted-sudo and
-clock-helper configuration. It still has the cloud image's unrestricted
-passwordless sudo, lacks the immutable host-prefix record, and received its
-clock step manually. Do not use it for an untrusted run. Recreate it from the
-generated configuration (or validate a separate fresh instance) before
-exposing `pisafe run`.
-
-The current VM also received `podman system migrate` manually. The exact
-command in the generated config was verified, but neither that line nor the
-new sudo/clock helpers have been exercised together during a completely fresh
-VM creation. Fresh provisioning is the next required live gate.
+9. Fedora Podman's image-inspection `Id` is a bare 64-character hex value,
+   while run specs deliberately require `sha256:` form. The installer now
+   validates and normalizes it before returning the immutable ID.
 
 When Codex runs inside a restricted filesystem sandbox, it may be unable to
 connect to `~/.lima/pisafe/ha.sock`; `limactl list` then falsely labels the
@@ -279,8 +302,6 @@ sandboxed result.
 
 ## Known gaps
 
-- No automated run-image build/install/cache validation exists. The verified
-  image was built manually by streaming the Containerfile and ARM64 helper.
 - No user-facing `run`, `connect`, `diff`, `apply`, `cp`, `discard`, or `gc`
   implementation exists. `list` is the only lifecycle command exposed.
 - Per-run SSH host/client keys, sshd configuration, a Lima `ProxyCommand`, and
@@ -294,8 +315,9 @@ sandboxed result.
 - Firewall behavioral coverage still needs DNS-to-private answers, redirects,
   raw UDP, `host.containers.internal`, VM loopback attempts, and the exact
   broker exception.
-- Existing Lima configuration drift is not detected or reconciled. This is
-  currently security-relevant because the existing VM predates sudo hardening.
+- Security-profile drift is detected and fails closed, but automated
+  replacement/reconciliation is intentionally absent because deleting a VM is
+  destructive and must be an explicit lifecycle operation.
 - Pi is installed, but inference intentionally remains unusable until the
   broker/relay exists. No raw provider credential may be added as a shortcut.
 - Pi's top-level tarball is integrity-pinned, but a reproducible published
@@ -305,23 +327,17 @@ sandboxed result.
 
 Finish the first run lifecycle without weakening the boundary:
 
-1. Exercise the complete updated Lima configuration on a fresh instance.
-   Verify clean Podman provisioning, automatic clock correction, restricted
-   helper commands, and that `sudo -n true` fails.
-2. Add run-image build/install automation that streams only the Containerfile
-   and companion helper, validates labels, and records the resulting immutable
-   ID. Detect/reconcile security-relevant VM configuration drift.
-3. Generate per-run sandbox SSH host/client keys, configure non-root sshd, and
+1. Generate per-run sandbox SSH host/client keys, configure non-root sshd, and
    connect through a Lima control-SSH `ProxyCommand`; then prove Zed and Pi see
    the same workspace.
-4. Wire `pisafe run` around host-network verification, `gitstage.Prepare`, and
-   `runctl.StartPrepared`; keep Pi inference unavailable rather than injecting
-   a credential.
-5. Implement stop/resume and exact-confirmation discard, including reliable
+2. Wire `pisafe run` around host-network verification, managed-image
+   installation, `gitstage.Prepare`, and `runctl.StartPrepared`; keep Pi
+   inference unavailable rather than injecting a credential.
+3. Implement stop/resume and exact-confirmation discard, including reliable
    cleanup recovery and wall-clock enforcement. Choose and live-test a
    persistent workspace disk-quota mechanism before claiming the disk limit.
-6. Implement the reverse inference relay and run-scoped capability.
-7. Then add selected untracked inputs and submodule-aware journaled apply
+4. Implement the reverse inference relay and run-scoped capability.
+5. Then add selected untracked inputs and submodule-aware journaled apply
    before exposing `pisafe apply`.
 
 ## Useful references

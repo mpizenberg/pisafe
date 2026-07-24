@@ -39,6 +39,8 @@ func TestRenderConfigContainsSecurityBoundary(t *testing.T) {
 		"podman system migrate",
 		"podman unshare cat /proc/self/uid_map",
 		"/etc/pisafe/host-prefixes",
+		"/etc/pisafe/security-profile",
+		"sha256:",
 		"pisafe-clock-step",
 		`sed -i "\|^${pisafe_user} .*NOPASSWD:ALL|d"`,
 		`gpasswd --delete "${pisafe_user}" wheel`,
@@ -50,6 +52,18 @@ func TestRenderConfigContainsSecurityBoundary(t *testing.T) {
 	}
 	if strings.Contains(text, "pisafe-firewall-refresh") {
 		t.Error("config grants a runtime firewall mutation path")
+	}
+}
+
+func TestSecurityProfileChangesWithTemplateOrNetworks(t *testing.T) {
+	first := securityProfileDigest([]string{"192.168.4.0/24"})
+	equivalent := securityProfileDigest([]string{"192.168.4.0/24"})
+	different := securityProfileDigest([]string{"10.20.30.0/24"})
+	if first != equivalent {
+		t.Fatal("equivalent security profiles have different digests")
+	}
+	if first == different {
+		t.Fatal("network change did not change security profile digest")
 	}
 }
 

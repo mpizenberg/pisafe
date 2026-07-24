@@ -83,8 +83,8 @@ func (manager Manager) Create(ctx context.Context, configPath string) error {
 }
 
 // Start starts (or reuses) the VM and verifies that its immutable host-network
-// deny set still matches the Mac. Callers must not start run containers if
-// this fails.
+// deny set and generated security profile still match the controller. Callers
+// must not start run containers if this fails.
 func (manager Manager) Start(ctx context.Context, hostPrefixes []string) error {
 	if _, err := renderPrefixInput(hostPrefixes); err != nil {
 		return err
@@ -111,10 +111,44 @@ func (manager Manager) Start(ctx context.Context, hostPrefixes []string) error {
 	default:
 		return fmt.Errorf("unsupported Lima status %q", status)
 	}
+	if err := manager.VerifySecurityProfile(ctx, hostPrefixes); err != nil {
+		return err
+	}
 	if err := manager.SyncClock(ctx); err != nil {
 		return err
 	}
 	return manager.VerifyFirewall(ctx, hostPrefixes)
+}
+
+// VerifySecurityProfile detects an instance provisioned by an older or locally
+// modified VM definition. The record is root-owned and immutable to the
+// unprivileged Lima user after provisioning.
+func (manager Manager) VerifySecurityProfile(ctx context.Context, prefixes []string) error {
+	rendered, err := renderPrefixInput(prefixes)
+	if err != nil {
+		return err
+	}
+	expected := securityProfileDigest(strings.Fields(rendered))
+	output, err := manager.runner.Run(
+		ctx,
+		nil,
+		"shell",
+		manager.instance,
+		"cat",
+		"/etc/pisafe/security-profile",
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"read VM security profile: %w; recreate the pisafe VM before starting a run",
+			err,
+		)
+	}
+	if strings.TrimSpace(string(output)) != expected {
+		return fmt.Errorf(
+			"VM security profile is stale; recreate the pisafe VM before starting a run",
+		)
+	}
+	return nil
 }
 
 // SyncClock steps a clock that drifted while the plain-mode VM was suspended.

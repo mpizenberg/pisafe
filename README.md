@@ -33,11 +33,17 @@ The next boundary slice is also implemented internally:
   dropped capabilities, `no-new-privileges`, public DNS, and CPU, memory, PID,
   and temporary-filesystem limits; and
 - a controller transaction that imports the stage into private volumes,
-  materializes it inside the container, and rolls back partial creation.
+  materializes it inside the container, and rolls back partial creation;
+- content-addressed run-image installation that sends only the Containerfile
+  and static Linux helper and returns a validated immutable image ID; and
+- a root-owned VM security-profile fingerprint checked on every start, so an
+  instance created from an older security definition fails closed.
 
-User-facing run creation is still hidden. Image installation, persistent disk
-quota, wall-clock enforcement, per-run SSH/Zed access, inference brokering,
-and confirmed discard must be completed first.
+User-facing run creation is still hidden. Fresh-VM provisioning, restricted
+sudo, clock synchronization, security-profile drift detection, managed-image
+installation/reuse, and end-to-end repository materialization are
+live-validated. Persistent disk quota, wall-clock enforcement, per-run SSH/Zed
+access, inference brokering, and confirmed discard must still be completed.
 
 ## Development
 
@@ -53,6 +59,7 @@ the mount, rootless-container, and network boundaries:
 
 ```sh
 PISAFE_LIVE_LIMA=1 go test -v ./internal/lima
+PISAFE_LIVE_LIMA=1 go test -v ./internal/runimage
 ```
 
 The end-to-end artifact/container test additionally requires the immutable ID

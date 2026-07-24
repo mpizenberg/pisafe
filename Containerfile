@@ -1,5 +1,7 @@
 FROM docker.io/library/node@sha256:af01d58b748ec92b1d6e8e11429aad424fd1e68c848185399dca0596a1ab8f5c
 
+ARG PISAFE_RECIPE_DIGEST
+
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -22,6 +24,7 @@ COPY --chmod=0755 pisafe-guest /usr/local/bin/pisafe-guest
 
 LABEL io.pisafe.base.digest="sha256:af01d58b748ec92b1d6e8e11429aad424fd1e68c848185399dca0596a1ab8f5c" \
       io.pisafe.pi.version="0.82.0" \
+      io.pisafe.recipe.digest="${PISAFE_RECIPE_DIGEST}" \
       org.opencontainers.image.title="pisafe run environment"
 
 USER node
