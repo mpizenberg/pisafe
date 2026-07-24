@@ -18,7 +18,7 @@ import (
 	"github.com/mpizenberg/pisafe/internal/runid"
 )
 
-const manifestVersion = 2
+const manifestVersion = 3
 
 var gitObjectPattern = regexp.MustCompile(`^(?:[a-f0-9]{40}|[a-f0-9]{64})$`)
 
@@ -34,22 +34,26 @@ const (
 )
 
 type Manifest struct {
-	Version        int               `json:"version"`
-	RunID          string            `json:"run_id"`
-	Project        string            `json:"project"`
-	State          State             `json:"state"`
-	Snapshot       gitstage.Snapshot `json:"snapshot"`
-	Image          string            `json:"image,omitempty"`
-	Container      string            `json:"container,omitempty"`
-	Workspace      string            `json:"workspace,omitempty"`
-	SSH            *SSHConnection    `json:"ssh,omitempty"`
-	CreatedAt      time.Time         `json:"created_at"`
-	UpdatedAt      time.Time         `json:"updated_at"`
-	StoppedAt      *time.Time        `json:"stopped_at,omitempty"`
-	ImportedAt     *time.Time        `json:"imported_at,omitempty"`
-	DiscardedAt    *time.Time        `json:"discarded_at,omitempty"`
-	ImportedBranch string            `json:"imported_branch,omitempty"`
-	LastError      string            `json:"last_error,omitempty"`
+	Version              int               `json:"version"`
+	RunID                string            `json:"run_id"`
+	Project              string            `json:"project"`
+	State                State             `json:"state"`
+	Snapshot             gitstage.Snapshot `json:"snapshot"`
+	Image                string            `json:"image,omitempty"`
+	Container            string            `json:"container,omitempty"`
+	Workspace            string            `json:"workspace,omitempty"`
+	SSH                  *SSHConnection    `json:"ssh,omitempty"`
+	ActiveLimitSeconds   int64             `json:"active_limit_seconds"`
+	ActiveElapsedSeconds int64             `json:"active_elapsed_seconds"`
+	ActiveStartedAt      *time.Time        `json:"active_started_at,omitempty"`
+	ActiveDeadline       *time.Time        `json:"active_deadline,omitempty"`
+	CreatedAt            time.Time         `json:"created_at"`
+	UpdatedAt            time.Time         `json:"updated_at"`
+	StoppedAt            *time.Time        `json:"stopped_at,omitempty"`
+	ImportedAt           *time.Time        `json:"imported_at,omitempty"`
+	DiscardedAt          *time.Time        `json:"discarded_at,omitempty"`
+	ImportedBranch       string            `json:"imported_branch,omitempty"`
+	LastError            string            `json:"last_error,omitempty"`
 }
 
 type SSHConnection struct {
@@ -158,44 +162,111 @@ func (store Store) List() ([]Manifest, error) {
 	return manifests, nil
 }
 
-func (store Store) Transition(runID string, next State) (Manifest, error) {
+func (store Store) Stop(runID string, endedAt time.Time) (Manifest, error) {
 	manifest, err := store.Get(runID)
 	if err != nil {
 		return Manifest{}, err
 	}
-	if !allowedTransition(manifest.State, next) {
+	if manifest.State != StateActive {
 		return Manifest{}, fmt.Errorf(
 			"invalid run transition %q → %q",
 			manifest.State,
-			next,
+			StateStopped,
 		)
 	}
 	now := store.now().UTC()
-	manifest.State = next
+	endedAt = endedAt.UTC()
+	if endedAt.IsZero() {
+		endedAt = now
+	}
+	if endedAt.After(now.Add(5 * time.Second)) {
+		return Manifest{}, fmt.Errorf("container stop time is in the future")
+	}
+	if endedAt.After(now) {
+		endedAt = now
+	}
+	if manifest.ActiveStartedAt == nil || endedAt.Before(*manifest.ActiveStartedAt) {
+		return Manifest{}, fmt.Errorf("container stop time precedes activation")
+	}
+	elapsed := endedAt.Sub(*manifest.ActiveStartedAt)
+	elapsedSeconds := int64((elapsed + time.Second - 1) / time.Second)
+	remaining := manifest.ActiveLimitSeconds - manifest.ActiveElapsedSeconds
+	if elapsedSeconds > remaining {
+		elapsedSeconds = remaining
+	}
+	manifest.ActiveElapsedSeconds += elapsedSeconds
+	manifest.ActiveStartedAt = nil
+	manifest.ActiveDeadline = nil
+	manifest.State = StateStopped
 	manifest.LastError = ""
 	manifest.UpdatedAt = now
-	switch next {
-	case StateStopped:
-		manifest.StoppedAt = &now
-	case StateImported:
-		manifest.ImportedAt = &now
-	case StateDiscarded:
-		manifest.DiscardedAt = &now
-	}
-	path, err := store.manifestPath(runID)
+	manifest.StoppedAt = &endedAt
+	return store.replace(manifest)
+}
+
+func (store Store) Resume(runID string, startedAt time.Time) (Manifest, error) {
+	manifest, err := store.Get(runID)
 	if err != nil {
 		return Manifest{}, err
 	}
-	if err := store.writeAtomic(path, manifest, true); err != nil {
+	if manifest.State != StateStopped {
+		return Manifest{}, fmt.Errorf(
+			"invalid run transition %q → %q",
+			manifest.State,
+			StateActive,
+		)
+	}
+	remaining := manifest.ActiveLimitSeconds - manifest.ActiveElapsedSeconds
+	if remaining <= 0 {
+		return Manifest{}, fmt.Errorf("run %q exhausted its active wall-clock limit", runID)
+	}
+	now := store.now().UTC()
+	startedAt = startedAt.UTC()
+	if startedAt.IsZero() {
+		startedAt = now
+	}
+	if startedAt.After(now.Add(5 * time.Second)) {
+		return Manifest{}, fmt.Errorf("container start time is in the future")
+	}
+	if startedAt.After(now) {
+		startedAt = now
+	}
+	deadline := startedAt.Add(time.Duration(remaining) * time.Second)
+	manifest.State = StateActive
+	manifest.ActiveStartedAt = &startedAt
+	manifest.ActiveDeadline = &deadline
+	manifest.LastError = ""
+	manifest.UpdatedAt = now
+	return store.replace(manifest)
+}
+
+func (store Store) Discard(runID string) (Manifest, error) {
+	manifest, err := store.Get(runID)
+	if err != nil {
 		return Manifest{}, err
 	}
-	return manifest, nil
+	if manifest.State != StateCreating && manifest.State != StateStopped {
+		return Manifest{}, fmt.Errorf(
+			"invalid run transition %q → %q",
+			manifest.State,
+			StateDiscarded,
+		)
+	}
+	now := store.now().UTC()
+	manifest.State = StateDiscarded
+	manifest.ActiveStartedAt = nil
+	manifest.ActiveDeadline = nil
+	manifest.LastError = ""
+	manifest.UpdatedAt = now
+	manifest.DiscardedAt = &now
+	return store.replace(manifest)
 }
 
 func (store Store) Activate(
 	runID string,
 	connection SSHConnection,
 	baselineCommit string,
+	startedAt time.Time,
 ) (Manifest, error) {
 	manifest, err := store.Get(runID)
 	if err != nil {
@@ -215,9 +286,25 @@ func (store Store) Activate(
 		return Manifest{}, fmt.Errorf("invalid materialized baseline commit")
 	}
 	now := store.now().UTC()
+	if manifest.ActiveLimitSeconds <= 0 {
+		return Manifest{}, fmt.Errorf("active wall-clock limit is required")
+	}
+	startedAt = startedAt.UTC()
+	if startedAt.IsZero() {
+		startedAt = now
+	}
+	if startedAt.After(now.Add(5 * time.Second)) {
+		return Manifest{}, fmt.Errorf("container start time is in the future")
+	}
+	if startedAt.After(now) {
+		startedAt = now
+	}
+	deadline := startedAt.Add(time.Duration(manifest.ActiveLimitSeconds) * time.Second)
 	manifest.State = StateActive
 	manifest.SSH = &connection
 	manifest.Snapshot.BaselineCommit = baselineCommit
+	manifest.ActiveStartedAt = &startedAt
+	manifest.ActiveDeadline = &deadline
 	manifest.LastError = ""
 	manifest.UpdatedAt = now
 	path, err := store.manifestPath(runID)
@@ -252,18 +339,15 @@ func (store Store) RecordError(runID string, operationErr error) (Manifest, erro
 	return manifest, nil
 }
 
-func allowedTransition(current, next State) bool {
-	switch current {
-	case StateActive:
-		return next == StateStopped
-	case StateStopped:
-		return next == StateActive ||
-			next == StateImported ||
-			next == StateDiscarded ||
-			next == StateExpired
-	default:
-		return false
+func (store Store) replace(manifest Manifest) (Manifest, error) {
+	path, err := store.manifestPath(manifest.RunID)
+	if err != nil {
+		return Manifest{}, err
 	}
+	if err := store.writeAtomic(path, manifest, true); err != nil {
+		return Manifest{}, err
+	}
+	return manifest, nil
 }
 
 func (store Store) ensureRoot() error {
@@ -362,6 +446,13 @@ func validateManifestIdentity(manifest Manifest) error {
 	if manifest.Project == "" {
 		return fmt.Errorf("project name is required")
 	}
+	if manifest.ActiveLimitSeconds <= 0 {
+		return fmt.Errorf("active wall-clock limit is required")
+	}
+	if manifest.ActiveElapsedSeconds < 0 ||
+		manifest.ActiveElapsedSeconds > manifest.ActiveLimitSeconds {
+		return fmt.Errorf("invalid active wall-clock usage")
+	}
 	return nil
 }
 
@@ -382,17 +473,57 @@ func validateStoredManifest(manifest Manifest, expectedRunID string) error {
 	}
 	switch manifest.State {
 	case StateCreating:
-		if manifest.SSH != nil {
+		if manifest.SSH != nil ||
+			manifest.ActiveStartedAt != nil ||
+			manifest.ActiveDeadline != nil {
 			return fmt.Errorf("creating run cannot have an SSH connection")
 		}
-	case StateActive, StateStopped, StateImported, StateDiscarded, StateExpired:
+	case StateActive:
 		if manifest.SSH == nil {
 			return fmt.Errorf("run state %q requires an SSH connection", manifest.State)
+		}
+		if manifest.ActiveStartedAt == nil || manifest.ActiveDeadline == nil {
+			return fmt.Errorf("active run requires wall-clock timestamps")
+		}
+		remaining := manifest.ActiveLimitSeconds - manifest.ActiveElapsedSeconds
+		expected := manifest.ActiveStartedAt.Add(time.Duration(remaining) * time.Second)
+		if !manifest.ActiveDeadline.Equal(expected) {
+			return fmt.Errorf("active run has an inconsistent wall-clock deadline")
+		}
+	case StateStopped, StateImported, StateExpired:
+		if manifest.SSH == nil {
+			return fmt.Errorf("run state %q requires an SSH connection", manifest.State)
+		}
+		if manifest.ActiveStartedAt != nil || manifest.ActiveDeadline != nil {
+			return fmt.Errorf("inactive run retains active wall-clock timestamps")
+		}
+	case StateDiscarded:
+		if manifest.ActiveStartedAt != nil || manifest.ActiveDeadline != nil {
+			return fmt.Errorf("discarded run retains active wall-clock timestamps")
 		}
 	default:
 		return fmt.Errorf("invalid stored run state %q", manifest.State)
 	}
 	return nil
+}
+
+func RemainingSeconds(manifest Manifest, now time.Time) int64 {
+	remaining := manifest.ActiveLimitSeconds - manifest.ActiveElapsedSeconds
+	if remaining <= 0 {
+		return 0
+	}
+	if manifest.State != StateActive || manifest.ActiveDeadline == nil {
+		return remaining
+	}
+	duration := manifest.ActiveDeadline.Sub(now.UTC())
+	if duration <= 0 {
+		return 0
+	}
+	seconds := int64((duration + time.Second - 1) / time.Second)
+	if seconds > remaining {
+		return remaining
+	}
+	return seconds
 }
 
 func validateSSHConnection(runID string, connection SSHConnection) error {

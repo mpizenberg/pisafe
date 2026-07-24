@@ -7,8 +7,10 @@ The implementation now contains:
 
 - a dependency-free Go controller;
 - `pisafe run` for creating an isolated run from the current repository,
-  `pisafe list` for durable records, `pisafe zed` for reopening a connection
-  explicitly saved in Zed, and `pisafe doctor` for prerequisites;
+  `pisafe stop`/`resume` for preserving and reopening it, exact-confirmation
+  `pisafe discard`, `pisafe list` for durable records, `pisafe zed` for
+  reopening a connection explicitly saved in Zed, and `pisafe doctor` for
+  prerequisites;
 - a split Git staging core: the Mac produces a bundle and tracked-state patch,
   while materialization happens after transfer inside the isolated
   environment;
@@ -28,12 +30,14 @@ failing closed if the Mac has changed networks.
 The next boundary slice is also implemented internally:
 
 - size- and SHA-256-verified Git artifact streams through Lima control SSH;
-- atomic Mac-side run manifests and strict lifecycle transitions;
+- atomic Mac-side run manifests, cumulative active-time accounting, and
+  strict lifecycle transitions;
 - a pinned ARM64 run image containing Pi 0.82.0 and a Linux guest helper;
 - rootless Podman launch arguments enforcing a non-root user, read-only root,
   dropped capabilities, `no-new-privileges`, public DNS, and CPU, memory, PID,
   and temporary-filesystem limits; and
-- a controller transaction that imports the stage into private volumes,
+- a controller transaction that imports the stage into private,
+  quota-limited storage,
   materializes it inside the container, and rolls back partial creation;
 - content-addressed run-image installation that sends only the embedded
   Containerfile and packaged static Linux helper and returns a validated
@@ -49,9 +53,10 @@ security-profile drift detection, managed-image installation/reuse,
 user-facing repository materialization, and the Zed-compatible OpenSSH path
 into the exact Pi workspace are live-validated. `pisafe run` prints the exact
 OpenSSH command to paste once into Zed's Remote Projects dialog; it does not
-silently edit global SSH or Zed settings. Persistent disk quota, wall-clock
-enforcement, inference brokering, and confirmed discard must still be
-completed.
+silently edit global SSH or Zed settings. Each run has a live-validated
+10 GiB fixed-capacity persistent filesystem and eight cumulative active hours
+enforced by Podman. Stop/resume and confirmed discard are live-validated;
+inference brokering remains unavailable.
 
 ## Development
 
@@ -64,6 +69,9 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
 ./pisafe doctor
 ./pisafe list
 ./pisafe run
+./pisafe stop RUN
+./pisafe resume RUN
+./pisafe discard RUN --confirm RUN
 ```
 
 The release layout places `pisafe-guest-linux-arm64` beside `pisafe`. During

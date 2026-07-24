@@ -28,8 +28,9 @@ func TestListShowsDurableState(t *testing.T) {
 	t.Setenv("PISAFE_STATE_DIR", root)
 	store := runstate.NewStore(root)
 	if _, err := store.Create(runstate.Manifest{
-		RunID:   "run-123",
-		Project: "project",
+		RunID:              "run-123",
+		Project:            "project",
+		ActiveLimitSeconds: 8 * 60 * 60,
 		Snapshot: gitstage.Snapshot{
 			RunID:   "run-123",
 			WorkRef: "refs/heads/work/run-123",
@@ -113,8 +114,9 @@ func TestZedRejectsInactiveRunBeforeLaunching(t *testing.T) {
 	t.Setenv("PISAFE_STATE_DIR", root)
 	store := runstate.NewStore(root)
 	if _, err := store.Create(runstate.Manifest{
-		RunID:   "inactive-run",
-		Project: "project",
+		RunID:              "inactive-run",
+		Project:            "project",
+		ActiveLimitSeconds: 8 * 60 * 60,
 		Snapshot: gitstage.Snapshot{
 			RunID:   "inactive-run",
 			WorkRef: "refs/heads/work/inactive-run",
@@ -126,5 +128,18 @@ func TestZedRejectsInactiveRunBeforeLaunching(t *testing.T) {
 	err := Run(context.Background(), []string{"zed", "inactive-run"}, &output)
 	if err == nil || !strings.Contains(err.Error(), "not active") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestDiscardRequiresExactRepeatedRunID(t *testing.T) {
+	var output bytes.Buffer
+	for _, args := range [][]string{
+		{"discard", "run-123"},
+		{"discard", "run-123", "--confirm", "run-124"},
+	} {
+		err := Run(context.Background(), args, &output)
+		if err == nil || !strings.Contains(err.Error(), "confirm") {
+			t.Fatalf("Run(%v) error = %v", args, err)
+		}
 	}
 }

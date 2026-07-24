@@ -1,7 +1,6 @@
 package runcontainer
 
 import (
-	"slices"
 	"strings"
 	"testing"
 )
@@ -28,9 +27,10 @@ func TestRunArgsAreHardenedAndImmutable(t *testing.T) {
 		"--memory 4294967296",
 		"--memory-swap 4294967296",
 		"--pids-limit 512",
+		"--timeout 28800",
 		"type=tmpfs,dst=/run,tmpfs-size=16777216,tmpfs-mode=0755,U=true",
-		"type=volume,src=pisafe-work-run-123,dst=/work,nodev,nosuid,U=true",
-		"type=volume,src=pisafe-home-run-123,dst=/home/node,nodev,nosuid,U=true",
+		"type=bind,src=/var/lib/pisafe/runs/run-123/workspace,dst=/work,nodev,nosuid",
+		"type=bind,src=/var/lib/pisafe/runs/run-123/home,dst=/home/node,nodev,nosuid",
 		testImageID,
 		"pisafe-guest serve-ssh",
 	} {
@@ -54,18 +54,11 @@ func TestRunArgsAreHardenedAndImmutable(t *testing.T) {
 	}
 }
 
-func TestVolumeAndMaterializeArgsAreRunScoped(t *testing.T) {
+func TestStorageAndMaterializeArgsAreRunScoped(t *testing.T) {
 	spec := DefaultSpec("run-123", testImageID)
-	volumes, err := spec.CreateVolumeArgs()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(volumes) != 2 {
-		t.Fatalf("volumes = %#v", volumes)
-	}
-	if !slices.Contains(volumes[0], "pisafe-work-run-123") ||
-		!slices.Contains(volumes[1], "pisafe-home-run-123") {
-		t.Fatalf("volumes = %#v", volumes)
+	if spec.WorkspacePath() != "/var/lib/pisafe/runs/run-123/workspace" ||
+		spec.HomePath() != "/var/lib/pisafe/runs/run-123/home" {
+		t.Fatalf("storage paths = %q %q", spec.WorkspacePath(), spec.HomePath())
 	}
 	materialize, err := spec.MaterializeArgs("project")
 	if err != nil {
@@ -90,7 +83,7 @@ func TestVolumeAndMaterializeArgsAreRunScoped(t *testing.T) {
 		"--read-only",
 		"--cap-drop=all",
 		"--security-opt=no-new-privileges",
-		"type=volume,src=pisafe-home-run-123,dst=/home/node,nodev,nosuid,U=true",
+		"type=bind,src=/var/lib/pisafe/runs/run-123/home,dst=/home/node,nodev,nosuid",
 		testImageID,
 		"pisafe-guest configure-ssh",
 	} {

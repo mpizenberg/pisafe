@@ -46,17 +46,11 @@ func TestLiveSSHStageAndContainerMaterialize(t *testing.T) {
 	}()
 
 	spec := runcontainer.DefaultSpec(runID, imageID)
-	volumeCommands, err := spec.CreateVolumeArgs()
-	if err != nil {
+	if err := transport.CreateStorage(ctx, runID); err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range volumeCommands {
-		if _, err := transport.Execute(ctx, nil, append([]string{"podman"}, command...)...); err != nil {
-			t.Fatal(err)
-		}
-	}
 	defer cleanupLiveContainer(t, transport, spec)
-	if err := transport.ImportStage(ctx, runID, spec.WorkspaceVolume()); err != nil {
+	if err := transport.ImportStage(ctx, runID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -285,15 +279,11 @@ func cleanupLiveContainer(t *testing.T, transport Transport, spec runcontainer.S
 		nil,
 		"podman", "rm", "--force", spec.ContainerName(),
 	)
-	_, volumeErr := transport.Execute(
-		ctx,
-		nil,
-		"podman", "volume", "rm", spec.WorkspaceVolume(), spec.HomeVolume(),
-	)
+	storageErr := transport.RemoveStorage(ctx, spec.RunID)
 	if containerErr != nil {
 		t.Errorf("remove live container: %v", containerErr)
 	}
-	if volumeErr != nil {
-		t.Errorf("remove live volumes: %v", volumeErr)
+	if storageErr != nil {
+		t.Errorf("remove live storage: %v", storageErr)
 	}
 }

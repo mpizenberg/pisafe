@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+	"strconv"
 	"strings"
+
+	"github.com/mpizenberg/pisafe/internal/runcontainer"
 )
 
 const (
@@ -49,20 +52,22 @@ func RenderConfig(options ConfigOptions) ([]byte, error) {
 		"@@HOST_PREFIXES@@", strings.Join(prefixes, ", "),
 		"@@HOST_PREFIX_LINES@@", strings.Join(prefixes, "\n    "),
 		"@@SECURITY_PROFILE_DIGEST@@", securityProfile,
+		"@@RUN_STORAGE_BYTES@@", strconv.FormatInt(runcontainer.DefaultPersistent, 10),
 	)
 	return []byte(replacements.Replace(configTemplate)), nil
 }
 
 // securityProfileDigest changes whenever the generated VM definition or its
-// immutable host-network deny set changes. Resource values are deliberately
-// excluded so supported CPU/memory/disk tuning does not look like security
-// drift.
+// immutable host-network deny set or persistent run quota changes. VM sizing
+// is deliberately excluded because it does not weaken a run boundary.
 func securityProfileDigest(prefixes []string) string {
 	digest := sha256.New()
-	_, _ = digest.Write([]byte("pisafe-lima-security-profile-v1\x00"))
+	_, _ = digest.Write([]byte("pisafe-lima-security-profile-v2\x00"))
 	_, _ = digest.Write([]byte(configTemplate))
 	_, _ = digest.Write([]byte{0})
 	_, _ = digest.Write([]byte(strings.Join(prefixes, "\n")))
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write([]byte(strconv.FormatInt(runcontainer.DefaultPersistent, 10)))
 	return "sha256:" + hex.EncodeToString(digest.Sum(nil))
 }
 
@@ -148,7 +153,7 @@ provision:
     set -eux -o pipefail
 
     dnf -y install --best --setopt=install_weak_deps=False \
-      chrony git nftables openssh-server podman
+      chrony e2fsprogs git nftables openssh-server podman
     systemctl disable --now firewalld 2>/dev/null || true
     systemctl enable --now chronyd.service
 
@@ -162,6 +167,8 @@ provision:
     grep -q "^${pisafe_user}:" /etc/subgid ||
       usermod --add-subgids 100000-165535 "${pisafe_user}"
     runuser --login "${pisafe_user}" --command 'podman system migrate'
+    install -d -m 0711 -o root -g root /var/lib/pisafe/runs
+    install -d -m 0700 -o root -g root /var/lib/pisafe/run-images
 
     install -d -m 0755 /etc/pisafe /etc/ssh/sshd_config.d
     tee /etc/sysctl.d/90-pisafe.conf >/dev/null <<'PISAFE_SYSCTL'
@@ -280,6 +287,116 @@ provision:
     PISAFE_CLOCK
     chmod 0755 /usr/local/sbin/pisafe-clock-step
 
+    tee /usr/local/sbin/pisafe-run-storage >/dev/null <<'PISAFE_STORAGE'
+    #!/bin/bash
+    set -euo pipefail
+    [[ "$#" -eq 2 ]]
+    action="$1"
+    run_id="$2"
+    [[ "${#run_id}" -le 64 ]]
+    [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+
+    storage_root=/var/lib/pisafe/runs
+    image_root=/var/lib/pisafe/run-images
+    run_root="$storage_root/$run_id"
+    image="$image_root/$run_id.ext4"
+    pisafe_user="$(
+      getent passwd |
+        awk -F: '$3 >= 500 && $3 < 65534 && $6 ~ /^\/home\// { print $1; exit }'
+    )"
+    [[ -n "$pisafe_user" ]]
+    subuid_start="$(awk -F: -v user="$pisafe_user" '$1 == user { print $2; exit }' /etc/subuid)"
+    subgid_start="$(awk -F: -v user="$pisafe_user" '$1 == user { print $2; exit }' /etc/subgid)"
+    [[ "$subuid_start" =~ ^[0-9]+$ && "$subgid_start" =~ ^[0-9]+$ ]]
+    storage_uid="$((subuid_start + 999))"
+    storage_gid="$((subgid_start + 999))"
+    [[ "$(stat -c '%U:%G:%a' "$storage_root")" = "root:root:711" ]]
+    [[ "$(stat -c '%U:%G:%a' "$image_root")" = "root:root:700" ]]
+
+    cleanup_partial() {
+      if mountpoint -q "$run_root"; then
+        umount "$run_root"
+      fi
+      if [[ -d "$run_root" && ! -L "$run_root" ]]; then
+        rmdir "$run_root"
+      fi
+      rm -f -- "$image"
+    }
+
+    create() {
+      [[ ! -e "$run_root" && ! -L "$run_root" ]]
+      [[ ! -e "$image" && ! -L "$image" ]]
+      trap 'cleanup_partial || true' ERR
+      truncate -s @@RUN_STORAGE_BYTES@@ "$image"
+      chmod 0600 "$image"
+      mkfs.ext4 -q -F -m 0 "$image"
+      mkdir "$run_root"
+      mount -o loop,nodev,nosuid "$image" "$run_root"
+      install -d -m 0700 -o "$storage_uid" -g "$storage_gid" \
+        "$run_root/workspace" "$run_root/home"
+      chown root:root "$run_root"
+      chmod 0711 "$run_root"
+      chcon -t container_file_t \
+        "$run_root" "$run_root/workspace" "$run_root/home"
+      trap - ERR
+    }
+
+    verify() {
+      [[ -f "$image" && ! -L "$image" ]]
+      [[ "$(stat -c '%u:%g:%a:%s' "$image")" = "0:0:600:@@RUN_STORAGE_BYTES@@" ]]
+      [[ -d "$run_root" && ! -L "$run_root" ]]
+      if ! mountpoint -q "$run_root"; then
+        mount -o loop,nodev,nosuid "$image" "$run_root"
+      fi
+      source="$(findmnt -n -o SOURCE --target "$run_root")"
+      [[ "$source" = /dev/loop* ]]
+      read -r backing < <(losetup -n -O BACK-FILE "$source")
+      [[ "$backing" = "$image" ]]
+      [[ "$(findmnt -n -o FSTYPE --target "$run_root")" = "ext4" ]]
+      findmnt -n -o OPTIONS --target "$run_root" |
+        tr ',' '\n' |
+        grep -qx nodev
+      findmnt -n -o OPTIONS --target "$run_root" |
+        tr ',' '\n' |
+        grep -qx nosuid
+      [[ "$(stat -c '%u:%g:%a' "$run_root")" = "0:0:711" ]]
+      for directory in workspace home; do
+        path="$run_root/$directory"
+        [[ -d "$path" && ! -L "$path" ]]
+        chown "$storage_uid:$storage_gid" "$path"
+        chmod 0700 "$path"
+      done
+      chcon -t container_file_t \
+        "$run_root" "$run_root/workspace" "$run_root/home"
+    }
+
+    remove() {
+      if [[ ! -e "$run_root" && ! -L "$run_root" &&
+            ! -e "$image" && ! -L "$image" ]]; then
+        return
+      fi
+      if mountpoint -q "$run_root"; then
+        umount "$run_root"
+      fi
+      if [[ -e "$run_root" || -L "$run_root" ]]; then
+        [[ -d "$run_root" && ! -L "$run_root" ]]
+        rmdir "$run_root"
+      fi
+      if [[ -e "$image" || -L "$image" ]]; then
+        [[ -f "$image" && ! -L "$image" ]]
+        rm -f -- "$image"
+      fi
+    }
+
+    case "$action" in
+      create) create ;;
+      verify) verify ;;
+      remove) remove ;;
+      *) exit 64 ;;
+    esac
+    PISAFE_STORAGE
+    chmod 0755 /usr/local/sbin/pisafe-run-storage
+
     tee /etc/systemd/system/pisafe-firewall.service >/dev/null <<'PISAFE_SERVICE'
     [Unit]
     Description=pisafe static network boundary
@@ -303,6 +420,7 @@ provision:
     tee /etc/sudoers.d/90-pisafe-controller >/dev/null <<PISAFE_SUDOERS
     ${pisafe_user} ALL=(root) NOPASSWD: /usr/local/sbin/pisafe-clock-step ""
     ${pisafe_user} ALL=(root) NOPASSWD: /usr/local/sbin/pisafe-firewall-status ""
+    ${pisafe_user} ALL=(root) NOPASSWD: /usr/local/sbin/pisafe-run-storage *
     PISAFE_SUDOERS
     chmod 0440 /etc/sudoers.d/90-pisafe-controller
     if [[ -f /etc/sudoers.d/90-cloud-init-users ]]; then

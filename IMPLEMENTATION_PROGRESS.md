@@ -9,7 +9,7 @@ next.
 
 ## Current milestone
 
-Phase 1 is in progress. Five implementation slices now exist:
+Phase 1 is in progress. Six implementation slices now exist:
 
 1. The Go controller skeleton and single-repository Git isolation core.
 2. The dedicated Lima VM backend, host-network discovery, and initial static
@@ -21,9 +21,12 @@ Phase 1 is in progress. Five implementation slices now exist:
    pinning, and a portless Lima control-SSH ProxyCommand.
 5. User-facing run creation, fresh/reused VM orchestration, packaged image
    artifacts, excluded-input reporting, and explicit Zed connection launch.
+6. Stop/resume, exact-confirmation discard and failed-creation cleanup
+   recovery, cumulative wall-clock enforcement, and quota-backed persistent
+   run storage.
 
-`pisafe run` now uses the tested mountless path and materializes inside a
-private rootless container volume. Do not add a local-workspace fallback.
+`pisafe run` now uses the tested mountless path and materializes inside private
+quota-backed VM storage. Do not add a local-workspace fallback.
 
 ## Implemented
 
@@ -127,9 +130,9 @@ private rootless container volume. Do not add a local-workspace fallback.
 - Every upload is streamed as binary data, checked for exact byte count and
   SHA-256 in the VM, and atomically renamed.
 - The guest snapshot omits the Mac source path.
-- Stage files are imported into a new private Podman volume with
-  `podman volume import`; no Mac mount, VM bind mount, Podman socket, or
-  unsupported `podman cp --chown` path is used.
+- Stage files are imported with `podman unshare` into a private fixed-capacity
+  filesystem; no Mac mount, Podman socket, or unsupported
+  `podman cp --chown` path is used.
 - `cmd/pisafe-guest` invokes the same tested `gitstage.Materialize`
   implementation inside Linux and rejects snapshots containing a Mac path.
 
@@ -159,7 +162,7 @@ private rootless container volume. Do not add a local-workspace fallback.
 - The image contains Git, OpenSSH, Tini, Pi, and the static ARM64 guest helper.
 - Build-time SSH host keys are removed. A network-disabled one-shot container
   generates each run's host key and installs only its client public key into
-  the private home volume.
+  private quota-backed home storage.
 - Run commands require an immutable `sha256:` image ID and use:
   - UID/GID 1000;
   - read-only root;
@@ -168,9 +171,15 @@ private rootless container volume. Do not add a local-workspace fallback.
   - rootless pasta networking with explicit public DNS;
   - 2 CPUs, 4 GiB memory with no extra swap, and 512 PIDs;
   - bounded `/tmp` and `/run` tmpfs mounts; and
-  - unique workspace and home volumes, chowned for the non-root user.
+  - unique workspace and home directories inside a run-scoped,
+    fixed-capacity filesystem owned by the mapped non-root user.
 - No Podman/Docker socket, forwarded SSH agent, or credential environment is
   added.
+- Each run receives one sparse 10 GiB ext4 filesystem shared by its persistent
+  workspace and home. Root-owned image storage and a narrow fixed-policy helper
+  prevent the rootless VM user from resizing or remounting it.
+- Podman's independent `--timeout` enforces the run's remaining active budget
+  even after the Mac controller exits.
 
 ### Per-run SSH boundary
 
@@ -201,17 +210,20 @@ private rootless container volume. Do not add a local-workspace fallback.
 
 ### Run records and internal controller
 
-- `internal/runstate` writes version-2, mode-0600 JSON manifests atomically
+- `internal/runstate` writes version-3, mode-0600 JSON manifests atomically
   under the user config directory (or `PISAFE_STATE_DIR`).
 - It enforces `creating → active → stopped → active|imported|discarded|expired`.
 - Failed creation remains visibly `creating` with `last_error`; it is not
   silently deleted or mislabeled active.
-- `internal/runctl.StartPrepared` composes stage upload, private-volume import,
+- `internal/runctl.StartPrepared` composes stage upload, private-storage import,
   per-run key generation, network-disabled SSH initialization, hardened
   container start, host-key pinning, in-container materialization, transfer
   cleanup, manifest activation, and bounded rollback.
 - Creation rollback removes partial SSH client state along with the container,
-  volumes, and VM-side transfer directory.
+  persistent filesystem, and VM-side transfer directory. Allocation commands
+  are treated as potentially successful even when their transport response
+  fails, and the fixed storage helper independently removes exact partial
+  image or mount-directory artifacts.
 - Activation records the baseline commit returned by actual in-container
   materialization rather than retaining the host's pre-materialization
   placeholder.
@@ -228,6 +240,16 @@ private rootless container volume. Do not add a local-workspace fallback.
   saved the printed `ssh -F` command through Zed's "Connect New Server" flow.
   PiSafe never edits global SSH or Zed settings.
 - `pisafe list` displays the durable records.
+- `pisafe stop <run>` stops and removes only the container, accounts elapsed
+  active seconds conservatively, and preserves quota-backed storage and SSH
+  identity.
+- `pisafe resume <run>` verifies the current VM boundary, storage identity,
+  image, container identity, and mount sources before recreating the container
+  with only its remaining eight-hour cumulative active budget.
+- `pisafe discard <run> --confirm <run>` requires an exact repeated ID, stops
+  active work, and idempotently removes the exact container, storage
+  filesystem image, transfer stage, and Mac-side SSH secret before recording the
+  discard event. Failed `creating` records use the same recovery path.
 
 ## Tests and verification
 
@@ -245,18 +267,19 @@ git diff --check
 Current package coverage at this milestone:
 
 ```text
+pisafe        0.0%
 pisafe-guest  52.8%
-cli           31.7%
+cli           26.1%
 gitstage      68.8%
 hostnet       50.0%
-lima          75.3%
+lima          74.8%
 runcontainer  72.2%
-runctl        71.2%
+runctl        67.3%
 runid         92.3%
 runimage      74.6%
 runssh        68.0%
 runstart      70.0%
-runstate      70.1%
+runstate      68.1%
 ```
 
 The generated YAML is checked by the installed Lima validator in the normal
@@ -288,19 +311,26 @@ Verified against a real ARM64 VM:
 
   ```text
   recipe digest:   sha256:2ffa36731cbcc11510a87a1f2dbe205d788407cb3e8ba60dc74387f5471ad052
-  image ID:        sha256:1643ca05afc1674b6aba93238e72d6adad6f7edee7c37c9c00c50864d0691f3d
-  manifest digest: sha256:282a06d3798815916615cd5d48130485ce99d7a61a7ab62182f58c5e9ca3ff07
+  image ID:        sha256:741fdd45acd031b010bd694b2a3bddeeaed1c57be531d98fc6ef4f95c7fa49b5
+  manifest digest: sha256:adf1001f96e66a172cddf8d3f6964b943c0605ef9843f58f4fd863948153c6c0
   ```
 
 - The managed installer built that image from its two-file tar stream,
   validated its labels/platform/immutable ID, and reused it on the next call.
+- The final recreated VM uses security profile
+  `sha256:6a9c31943325290e23272c7c95af4ae80df8c94718c3ed8ec5e1824efbfcc927`.
+- The storage helper created an exact mapped-UID 10 GiB ext4 filesystem,
+  accepted an allocation within the limit, rejected an over-limit allocation,
+  and removed both its mount and sparse backing image.
+- A disposable Podman container with a two-second `--timeout` was killed
+  independently and left exited for lifecycle reconciliation.
 - A direct runtime check verified UID 1000, zero effective/bounding
   capabilities, `NoNewPrivs=1`, read-only root, 4 GiB memory, 512 PIDs,
   Pi 0.82.0, and public HTTPS.
 - `TestLiveSSHStageAndContainerMaterialize` passed against that exact image:
-  dirty tracked state crossed Lima SSH, entered a private volume, materialized
-  inside the hardened container, and could be deleted there without altering
-  the Mac checkout.
+  dirty tracked state crossed Lima SSH, entered private quota-backed storage,
+  materialized inside the hardened container, and could be deleted there
+  without altering the Mac checkout.
 - That same live test generated fresh client and host keys, pinned the host
   key, connected with the generated ProxyCommand, and wrote a file through the
   Zed-compatible OpenSSH session. A Pi executable in the same container saw
@@ -312,12 +342,18 @@ Verified against a real ARM64 VM:
   baseline commit, reported all five then-untracked implementation files as
   excluded, and connected through its printed SSH command as UID 1000. The
   imported baseline was clean and the original checkout remained unchanged.
+- The actual CLI then completed
+  `run → stop → resume → SSH → discard --confirm`: stop preserved the
+  workspace, resume reused the pinned SSH host identity and connected as UID
+  1000 with the reduced budget, and discard left a version-3 audit manifest
+  while removing the container, persistent filesystem, remote stage, and
+  client key.
 
 Run that end-to-end test with:
 
 ```sh
 PISAFE_LIVE_LIMA=1 \
-PISAFE_LIVE_RUN_IMAGE=sha256:1643ca05afc1674b6aba93238e72d6adad6f7edee7c37c9c00c50864d0691f3d \
+PISAFE_LIVE_RUN_IMAGE=sha256:741fdd45acd031b010bd694b2a3bddeeaed1c57be531d98fc6ef4f95c7fa49b5 \
 go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
 ```
 
@@ -326,21 +362,20 @@ go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
 A persistent Lima instance named `pisafe` was left running. It contains no
 project runs or user data. It was freshly provisioned from the current
 generated configuration and contains only cached base/test images plus the
-current `localhost/pisafe-run:managed-2ffa36731cbcc115` image. Older managed
-recipe images remain only as rebuildable cache entries.
+current `localhost/pisafe-run:managed-2ffa36731cbcc115` image.
 
 Fresh provisioning verified all security-sensitive setup together:
 
 - automatic subordinate UID/GID assignment and `podman system migrate`;
-- the clock-step and firewall-status helpers work through their exact sudo
-  rules;
+- the clock-step, firewall-status, and fixed-policy run-storage helpers work
+  through their narrow sudo rules;
 - unrestricted `sudo -n true` is denied;
 - the root-owned security-profile record is mode 0444 and currently contains
-  `sha256:ebb0446c0c2b37610a54e5784c51e2a7866c7cf5172d4e88ce49942fc8a7cb8a`;
+  `sha256:6a9c31943325290e23272c7c95af4ae80df8c94718c3ed8ec5e1824efbfcc927`;
 - the full container network suite passes; and
 - the managed image install/reuse and end-to-end staging tests pass.
 
-The final cleanup audit found no run-labelled containers, run volumes, or
+The final cleanup audit found no run-labelled containers, run filesystems, or
 VM-side staging directories.
 
 The VM was recreated while fixing live-only provisioning issues. Those issues
@@ -358,8 +393,9 @@ were:
    which would let a VM-user escape remove the firewall. The newly generated
    config revokes it and exposes only two exact, non-firewall-mutating
    controller helpers.
-8. Fedora Podman not supporting `podman cp --chown`; stage transfer now uses
-   the documented rootless local-volume import path.
+8. Fedora Podman not supporting `podman cp --chown`; stage transfer first used
+   local-volume import and now uses `podman unshare` extraction into
+   quota-backed storage.
 9. Fedora Podman's image-inspection `Id` is a bare 64-character hex value,
    while run specs deliberately require `sha256:` form. The installer now
    validates and normalizes it before returning the immutable ID.
@@ -370,6 +406,19 @@ were:
     which denies loopback to the unprivileged Lima user. SSH now uses a
     portless `podman exec` stdio relay to container loopback instead of adding
     a mutable firewall exception.
+12. Podman's persistent local-volume `size` option requires root and supports
+    quota only on XFS, while the pinned Fedora VM stores its writable disk on
+    Btrfs. A Btrfs parent qgroup can be bypassed with uncharged nested
+    subvolumes, so runs use fixed-size ext4 filesystem images through a
+    fixed-policy helper instead of either mechanism.
+13. Container UID 1000 maps to subordinate host UID/GID 100999 in rootless
+    Podman. The storage helper derives those IDs from `/etc/subuid` and
+    `/etc/subgid`, and stage import runs inside `podman unshare`.
+14. On this host, Lima 2.2.0 repeatedly booted a stopped VZ VM without
+    restoring its SSH path, including with no run storage present. Native
+    `vzNAT` was tested and had the same failure, so it was not retained.
+    Fresh VM creation is reliable; stopped-VM restart remains an explicit
+    upstream/platform gap.
 
 When Codex runs inside a restricted filesystem sandbox, it may be unable to
 connect to `~/.lima/pisafe/ha.sock`; `limactl list` then falsely labels the
@@ -379,14 +428,12 @@ sandboxed result.
 
 ## Known gaps
 
-- No user-facing `connect`, `diff`, `apply`, `cp`, `discard`, or `gc`
-  implementation exists.
+- No user-facing `connect`, `diff`, `apply`, `cp`, or `gc` implementation
+  exists.
 - `pisafe zed` launches a connection that was explicitly saved once in Zed.
   Fully automatic first-launch remains intentionally absent because Zed's CLI
   URL cannot carry `-F` and PiSafe does not silently edit global SSH or Zed
   settings.
-- Persistent workspace disk quota and wall-clock enforcement are missing.
-  CPU, memory, PID, and tmpfs limits are implemented and live-verified.
 - Selected untracked/ignored input archive handling is missing.
 - Submodule staging and journaled multi-repository apply are missing.
 - The broker port set and reverse SSH inference relay are not implemented.
@@ -397,6 +444,10 @@ sandboxed result.
 - Security-profile drift is detected and fails closed, but automated
   replacement/reconciliation is intentionally absent because deleting a VM is
   destructive and must be an explicit lifecycle operation.
+- Run stop/resume is live-verified while the dedicated VM remains running.
+  On this host, a cleanly stopped Lima 2.2.0 VZ VM boots but does not regain
+  SSH over either default user-mode networking or `vzNAT`; automatic
+  stopped-VM recovery is therefore not yet reliable.
 - Pi is installed, but inference intentionally remains unusable until the
   broker/relay exists. No raw provider credential may be added as a shortcut.
 - Pi's top-level tarball is integrity-pinned, but a reproducible published
@@ -404,14 +455,13 @@ sandboxed result.
 
 ## Next implementation slice
 
-Finish the first run lifecycle without weakening the boundary:
+Continue Phase 1 without weakening the boundary:
 
-1. Implement stop/resume and exact-confirmation discard, including reliable
-   cleanup recovery and wall-clock enforcement. Choose and live-test a
-   persistent workspace disk-quota mechanism before claiming the disk limit.
-2. Implement the reverse inference relay and run-scoped capability.
-3. Then add selected untracked inputs and submodule-aware journaled apply
+1. Implement the reverse inference relay and run-scoped capability.
+2. Then add selected untracked inputs and submodule-aware journaled apply
    before exposing `pisafe apply`.
+3. Add `diff`, hardened `cp`, and seven-day GC after the apply transaction is
+   durable.
 
 ## Useful references
 

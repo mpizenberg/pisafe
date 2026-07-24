@@ -20,15 +20,22 @@ import (
 
 type Backend interface {
 	CreateStage(context.Context, gitstage.PreparedStage) (string, error)
-	ImportStage(context.Context, string, string) error
+	CreateStorage(context.Context, string) error
+	VerifyStorage(context.Context, string) error
+	ImportStage(context.Context, string) error
 	Execute(context.Context, io.Reader, ...string) ([]byte, error)
 	RemoveRun(context.Context, string) error
+	RemoveStorage(context.Context, string) error
 	SSHGateway(context.Context) (runssh.Gateway, error)
 }
 
 type StateStore interface {
 	Create(runstate.Manifest) (runstate.Manifest, error)
-	Activate(string, runstate.SSHConnection, string) (runstate.Manifest, error)
+	Activate(string, runstate.SSHConnection, string, time.Time) (runstate.Manifest, error)
+	Get(string) (runstate.Manifest, error)
+	Stop(string, time.Time) (runstate.Manifest, error)
+	Resume(string, time.Time) (runstate.Manifest, error)
+	Discard(string) (runstate.Manifest, error)
 	RecordError(string, error) (runstate.Manifest, error)
 }
 
@@ -65,19 +72,20 @@ func (controller Controller) StartPrepared(
 	}
 
 	manifest, err := controller.store.Create(runstate.Manifest{
-		RunID:     prepared.Snapshot.RunID,
-		Project:   projectDirectory,
-		Snapshot:  prepared.Snapshot,
-		Image:     imageID,
-		Container: spec.ContainerName(),
-		Workspace: "/work/" + projectDirectory,
+		RunID:              prepared.Snapshot.RunID,
+		Project:            projectDirectory,
+		Snapshot:           prepared.Snapshot,
+		Image:              imageID,
+		Container:          spec.ContainerName(),
+		Workspace:          "/work/" + projectDirectory,
+		ActiveLimitSeconds: spec.WallSeconds,
 	})
 	if err != nil {
 		return runstate.Manifest{}, err
 	}
 
 	remoteAllocated := false
-	var createdVolumes []string
+	storageAllocated := false
 	containerAllocated := false
 	sshAllocated := false
 	defer func() {
@@ -93,7 +101,7 @@ func (controller Controller) StartPrepared(
 			cleanupContext,
 			spec,
 			remoteAllocated,
-			createdVolumes,
+			storageAllocated,
 			containerAllocated,
 			sshAllocated,
 		)
@@ -114,26 +122,16 @@ func (controller Controller) StartPrepared(
 	}
 	sshAllocated = true
 
+	remoteAllocated = true
 	if _, err := controller.backend.CreateStage(ctx, prepared); err != nil {
 		return runstate.Manifest{}, fmt.Errorf("stream stage into VM: %w", err)
 	}
-	remoteAllocated = true
 
-	volumeCommands, err := spec.CreateVolumeArgs()
-	if err != nil {
+	storageAllocated = true
+	if err := controller.backend.CreateStorage(ctx, spec.RunID); err != nil {
 		return runstate.Manifest{}, err
 	}
-	for _, args := range volumeCommands {
-		if _, err := controller.podman(ctx, nil, args...); err != nil {
-			return runstate.Manifest{}, fmt.Errorf("create run volume: %w", err)
-		}
-		createdVolumes = append(createdVolumes, args[len(args)-1])
-	}
-	if err := controller.backend.ImportStage(
-		ctx,
-		spec.RunID,
-		spec.WorkspaceVolume(),
-	); err != nil {
+	if err := controller.backend.ImportStage(ctx, spec.RunID); err != nil {
 		return runstate.Manifest{}, err
 	}
 
@@ -154,10 +152,17 @@ func (controller Controller) StartPrepared(
 	if err != nil {
 		return runstate.Manifest{}, err
 	}
+	containerAllocated = true
 	if _, err := controller.podman(ctx, nil, runArgs...); err != nil {
 		return runstate.Manifest{}, fmt.Errorf("start run container: %w", err)
 	}
-	containerAllocated = true
+	inspection, err := controller.inspectContainer(ctx, spec)
+	if err != nil {
+		return runstate.Manifest{}, err
+	}
+	if inspection == nil || inspection.State.Status != "running" {
+		return runstate.Manifest{}, fmt.Errorf("new run container is not running")
+	}
 
 	gateway, err := controller.backend.SSHGateway(ctx)
 	if err != nil {
@@ -203,7 +208,7 @@ func (controller Controller) StartPrepared(
 		KnownHostsFile:     endpoint.KnownHostsFile,
 		ConfigFile:         endpoint.ConfigFile,
 		HostKeyFingerprint: endpoint.HostKeyFingerprint,
-	}, materialized.BaselineCommit)
+	}, materialized.BaselineCommit, inspection.State.StartedAt)
 	if err != nil {
 		return runstate.Manifest{}, fmt.Errorf("activate run manifest: %w", err)
 	}
@@ -256,7 +261,7 @@ func (controller Controller) rollback(
 	ctx context.Context,
 	spec runcontainer.Spec,
 	remoteAllocated bool,
-	createdVolumes []string,
+	storageAllocated bool,
 	containerAllocated bool,
 	sshAllocated bool,
 ) error {
@@ -265,18 +270,14 @@ func (controller Controller) rollback(
 		if _, err := controller.podman(
 			ctx,
 			nil,
-			"rm", "--force", spec.ContainerName(),
+			"rm", "--force", "--ignore", spec.ContainerName(),
 		); err != nil {
 			failures = append(failures, fmt.Errorf("remove failed container: %w", err))
 		}
 	}
-	for _, volume := range createdVolumes {
-		if _, err := controller.podman(
-			ctx,
-			nil,
-			"volume", "rm", "--force", volume,
-		); err != nil && !strings.Contains(err.Error(), "no such volume") {
-			failures = append(failures, fmt.Errorf("remove failed volume %s: %w", volume, err))
+	if storageAllocated {
+		if err := controller.backend.RemoveStorage(ctx, spec.RunID); err != nil {
+			failures = append(failures, fmt.Errorf("remove failed storage: %w", err))
 		}
 	}
 	if remoteAllocated {

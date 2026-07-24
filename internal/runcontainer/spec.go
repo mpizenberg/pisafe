@@ -15,9 +15,12 @@ const (
 	DefaultMemory     = int64(4 * 1024 * 1024 * 1024)
 	DefaultPIDs       = 512
 	DefaultTemporary  = int64(1024 * 1024 * 1024)
+	DefaultPersistent = int64(10 * 1024 * 1024 * 1024)
+	DefaultWallClock  = int64(8 * 60 * 60)
 	containerUser     = "1000:1000"
 	containerWorkRoot = "/work"
 	containerHome     = "/home/node"
+	guestStorageRoot  = "/var/lib/pisafe/runs"
 )
 
 var imageIDPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
@@ -29,6 +32,7 @@ type Spec struct {
 	MemoryBytes int64
 	PIDs        int
 	TmpBytes    int64
+	WallSeconds int64
 }
 
 func DefaultSpec(runID, imageID string) Spec {
@@ -39,6 +43,7 @@ func DefaultSpec(runID, imageID string) Spec {
 		MemoryBytes: DefaultMemory,
 		PIDs:        DefaultPIDs,
 		TmpBytes:    DefaultTemporary,
+		WallSeconds: DefaultWallClock,
 	}
 }
 
@@ -61,6 +66,9 @@ func (spec Spec) Validate() error {
 	if spec.TmpBytes <= 0 {
 		return fmt.Errorf("temporary-filesystem limit is required")
 	}
+	if spec.WallSeconds <= 0 {
+		return fmt.Errorf("wall-clock limit is required")
+	}
 	return nil
 }
 
@@ -68,32 +76,16 @@ func (spec Spec) ContainerName() string {
 	return "pisafe-run-" + spec.RunID
 }
 
-func (spec Spec) WorkspaceVolume() string {
-	return "pisafe-work-" + spec.RunID
+func (spec Spec) StoragePath() string {
+	return guestStorageRoot + "/" + spec.RunID
 }
 
-func (spec Spec) HomeVolume() string {
-	return "pisafe-home-" + spec.RunID
+func (spec Spec) WorkspacePath() string {
+	return spec.StoragePath() + "/workspace"
 }
 
-func (spec Spec) CreateVolumeArgs() ([][]string, error) {
-	if err := spec.Validate(); err != nil {
-		return nil, err
-	}
-	return [][]string{
-		{
-			"volume", "create",
-			"--label", "io.pisafe.run=" + spec.RunID,
-			"--label", "io.pisafe.kind=workspace",
-			spec.WorkspaceVolume(),
-		},
-		{
-			"volume", "create",
-			"--label", "io.pisafe.run=" + spec.RunID,
-			"--label", "io.pisafe.kind=home",
-			spec.HomeVolume(),
-		},
-	}, nil
+func (spec Spec) HomePath() string {
+	return spec.StoragePath() + "/home"
 }
 
 func (spec Spec) RunArgs() ([]string, error) {
@@ -120,10 +112,11 @@ func (spec Spec) RunArgs() ([]string, error) {
 		"--memory", memory,
 		"--memory-swap", memory,
 		"--pids-limit", strconv.Itoa(spec.PIDs),
+		"--timeout", strconv.FormatInt(spec.WallSeconds, 10),
 		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=" + tmpSize,
 		"--mount", "type=tmpfs,dst=/run,tmpfs-size=16777216,tmpfs-mode=0755,U=true",
-		"--mount", "type=volume,src=" + spec.WorkspaceVolume() + ",dst=" + containerWorkRoot + ",nodev,nosuid,U=true",
-		"--mount", "type=volume,src=" + spec.HomeVolume() + ",dst=" + containerHome + ",nodev,nosuid,U=true",
+		"--mount", "type=bind,src=" + spec.WorkspacePath() + ",dst=" + containerWorkRoot + ",nodev,nosuid",
+		"--mount", "type=bind,src=" + spec.HomePath() + ",dst=" + containerHome + ",nodev,nosuid",
 		"--workdir", containerWorkRoot,
 		"--env", "HOME=" + containerHome,
 		"--env", "GIT_TERMINAL_PROMPT=0",
@@ -151,7 +144,7 @@ func (spec Spec) ConfigureSSHArgs() ([]string, error) {
 		"--security-opt=no-new-privileges",
 		"--network=none",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=16777216",
-		"--mount", "type=volume,src=" + spec.HomeVolume() + ",dst=" + containerHome + ",nodev,nosuid,U=true",
+		"--mount", "type=bind,src=" + spec.HomePath() + ",dst=" + containerHome + ",nodev,nosuid",
 		"--env", "HOME=" + containerHome,
 		spec.ImageID,
 		"pisafe-guest", "configure-ssh",

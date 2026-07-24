@@ -64,13 +64,14 @@ rm -rf -- "$run_root"
 `
 
 	importStageScript = `set -euo pipefail
-run_root="$HOME/.local/share/pisafe/runs/$1"
-stage="$run_root/stage"
-test -d "$stage"
-test "$2" = "pisafe-work-$1"
-tar --format=posix --numeric-owner --owner=1000 --group=1000 \
+	run_root="$HOME/.local/share/pisafe/runs/$1"
+	stage="$run_root/stage"
+	test -d "$stage"
+	workspace="/var/lib/pisafe/runs/$1/workspace"
+	test -d "$workspace"
+	tar --format=posix --numeric-owner --owner=1000 --group=1000 \
 	-C "$run_root" -cf - stage |
-	podman volume import "$2" -
+	podman unshare tar --numeric-owner -C "$workspace" -xf -
 `
 )
 
@@ -193,27 +194,66 @@ func (transport Transport) RemoveRun(ctx context.Context, runID string) error {
 	return nil
 }
 
-// ImportStage copies the VM-side stage into the run's private Podman volume.
-// It uses a tar stream local to the VM; the source directory is never mounted
-// into the container and no Podman socket is exposed.
-func (transport Transport) ImportStage(
-	ctx context.Context,
-	runID string,
-	workspaceVolume string,
-) error {
+// CreateStorage allocates one root-owned, fixed-capacity filesystem. The
+// privileged helper accepts only validated run IDs and a fixed size policy.
+func (transport Transport) CreateStorage(ctx context.Context, runID string) error {
 	if err := runid.Validate(runID); err != nil {
 		return err
 	}
-	if workspaceVolume != "pisafe-work-"+runID {
-		return fmt.Errorf("workspace volume does not match run ID")
+	if _, err := transport.Execute(
+		ctx,
+		nil,
+		"sudo", "/usr/local/sbin/pisafe-run-storage", "create", runID,
+	); err != nil {
+		return fmt.Errorf("create quota-limited run storage: %w", err)
+	}
+	return nil
+}
+
+func (transport Transport) VerifyStorage(ctx context.Context, runID string) error {
+	if err := runid.Validate(runID); err != nil {
+		return err
+	}
+	if _, err := transport.Execute(
+		ctx,
+		nil,
+		"sudo", "/usr/local/sbin/pisafe-run-storage", "verify", runID,
+	); err != nil {
+		return fmt.Errorf("verify quota-limited run storage: %w", err)
+	}
+	return nil
+}
+
+func (transport Transport) RemoveStorage(ctx context.Context, runID string) error {
+	if err := runid.Validate(runID); err != nil {
+		return err
+	}
+	if _, err := transport.Execute(
+		ctx,
+		nil,
+		"sudo", "/usr/local/sbin/pisafe-run-storage", "remove", runID,
+	); err != nil {
+		return fmt.Errorf("remove quota-limited run storage: %w", err)
+	}
+	return nil
+}
+
+// ImportStage copies the VM-side stage into the run's quota-limited workspace.
+// The source directory is never mounted into the container or onto the Mac.
+func (transport Transport) ImportStage(
+	ctx context.Context,
+	runID string,
+) error {
+	if err := runid.Validate(runID); err != nil {
+		return err
 	}
 	if _, err := transport.Execute(
 		ctx,
 		nil,
 		"bash", "-ceu", importStageScript,
-		"pisafe-import", runID, workspaceVolume,
+		"pisafe-import", runID,
 	); err != nil {
-		return fmt.Errorf("import stage into workspace volume: %w", err)
+		return fmt.Errorf("import stage into run workspace: %w", err)
 	}
 	return nil
 }

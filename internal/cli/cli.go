@@ -7,11 +7,12 @@ import (
 	"io"
 	"os/exec"
 	"text/tabwriter"
+	"time"
 
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
-var errUsage = errors.New("usage: pisafe <run|list|zed|doctor|help>")
+var errUsage = errors.New("usage: pisafe <run|stop|resume|discard|list|zed|doctor|help>")
 
 func Run(ctx context.Context, args []string, out io.Writer) error {
 	if len(args) == 0 {
@@ -40,6 +41,26 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 			return errUsage
 		}
 		return runZed(ctx, args[1])
+	case "stop":
+		if len(args) != 2 {
+			return errUsage
+		}
+		return runStop(ctx, args[1], out)
+	case "resume":
+		if len(args) != 2 {
+			return errUsage
+		}
+		return runResume(ctx, args[1], out)
+	case "discard":
+		if len(args) != 4 || args[2] != "--confirm" {
+			return fmt.Errorf(
+				"discard requires exact confirmation: pisafe discard RUN --confirm RUN",
+			)
+		}
+		if args[3] != args[1] {
+			return fmt.Errorf("discard confirmation does not exactly match run %q", args[1])
+		}
+		return runDiscard(ctx, args[1], out)
 	case "help", "-h", "--help":
 		printHelp(out)
 		return nil
@@ -53,6 +74,11 @@ func printHelp(out io.Writer) {
 
 Usage:
   pisafe run       Create an isolated run from the current Git repository
+  pisafe stop RUN  Stop a run while preserving its workspace
+  pisafe resume RUN
+                   Resume a stopped run
+  pisafe discard RUN --confirm RUN
+                   Permanently delete one exact run workspace
   pisafe zed RUN   Open a configured run in Zed
   pisafe doctor    Check Phase 1 host prerequisites
   pisafe list      Show durable run records
@@ -80,6 +106,10 @@ func runList(out io.Writer) error {
 	fmt.Fprintln(table, "RUN\tSTATE\tPROJECT\tUPDATED")
 	for _, run := range runs {
 		state := string(run.State)
+		if run.State == runstate.StateActive &&
+			runstate.RemainingSeconds(run, time.Now()) == 0 {
+			state += " (limit reached)"
+		}
 		if run.LastError != "" {
 			state += " (error)"
 		}
@@ -109,6 +139,13 @@ func runZed(ctx context.Context, runID string) error {
 	}
 	if manifest.State != runstate.StateActive {
 		return fmt.Errorf("run %q is %s, not active", runID, manifest.State)
+	}
+	if runstate.RemainingSeconds(manifest, time.Now()) == 0 {
+		return fmt.Errorf(
+			"run %q reached its wall-clock limit; use pisafe stop %s to reconcile it",
+			runID,
+			runID,
+		)
 	}
 	if manifest.SSH == nil {
 		return fmt.Errorf("run %q has no SSH connection", runID)

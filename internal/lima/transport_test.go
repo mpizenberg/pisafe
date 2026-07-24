@@ -110,7 +110,6 @@ func TestTransportImportStageIsRunScoped(t *testing.T) {
 	if err := transport.ImportStage(
 		context.Background(),
 		"run-123",
-		"pisafe-work-run-123",
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -119,16 +118,45 @@ func TestTransportImportStageIsRunScoped(t *testing.T) {
 	}
 	call := runner.calls[0]
 	assertArgsPrefix(t, call, "shell", "pisafe", "bash", "-ceu")
-	if got := call.args[len(call.args)-2:]; strings.Join(got, "|") !=
-		"run-123|pisafe-work-run-123" {
+	if got := call.args[len(call.args)-1:]; strings.Join(got, "|") !=
+		"run-123" {
 		t.Fatalf("positional arguments = %#v", got)
 	}
 	if err := transport.ImportStage(
 		context.Background(),
-		"run-123",
-		"pisafe-work-other",
+		"../escape",
 	); err == nil {
-		t.Fatal("mismatched volume was accepted")
+		t.Fatal("unsafe run was accepted")
+	}
+}
+
+func TestTransportStorageUsesFixedPrivilegedHelper(t *testing.T) {
+	runner := &fakeRunner{}
+	transport := Transport{instance: InstanceName, runner: runner}
+	for _, operation := range []struct {
+		name string
+		call func() error
+	}{
+		{name: "create", call: func() error {
+			return transport.CreateStorage(context.Background(), "run-123")
+		}},
+		{name: "verify", call: func() error {
+			return transport.VerifyStorage(context.Background(), "run-123")
+		}},
+		{name: "remove", call: func() error {
+			return transport.RemoveStorage(context.Background(), "run-123")
+		}},
+	} {
+		if err := operation.call(); err != nil {
+			t.Fatal(err)
+		}
+		call := runner.calls[len(runner.calls)-1]
+		assertArgsPrefix(
+			t,
+			call,
+			"shell", "pisafe", "sudo",
+			"/usr/local/sbin/pisafe-run-storage", operation.name, "run-123",
+		)
 	}
 }
 

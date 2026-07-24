@@ -144,12 +144,13 @@ inside the dedicated mountless VM.
 Each run receives:
 
 - A unique run ID and container.
-- Its own staged Git repository and writable run volume.
+- Its own staged Git repository and quota-backed writable run storage.
 - A read-only mounted global profile.
 - A per-project session volume.
 - A per-project dependency-cache volume.
 - A unique SSH endpoint and short-lived broker capability.
-- CPU, memory, process-count, disk, and wall-clock limits.
+- CPU, memory, process-count, temporary-filesystem, 10 GiB persistent-storage,
+  and eight-hour cumulative active wall-clock limits.
 
 Use a non-root user, a read-only container root, dropped capabilities,
 `no-new-privileges`, and no container socket. The container has open internet
@@ -196,7 +197,7 @@ pisafe diff <run>
 pisafe log <run>
 pisafe cp <run>:<path> [dest]
 pisafe apply <run>
-pisafe discard <run>
+pisafe discard <run> --confirm <run>
 pisafe gc
 pisafe doctor
 
@@ -217,8 +218,8 @@ files, must not write through existing destination symlinks, and must confirm
 before overwriting. It also enforces limits on total expanded bytes, file
 count, and individual file size, and extracts with
 directory-descriptor-relative operations so the destination cannot be swapped
-for a symlink mid-copy. `discard` is explicit and destructive, so it
-identifies the exact run before deleting it.
+for a symlink mid-copy. `discard` is explicit and destructive, so its
+confirmation argument must repeat the exact run ID before anything is deleted.
 
 ## Staging and Git behavior
 
@@ -524,6 +525,9 @@ creating → active → stopped → imported | discarded | expired
 
 - Active/stopped runs are resumable. Resuming issues a fresh short-lived
   broker capability rather than extending the old one.
+- Stopped time does not consume the eight-hour active budget. Podman kills a
+  run independently when its current remaining budget expires; the next
+  lifecycle command reconciles the durable record to stopped.
 - Successful `apply` marks a run imported but keeps it recoverable for seven
   days.
 - `discard` deletes only after exact run confirmation.
@@ -586,7 +590,7 @@ reusable secret is readable by anything in the sandbox.
 
 - Dedicated mountless Lima VM with the static firewall rules.
 - Pinned ARM64 run image and current Pi package.
-- Per-run containers and volumes.
+- Per-run containers and quota-backed storage.
 - Git bundle staging/import, including submodules.
 - Dirty baseline choices.
 - Zed Remote SSH.
@@ -688,7 +692,7 @@ The first usable release should prove:
   Lima user; opening dynamic exceptions would add mutable privileged state.
   Reversing this later would change stored connection metadata and the
   firewall contract.
-- A network-disabled one-shot container initializes the run home volume, then
+- A network-disabled one-shot container initializes the run home directory, then
   non-root `sshd` is the run container's main process. A detached `sshd`
   started after the container was not retained because it would disappear
   across stop/resume and require a second process-lifecycle mechanism. This is
@@ -716,6 +720,36 @@ The first usable release should prove:
   raw provider credential were not retained because the former would delay
   lifecycle validation and the latter would violate the core boundary. This is
   cheap to reverse when the broker lands.
+- Persistent run data uses one fixed-size 10 GiB sparse ext4 filesystem
+  containing the workspace and home, mounted and removed by a narrow
+  fixed-policy helper. Unbounded rootless Podman volumes and Podman's XFS-only
+  volume quota were not retained because the pinned Fedora image uses Btrfs
+  and Podman's quota options require root. A parent Btrfs qgroup was also
+  rejected because untrusted code could create uncharged nested subvolumes.
+  Reversing this requires a storage-layout migration.
+- Runs receive eight cumulative active hours. Podman's independent
+  `--timeout` enforces each active interval, while stop removes the container
+  and resume recreates it over the same storage with only the recorded
+  remainder. A controller daemon or mutable VM-side timer was not retained
+  because either adds a second trusted lifecycle service. Changing the default
+  is cheap, but changing accounting semantics requires a manifest migration.
+- Destructive confirmation is the repeated non-interactive form
+  `pisafe discard RUN --confirm RUN`. A terminal-only prompt was not retained
+  because exact confirmation should work identically in scripts and terminals.
+  Reversing this is cheap.
+- Run manifests moved to version 3 to make active-budget accounting and
+  deadlines durable. Automatic version-2 migration was not retained because
+  the pre-change audit found no default-state runs to preserve and inferred
+  wall-clock history would be untrustworthy. Adding an explicit migration
+  later remains possible, but released version-2 records would need a policy
+  for their unknown elapsed time.
+- Lima's default VZ user-mode network remains in the generated profile.
+  Native `vzNAT` was tested but not retained because it exhibited the same
+  stopped-VM SSH recovery failure and made its Mac-side interface appear only
+  after the immutable host-network profile was captured. QEMU was not selected
+  because it is not installed and would add a host dependency. This can be
+  revisited when upstream VZ restart behavior or the supported host toolchain
+  changes; changing it requires VM recreation.
 
 ## Primary references
 

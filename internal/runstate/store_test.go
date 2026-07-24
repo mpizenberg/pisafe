@@ -24,7 +24,7 @@ func TestStoreLifecycleAndList(t *testing.T) {
 		t.Fatalf("created = %#v", created)
 	}
 	now = now.Add(time.Minute)
-	active, err := store.Activate("run-one", testSSHConnection(root, "run-one"), "")
+	active, err := store.Activate("run-one", testSSHConnection(root, "run-one"), "", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,12 +32,15 @@ func TestStoreLifecycleAndList(t *testing.T) {
 		t.Fatalf("active = %#v", active)
 	}
 	now = now.Add(time.Minute)
-	stopped, err := store.Transition("run-one", StateStopped)
+	stopped, err := store.Stop("run-one", now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if stopped.StoppedAt == nil || !stopped.StoppedAt.Equal(now) {
 		t.Fatalf("stopped = %#v", stopped)
+	}
+	if stopped.ActiveElapsedSeconds != 60 {
+		t.Fatalf("active elapsed = %d", stopped.ActiveElapsedSeconds)
 	}
 
 	now = now.Add(time.Minute)
@@ -62,18 +65,27 @@ func TestStoreLifecycleAndList(t *testing.T) {
 }
 
 func TestStoreRejectsInvalidTransitions(t *testing.T) {
-	store := NewStore(t.TempDir())
+	root := t.TempDir()
+	store := NewStore(root)
 	if _, err := store.Create(testManifest("run-one")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Transition("run-one", StateDiscarded); err == nil ||
+	if _, err := store.Activate(
+		"run-one",
+		testSSHConnection(root, "run-one"),
+		"",
+		time.Time{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Discard("run-one"); err == nil ||
 		!strings.Contains(err.Error(), "invalid run transition") {
 		t.Fatalf("error = %v", err)
 	}
-	if _, err := store.Transition("run-one", StateActive); err == nil {
-		t.Fatal("creating run activated without SSH connection")
+	if _, err := store.Resume("run-one", time.Now()); err == nil {
+		t.Fatal("active run resumed")
 	}
-	if _, err := store.Transition("../escape", StateActive); err == nil {
+	if _, err := store.Resume("../escape", time.Now()); err == nil {
 		t.Fatal("unsafe run ID was accepted")
 	}
 }
@@ -89,7 +101,7 @@ func TestStoreRejectsDuplicateAndCorruptManifest(t *testing.T) {
 	}
 	if err := os.WriteFile(
 		filepath.Join(root, "bad.json"),
-		[]byte(`{"version":2,"run_id":"other"}`),
+		[]byte(`{"version":3,"run_id":"other"}`),
 		0o600,
 	); err != nil {
 		t.Fatal(err)
@@ -115,6 +127,7 @@ func TestStoreRecordsAndClearsOperationError(t *testing.T) {
 		"run-one",
 		testSSHConnection(store.root, "run-one"),
 		"",
+		time.Time{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +144,12 @@ func TestStoreActivatesWithRunScopedSSHConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	connection := testSSHConnection(root, "run-one")
-	active, err := store.Activate("run-one", connection, strings.Repeat("a", 40))
+	active, err := store.Activate(
+		"run-one",
+		connection,
+		strings.Repeat("a", 40),
+		time.Time{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +175,7 @@ func TestStoreRejectsMismatchedSSHConnection(t *testing.T) {
 	}
 	if _, err := store.Activate("run-one", SSHConnection{
 		Alias: "pisafe-other",
-	}, ""); err == nil {
+	}, "", time.Time{}); err == nil {
 		t.Fatal("mismatched SSH connection was accepted")
 	}
 }
@@ -172,15 +190,51 @@ func TestStoreRejectsInvalidMaterializedBaseline(t *testing.T) {
 		"run-one",
 		testSSHConnection(root, "run-one"),
 		"not-a-git-object",
+		time.Time{},
 	); err == nil {
 		t.Fatal("invalid baseline commit was accepted")
 	}
 }
 
+func TestStoreAccountsCumulativeActiveWallClock(t *testing.T) {
+	root := t.TempDir()
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	store := NewStore(root)
+	store.now = func() time.Time { return now }
+	if _, err := store.Create(testManifest("run-one")); err != nil {
+		t.Fatal(err)
+	}
+	active, err := store.Activate("run-one", testSSHConnection(root, "run-one"), "", time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.ActiveDeadline == nil ||
+		!active.ActiveDeadline.Equal(now.Add(8*time.Hour)) {
+		t.Fatalf("active deadline = %v", active.ActiveDeadline)
+	}
+	now = now.Add(90*time.Minute + 500*time.Millisecond)
+	stopped, err := store.Stop("run-one", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopped.ActiveElapsedSeconds != 5401 {
+		t.Fatalf("active elapsed = %d", stopped.ActiveElapsedSeconds)
+	}
+	now = now.Add(24 * time.Hour)
+	resumed, err := store.Resume("run-one", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := RemainingSeconds(resumed, now); got != 28800-5401 {
+		t.Fatalf("remaining = %d", got)
+	}
+}
+
 func testManifest(runID string) Manifest {
 	return Manifest{
-		RunID:   runID,
-		Project: "project",
+		RunID:              runID,
+		Project:            "project",
+		ActiveLimitSeconds: 8 * 60 * 60,
 		Snapshot: gitstage.Snapshot{
 			RunID:   runID,
 			WorkRef: "refs/heads/work/" + runID,

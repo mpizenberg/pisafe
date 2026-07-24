@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/runcontainer"
 	"github.com/mpizenberg/pisafe/internal/runssh"
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
@@ -23,8 +26,10 @@ type backendCall struct {
 }
 
 type fakeBackend struct {
-	calls  []backendCall
-	failAt string
+	calls       []backendCall
+	failAt      string
+	failAfterAt string
+	container   *containerInspection
 }
 
 func (backend *fakeBackend) CreateStage(
@@ -42,11 +47,34 @@ func (backend *fakeBackend) CreateStage(
 func (backend *fakeBackend) ImportStage(
 	_ context.Context,
 	_ string,
-	_ string,
 ) error {
 	backend.calls = append(backend.calls, backendCall{kind: "import"})
 	if backend.failAt == "import" {
 		return errors.New("import failed")
+	}
+	return nil
+}
+
+func (backend *fakeBackend) CreateStorage(_ context.Context, _ string) error {
+	backend.calls = append(backend.calls, backendCall{kind: "create-storage"})
+	if backend.failAt == "create-storage" {
+		return errors.New("storage failed")
+	}
+	return nil
+}
+
+func (backend *fakeBackend) VerifyStorage(_ context.Context, _ string) error {
+	backend.calls = append(backend.calls, backendCall{kind: "verify-storage"})
+	if backend.failAt == "verify-storage" {
+		return errors.New("verify storage failed")
+	}
+	return nil
+}
+
+func (backend *fakeBackend) RemoveStorage(_ context.Context, _ string) error {
+	backend.calls = append(backend.calls, backendCall{kind: "remove-storage"})
+	if backend.failAt == "remove-storage" {
+		return errors.New("remove storage failed")
 	}
 	return nil
 }
@@ -72,6 +100,13 @@ func (backend *fakeBackend) Execute(
 	if backend.failAt != "" && strings.Contains(strings.Join(args, " "), backend.failAt) {
 		return nil, errors.New("execute failed")
 	}
+	if strings.Contains(strings.Join(args, " "), "pisafe-inspect-container") {
+		if backend.container == nil {
+			return []byte("null\n"), nil
+		}
+		output, err := json.Marshal([]containerInspection{*backend.container})
+		return append(output, '\n'), err
+	}
 	if strings.Contains(strings.Join(args, " "), "pisafe-guest configure-ssh") {
 		return []byte("ssh-ed25519 host-key\n"), nil
 	}
@@ -81,6 +116,23 @@ func (backend *fakeBackend) Execute(
 		materialized.BaselineCommit = strings.Repeat("b", 40)
 		output, err := json.Marshal(materialized)
 		return append(output, '\n'), err
+	}
+	if len(args) >= 2 && args[0] == "podman" && args[1] == "run" {
+		if name := flagValue(args, "--name"); name != "" {
+			backend.container = inspectionFromRunArgs(args, name)
+		}
+	}
+	if len(args) >= 2 && args[0] == "podman" && args[1] == "stop" &&
+		backend.container != nil {
+		backend.container.State.Status = "exited"
+		backend.container.State.FinishedAt = time.Now().UTC()
+	}
+	if len(args) >= 2 && args[0] == "podman" && args[1] == "rm" {
+		backend.container = nil
+	}
+	if backend.failAfterAt != "" &&
+		strings.Contains(strings.Join(args, " "), backend.failAfterAt) {
+		return nil, errors.New("execute failed after remote success")
 	}
 	return nil, nil
 }
@@ -155,7 +207,7 @@ func TestStartPreparedActivatesOnlyAfterMaterialization(t *testing.T) {
 	joined := callsString(backend.calls)
 	for _, expected := range []string{
 		"stage",
-		"podman volume create",
+		"create-storage",
 		"import",
 		"pisafe-guest configure-ssh",
 		"podman run",
@@ -205,9 +257,8 @@ func TestStartPreparedRollsBackAndRecordsFailure(t *testing.T) {
 	}
 	joined := callsString(backend.calls)
 	for _, expected := range []string{
-		"podman rm --force pisafe-run-run-123",
-		"podman volume rm --force pisafe-work-run-123",
-		"podman volume rm --force pisafe-home-run-123",
+		"podman rm --force --ignore pisafe-run-run-123",
+		"remove-storage",
 		"remove-stage",
 	} {
 		if !strings.Contains(joined, expected) {
@@ -219,8 +270,8 @@ func TestStartPreparedRollsBackAndRecordsFailure(t *testing.T) {
 	}
 }
 
-func TestStartPreparedDoesNotDeleteVolumeItDidNotCreate(t *testing.T) {
-	backend := &fakeBackend{failAt: "pisafe-home-run-123"}
+func TestStartPreparedCleansStorageAfterAmbiguousCreateFailure(t *testing.T) {
+	backend := &fakeBackend{failAt: "create-storage"}
 	store := runstate.NewStore(t.TempDir())
 	controller := New(backend, store, &fakeSSHStore{})
 
@@ -233,11 +284,170 @@ func TestStartPreparedDoesNotDeleteVolumeItDidNotCreate(t *testing.T) {
 		t.Fatal("StartPrepared unexpectedly succeeded")
 	}
 	joined := callsString(backend.calls)
-	if !strings.Contains(joined, "podman volume rm --force pisafe-work-run-123") {
-		t.Fatalf("created workspace volume was not removed:\n%s", joined)
+	if !strings.Contains(joined, "remove-storage") {
+		t.Fatalf("controller did not clean potentially created storage:\n%s", joined)
 	}
-	if strings.Contains(joined, "podman volume rm --force pisafe-home-run-123") {
-		t.Fatalf("controller tried to remove a volume it did not create:\n%s", joined)
+}
+
+func TestLifecycleStopsAndResumesWithRemainingBudget(t *testing.T) {
+	store := runstate.NewStore(t.TempDir())
+	manifest := activeManifest(t, store)
+	spec := specForManifest(manifest)
+	runArgs, err := spec.RunArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &fakeBackend{
+		container: inspectionFromRunArgs(
+			append([]string{"podman"}, runArgs...),
+			spec.ContainerName(),
+		),
+	}
+	controller := New(backend, store, &fakeSSHStore{})
+
+	stopped, err := controller.Stop(context.Background(), manifest.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopped.State != runstate.StateStopped || backend.container != nil {
+		t.Fatalf("stopped = %#v, container = %#v", stopped, backend.container)
+	}
+	remaining := runstate.RemainingSeconds(stopped, time.Now())
+	if remaining <= 0 || remaining > manifest.ActiveLimitSeconds {
+		t.Fatalf("remaining = %d", remaining)
+	}
+
+	resumed, err := controller.Resume(context.Background(), manifest.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.State != runstate.StateActive ||
+		backend.container == nil ||
+		backend.container.State.Status != "running" {
+		t.Fatalf("resumed = %#v, container = %#v", resumed, backend.container)
+	}
+	if !strings.Contains(callsString(backend.calls), "--timeout "+fmt.Sprint(remaining)) {
+		t.Fatalf("resume did not apply remaining timeout:\n%s", callsString(backend.calls))
+	}
+}
+
+func TestResumeCleansContainerAfterAmbiguousStartFailure(t *testing.T) {
+	store := runstate.NewStore(t.TempDir())
+	manifest := activeManifest(t, store)
+	spec := specForManifest(manifest)
+	runArgs, err := spec.RunArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &fakeBackend{
+		container: inspectionFromRunArgs(
+			append([]string{"podman"}, runArgs...),
+			spec.ContainerName(),
+		),
+	}
+	controller := New(backend, store, &fakeSSHStore{})
+	if _, err := controller.Stop(context.Background(), manifest.RunID); err != nil {
+		t.Fatal(err)
+	}
+
+	backend.failAfterAt = "podman run --detach"
+	if _, err := controller.Resume(context.Background(), manifest.RunID); err == nil ||
+		!strings.Contains(err.Error(), "start run container") {
+		t.Fatalf("error = %v", err)
+	}
+	if backend.container != nil {
+		t.Fatal("ambiguously started container was not removed")
+	}
+	stopped, err := store.Get(manifest.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopped.State != runstate.StateStopped ||
+		!strings.Contains(stopped.LastError, "start run container") {
+		t.Fatalf("manifest = %#v", stopped)
+	}
+}
+
+func TestDiscardCleansActiveAndFailedCreatingRuns(t *testing.T) {
+	for _, initial := range []runstate.State{
+		runstate.StateActive,
+		runstate.StateCreating,
+	} {
+		t.Run(string(initial), func(t *testing.T) {
+			store := runstate.NewStore(t.TempDir())
+			var manifest runstate.Manifest
+			if initial == runstate.StateActive {
+				manifest = activeManifest(t, store)
+			} else {
+				prepared := testPrepared()
+				spec := runcontainer.DefaultSpec(prepared.Snapshot.RunID, testImage)
+				var err error
+				manifest, err = store.Create(runstate.Manifest{
+					RunID:              spec.RunID,
+					Project:            "project",
+					Snapshot:           prepared.Snapshot,
+					Image:              spec.ImageID,
+					Container:          spec.ContainerName(),
+					Workspace:          "/work/project",
+					ActiveLimitSeconds: spec.WallSeconds,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			backend := &fakeBackend{}
+			if initial == runstate.StateActive {
+				spec := specForManifest(manifest)
+				args, err := spec.RunArgs()
+				if err != nil {
+					t.Fatal(err)
+				}
+				backend.container = inspectionFromRunArgs(
+					append([]string{"podman"}, args...),
+					spec.ContainerName(),
+				)
+			}
+			ssh := &fakeSSHStore{}
+			controller := New(backend, store, ssh)
+			discarded, err := controller.Discard(context.Background(), manifest.RunID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if discarded.State != runstate.StateDiscarded || !ssh.removed {
+				t.Fatalf("discarded = %#v, SSH removed = %t", discarded, ssh.removed)
+			}
+			joined := callsString(backend.calls)
+			for _, expected := range []string{"remove-storage", "remove-stage"} {
+				if !strings.Contains(joined, expected) {
+					t.Errorf("cleanup lacks %q:\n%s", expected, joined)
+				}
+			}
+		})
+	}
+}
+
+func TestLifecycleRefusesMismatchedContainerBeforeDeletion(t *testing.T) {
+	store := runstate.NewStore(t.TempDir())
+	manifest := activeManifest(t, store)
+	spec := specForManifest(manifest)
+	args, err := spec.RunArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspection := inspectionFromRunArgs(
+		append([]string{"podman"}, args...),
+		spec.ContainerName(),
+	)
+	inspection.Config.Labels["io.pisafe.run"] = "other-run"
+	backend := &fakeBackend{container: inspection}
+	controller := New(backend, store, &fakeSSHStore{})
+
+	if _, err := controller.Stop(context.Background(), manifest.RunID); err == nil ||
+		!strings.Contains(err.Error(), "label does not match") {
+		t.Fatalf("error = %v", err)
+	}
+	if backend.container == nil {
+		t.Fatal("mismatched container was deleted")
 	}
 }
 
@@ -260,4 +470,86 @@ func callsString(calls []backendCall) string {
 		lines = append(lines, strings.TrimSpace(call.kind+" "+strings.Join(call.args, " ")))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func inspectionFromRunArgs(args []string, name string) *containerInspection {
+	inspection := &containerInspection{
+		ID:    strings.Repeat("c", 64),
+		Name:  name,
+		Image: testImage,
+	}
+	inspection.Config.Labels = map[string]string{
+		"io.pisafe.run": strings.TrimPrefix(name, "pisafe-run-"),
+	}
+	inspection.State.Status = "running"
+	inspection.State.StartedAt = time.Now().UTC()
+	for index, arg := range args {
+		if arg != "--mount" || index+1 >= len(args) {
+			continue
+		}
+		parts := strings.Split(args[index+1], ",")
+		mount := struct {
+			Type        string `json:"Type"`
+			Source      string `json:"Source"`
+			Destination string `json:"Destination"`
+		}{}
+		for _, part := range parts {
+			key, value, found := strings.Cut(part, "=")
+			if !found {
+				continue
+			}
+			switch key {
+			case "type":
+				mount.Type = value
+			case "src":
+				mount.Source = value
+			case "dst":
+				mount.Destination = value
+			}
+		}
+		inspection.Mounts = append(inspection.Mounts, mount)
+	}
+	return inspection
+}
+
+func flagValue(args []string, flag string) string {
+	for index := range args {
+		if args[index] == flag && index+1 < len(args) {
+			return args[index+1]
+		}
+	}
+	return ""
+}
+
+func activeManifest(t *testing.T, store runstate.Store) runstate.Manifest {
+	t.Helper()
+	prepared := testPrepared()
+	spec := runcontainer.DefaultSpec(prepared.Snapshot.RunID, testImage)
+	if _, err := store.Create(runstate.Manifest{
+		RunID:              spec.RunID,
+		Project:            "project",
+		Snapshot:           prepared.Snapshot,
+		Image:              spec.ImageID,
+		Container:          spec.ContainerName(),
+		Workspace:          "/work/project",
+		ActiveLimitSeconds: spec.WallSeconds,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := store.Activate(
+		spec.RunID,
+		runstate.SSHConnection{
+			Alias:              "pisafe-" + spec.RunID,
+			IdentityFile:       "/state/ssh/" + spec.RunID + "/id_ed25519",
+			KnownHostsFile:     "/state/ssh/" + spec.RunID + "/known_hosts",
+			ConfigFile:         "/state/ssh/" + spec.RunID + "/ssh.config",
+			HostKeyFingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		},
+		strings.Repeat("b", 40),
+		time.Time{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return manifest
 }
