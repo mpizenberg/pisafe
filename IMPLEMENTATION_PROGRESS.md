@@ -360,7 +360,7 @@ Verified against a real ARM64 VM:
 - `pisafe doctor` validates the current host networks and generated Lima
   configuration.
 - The final tracked `Containerfile` builds on ARM64.
-- The final local image has:
+- That session's image was:
 
   ```text
   recipe digest:   sha256:2ffa36731cbcc11510a87a1f2dbe205d788407cb3e8ba60dc74387f5471ad052
@@ -406,45 +406,47 @@ Run that end-to-end test with:
 
 ```sh
 PISAFE_LIVE_LIMA=1 \
-PISAFE_LIVE_RUN_IMAGE=sha256:741fdd45acd031b010bd694b2a3bddeeaed1c57be531d98fc6ef4f95c7fa49b5 \
+PISAFE_LIVE_RUN_IMAGE=sha256:e59b19d389e020ae7cfb6ab2dadff405cdbb0d36b1200891a17baa694dc1ca83 \
 go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
 ```
 
 ## Live VM state
 
-A persistent Lima instance named `pisafe` was left running. It contains no
-project runs or user data, only cached base/test images plus the
-`localhost/pisafe-run:managed-2ffa36731cbcc115` image.
+A persistent Lima instance named `pisafe` was left running with security
+profile
+`sha256:35c2cd370359201ce6861c91bc7fb25d8ada1497cf1db2d29c0017eea7e1f459`.
+It contains no project runs or user data, only cached base/test images plus
+the `localhost/pisafe-run:managed-c19b15ec50196653` image
+(`sha256:e59b19d389e020ae7cfb6ab2dadff405cdbb0d36b1200891a17baa694dc1ca83`;
+the recipe digest moved because the guest helper gained
+`configure-inference`).
 
-**The running VM predates the stateful-firewall fix.** The first live run of
-the relay tests against a recreated VM failed: sshd bound `192.0.2.1:18080`
-correctly, but its SYN-ACK replies carry the client's ephemeral port, matched
-no accept rule in the stateless output chain, and were rejected by the
-TEST-NET deny — every broker connection timed out. The template now accepts
+The broker-relay slice is fully live-verified against this VM. The first
+live run of the relay tests failed: sshd bound `192.0.2.1:18080` correctly,
+but its SYN-ACK replies carry the client's ephemeral port, matched no accept
+rule in the then-stateless output chain, and were rejected by the TEST-NET
+deny — every broker connection timed out. The template now accepts
 established/related conntrack traffic in the output and forward chains (the
-input chain always did), which changed the security profile digest again, so
-every controller command correctly fails closed against this VM until it is
-recreated:
+input chain always did); after recreation the full gated lima and runimage
+suites passed, including `TestLiveBrokerReverseRelay`,
+`TestLiveSecondRelayFailsClosed`, and the end-to-end staging test above.
 
-```sh
-limactl delete -f pisafe
-PISAFE_LIVE_LIMA=1 go test -v -timeout 30m ./internal/lima
-PISAFE_LIVE_LIMA=1 go test -v -timeout 30m ./internal/runimage
-# then rerun the end-to-end test with the image ID printed by the installer
-```
-
-Recreation was not performed in the fix session because deleting the VM is
-destructive and was left as an explicit user action. The relay live tests
-(`TestLiveBrokerReverseRelay`, `TestLiveSecondRelayFailsClosed`) therefore
-have not passed against a real VM yet; they are part of the gated suite
-above. Everything else in the gated lima suite passed against the recreated
-(pre-fix) VM.
+The brokered inference chain was then verified with the real CLI against a
+loopback stub upstream (no provider key was available; the provider config
+deliberately accepts loopback HTTP for this): `pisafe run` installed a
+correct `models.json`, and from inside the run container, requests through
+`http://192.0.2.1:18080` traversed pasta, the firewall, the reverse forward,
+and broker capability auth to reach the stub carrying the upstream key —
+plain JSON and streamed SSE both intact. A wrong capability got 401, a
+non-canonical path 404, the capability replayed after `pisafe stop` got 401,
+and `pisafe resume` rotated the capability, after which the new one worked
+inside the recreated container. Only the real provider handshake remains
+untested until `pisafe login` exists. The scratch run was discarded; no
+containers remain.
 
 Everything below was first verified against profile
-`sha256:6a9c31943325290e23272c7c95af4ae80df8c94718c3ed8ec5e1824efbfcc927`,
-re-verified by the gated suite against the currently running pre-fix VM
-(`sha256:09d7403a26d8ce72710609b9e5812f30cb8dbe877b65cd07375e05c7cab73381`),
-and is expected to hold identically after recreation.
+`sha256:6a9c31943325290e23272c7c95af4ae80df8c94718c3ed8ec5e1824efbfcc927`
+and re-verified by the gated suite during the two recreations above.
 
 Fresh provisioning verified all security-sensitive setup together:
 
@@ -518,8 +520,9 @@ sandboxed result.
   settings.
 - Selected untracked/ignored input archive handling is missing.
 - Submodule staging and journaled multi-repository apply are missing.
-- The relay and capability are implemented but not yet live-verified; the VM
-  recreation and gated live suite above are the remaining step.
+- The relay and capability are live-verified against a loopback stub
+  upstream; the real provider handshake remains untested until `pisafe login`
+  exists.
 - No ChatGPT OAuth or Keychain integration exists yet. The interim
   `PISAFE_INFERENCE_*` environment configuration keeps the key on the Mac but
   is meant to be replaced by `pisafe login` backed by `pi-ai` OAuth and the
@@ -532,7 +535,7 @@ sandboxed result.
   broker then fails loudly at bind time instead of silently coexisting.
 - Firewall behavioral coverage still needs DNS-to-private answers, redirects,
   raw UDP, `host.containers.internal`, and VM loopback attempts; the exact
-  broker exception now has gated live tests pending their first run.
+  broker exception is covered by passing gated live tests.
 - Security-profile drift is detected and fails closed, but automated
   replacement/reconciliation is intentionally absent because deleting a VM is
   destructive and must be an explicit lifecycle operation.
@@ -547,15 +550,13 @@ sandboxed result.
 
 Continue Phase 1 without weakening the boundary:
 
-1. Recreate the VM and run the gated live suites, including the new relay
-   tests and an end-to-end `pisafe run` + `pisafe broker` inference check
-   against a real upstream.
-2. Implement `pisafe login chatgpt`: the `pi-ai`-based OAuth broker upstream
+1. Implement `pisafe login chatgpt`: the `pi-ai`-based OAuth broker upstream
    with Keychain persistence, replacing the `PISAFE_INFERENCE_*` interim
-   configuration.
-3. Then add selected untracked inputs and submodule-aware journaled apply
+   configuration. Its live check doubles as the first real-upstream
+   inference test through the broker.
+2. Then add selected untracked inputs and submodule-aware journaled apply
    before exposing `pisafe apply`.
-4. Add `diff`, hardened `cp`, and seven-day GC after the apply transaction is
+3. Add `diff`, hardened `cp`, and seven-day GC after the apply transaction is
    durable.
 
 ## Useful references
