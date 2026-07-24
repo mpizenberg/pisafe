@@ -11,6 +11,7 @@ import (
 
 	"github.com/mpizenberg/pisafe/internal/hostnet"
 	limabackend "github.com/mpizenberg/pisafe/internal/lima"
+	"github.com/mpizenberg/pisafe/internal/runimage"
 )
 
 type prerequisite struct {
@@ -23,8 +24,8 @@ type prerequisite struct {
 var prerequisites = []prerequisite{
 	{name: "Git", command: "git", required: true, hint: "install Xcode command-line tools"},
 	{name: "Lima", command: "limactl", required: true, hint: "install Lima"},
-	{name: "Podman", command: "podman", required: true, hint: "install Podman"},
-	{name: "Zed", command: "zed", required: false, hint: "install the Zed CLI to open runs automatically"},
+	{name: "OpenSSH", command: "ssh-keygen", required: true, hint: "install macOS OpenSSH tools"},
+	{name: "Zed", command: "zed", required: false, hint: "install the Zed CLI to reopen saved run connections"},
 }
 
 func runDoctor(ctx context.Context, out io.Writer) error {
@@ -49,6 +50,18 @@ func runDoctor(ctx context.Context, out io.Writer) error {
 	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
 		missingRequired = true
 		fmt.Fprintln(out, "MISSING  platform (Phase 1 requires macOS on ARM64)")
+	}
+	if !missingRequired {
+		guestPath, err := packagedGuestPath()
+		if err != nil {
+			missingRequired = true
+			fmt.Fprintf(out, "MISSING  run image (%v)\n", err)
+		} else if _, err := runimage.LoadPackagedArtifacts(guestPath); err != nil {
+			missingRequired = true
+			fmt.Fprintf(out, "MISSING  run image (%v)\n", err)
+		} else {
+			fmt.Fprintf(out, "OK       Run image %s\n", guestPath)
+		}
 	}
 	if !missingRequired {
 		if err := checkGeneratedLimaConfig(ctx, out); err != nil {

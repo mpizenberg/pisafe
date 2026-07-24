@@ -226,6 +226,30 @@ func TestFinalizeReportsUnusualUntrackedNames(t *testing.T) {
 	}
 }
 
+func TestListExcludedInputsSeparatesUntrackedAndIgnored(t *testing.T) {
+	ctx := context.Background()
+	source := newRepository(t)
+	mustWrite(t, filepath.Join(source, ".gitignore"), "ignored/\n")
+	runGit(t, source, "add", ".gitignore")
+	runGit(t, source, "commit", "-qm", "ignore generated files")
+	mustWrite(t, filepath.Join(source, "untracked.txt"), "excluded\n")
+	if err := os.Mkdir(filepath.Join(source, "ignored"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(source, "ignored", "output.txt"), "ignored\n")
+
+	excluded, err := ListExcludedInputs(ctx, filepath.Join(source, "ignored"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(excluded.Untracked) != 1 || excluded.Untracked[0] != "untracked.txt" {
+		t.Fatalf("untracked = %#v", excluded.Untracked)
+	}
+	if len(excluded.Ignored) != 1 || excluded.Ignored[0] != "ignored/output.txt" {
+		t.Fatalf("ignored = %#v", excluded.Ignored)
+	}
+}
+
 func TestStageRejectsUnsafeRunID(t *testing.T) {
 	_, err := Stage(context.Background(), t.TempDir(), filepath.Join(t.TempDir(), "workspace"), "../escape")
 	if err == nil || !strings.Contains(err.Error(), "invalid run ID") {

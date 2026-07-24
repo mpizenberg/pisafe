@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -80,6 +81,38 @@ func (manager Manager) Create(ctx context.Context, configPath string) error {
 		return fmt.Errorf("create Lima instance: %w", err)
 	}
 	return nil
+}
+
+// Ensure creates the dedicated VM when absent, then starts and verifies it
+// against the current host-network boundary.
+func (manager Manager) Ensure(ctx context.Context, prefixes []netip.Prefix) error {
+	config, err := RenderConfig(DefaultConfigOptions(prefixes))
+	if err != nil {
+		return err
+	}
+	prefixStrings := make([]string, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		prefixStrings = append(prefixStrings, prefix.String())
+	}
+	status, err := manager.Status(ctx)
+	if err != nil {
+		return err
+	}
+	if status == StatusAbsent {
+		temporary, err := os.MkdirTemp("", "pisafe-lima-config-*")
+		if err != nil {
+			return fmt.Errorf("create temporary Lima config directory: %w", err)
+		}
+		defer os.RemoveAll(temporary)
+		configPath := filepath.Join(temporary, "pisafe.yaml")
+		if err := WriteConfig(configPath, config); err != nil {
+			return err
+		}
+		if err := manager.Create(ctx, configPath); err != nil {
+			return err
+		}
+	}
+	return manager.Start(ctx, prefixStrings)
 }
 
 // Start starts (or reuses) the VM and verifies that its immutable host-network

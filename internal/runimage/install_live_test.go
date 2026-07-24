@@ -35,7 +35,8 @@ func TestLiveInstallAndReuseManagedImage(t *testing.T) {
 	guestPath := filepath.Join(t.TempDir(), "pisafe-guest")
 	command := exec.CommandContext(
 		ctx,
-		"go", "build", "-trimpath", "-o", guestPath, "../../cmd/pisafe-guest",
+		"go", "build", "-trimpath", "-buildvcs=false",
+		"-o", guestPath, "../../cmd/pisafe-guest",
 	)
 	command.Env = append(
 		os.Environ(),
@@ -47,7 +48,7 @@ func TestLiveInstallAndReuseManagedImage(t *testing.T) {
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("build Linux guest helper: %v\n%s", err, output)
 	}
-	artifacts, err := runimage.LoadArtifacts("../../Containerfile", guestPath)
+	artifacts, err := runimage.LoadPackagedArtifacts(guestPath)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -51,6 +51,50 @@ type PreparedStage struct {
 	PatchPath  string
 }
 
+type ExcludedInputs struct {
+	Untracked []string
+	Ignored   []string
+}
+
+func RepositoryRoot(ctx context.Context, sourcePath string) (string, error) {
+	root, err := gitOutput(ctx, sourcePath, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", fmt.Errorf("find repository: %w", err)
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve repository path: %w", err)
+	}
+	return root, nil
+}
+
+func ListExcludedInputs(ctx context.Context, sourcePath string) (ExcludedInputs, error) {
+	root, err := RepositoryRoot(ctx, sourcePath)
+	if err != nil {
+		return ExcludedInputs{}, err
+	}
+	untracked, err := gitOutputBytes(
+		ctx,
+		root,
+		"ls-files", "-z", "--others", "--exclude-standard",
+	)
+	if err != nil {
+		return ExcludedInputs{}, fmt.Errorf("list untracked inputs: %w", err)
+	}
+	ignored, err := gitOutputBytes(
+		ctx,
+		root,
+		"ls-files", "-z", "--others", "--ignored", "--exclude-standard",
+	)
+	if err != nil {
+		return ExcludedInputs{}, fmt.Errorf("list ignored inputs: %w", err)
+	}
+	return ExcludedInputs{
+		Untracked: splitNUL(untracked),
+		Ignored:   splitNUL(ignored),
+	}, nil
+}
+
 // Prepare creates the only two source artifacts that cross the VM boundary:
 // a Git bundle rooted at HEAD and a binary patch of the final tracked state.
 // packageDir must not already exist.
@@ -65,13 +109,9 @@ func Prepare(ctx context.Context, sourcePath, packageDir, runID string) (prepare
 		return PreparedStage{}, fmt.Errorf("inspect stage package: %w", err)
 	}
 
-	root, err := gitOutput(ctx, sourcePath, "rev-parse", "--show-toplevel")
+	root, err := RepositoryRoot(ctx, sourcePath)
 	if err != nil {
-		return PreparedStage{}, fmt.Errorf("find repository: %w", err)
-	}
-	root, err = filepath.EvalSymlinks(root)
-	if err != nil {
-		return PreparedStage{}, fmt.Errorf("resolve repository path: %w", err)
+		return PreparedStage{}, err
 	}
 	head, err := gitOutput(ctx, root, "rev-parse", "--verify", "HEAD")
 	if err != nil {

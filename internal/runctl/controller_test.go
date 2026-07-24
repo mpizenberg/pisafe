@@ -2,6 +2,7 @@ package runctl
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"path/filepath"
@@ -73,6 +74,13 @@ func (backend *fakeBackend) Execute(
 	}
 	if strings.Contains(strings.Join(args, " "), "pisafe-guest configure-ssh") {
 		return []byte("ssh-ed25519 host-key\n"), nil
+	}
+	if strings.Contains(strings.Join(args, " "), "pisafe-guest materialize") {
+		materialized := testPrepared().Snapshot
+		materialized.SourceRoot = ""
+		materialized.BaselineCommit = strings.Repeat("b", 40)
+		output, err := json.Marshal(materialized)
+		return append(output, '\n'), err
 	}
 	return nil, nil
 }
@@ -163,6 +171,9 @@ func TestStartPreparedActivatesOnlyAfterMaterialization(t *testing.T) {
 	if manifest.SSH == nil ||
 		manifest.SSH.Alias != "pisafe-run-123" {
 		t.Fatalf("manifest SSH = %#v", manifest.SSH)
+	}
+	if manifest.Snapshot.BaselineCommit != strings.Repeat("b", 40) {
+		t.Fatalf("manifest baseline = %q", manifest.Snapshot.BaselineCommit)
 	}
 	if ssh.removed {
 		t.Fatal("active run SSH credentials were removed")

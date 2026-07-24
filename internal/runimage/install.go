@@ -48,25 +48,6 @@ func NewInstaller(backend Backend) Installer {
 	return Installer{backend: backend}
 }
 
-// LoadArtifacts reads the two regular files that comprise the run-image build
-// context. Symlinks and non-ARM64 or dynamically linked guest executables are
-// rejected before any bytes are sent to the VM.
-func LoadArtifacts(containerfilePath string, guestPath string) (Artifacts, error) {
-	containerfile, err := readRegularFile(containerfilePath, maxContainerfileSize)
-	if err != nil {
-		return Artifacts{}, fmt.Errorf("load Containerfile: %w", err)
-	}
-	guest, err := readRegularFile(guestPath, maxGuestSize)
-	if err != nil {
-		return Artifacts{}, fmt.Errorf("load guest helper: %w", err)
-	}
-	artifacts := Artifacts{Containerfile: containerfile, Guest: guest}
-	if err := artifacts.Validate(); err != nil {
-		return Artifacts{}, err
-	}
-	return artifacts, nil
-}
-
 func (artifacts Artifacts) Validate() error {
 	if len(artifacts.Containerfile) == 0 || len(artifacts.Containerfile) > maxContainerfileSize {
 		return fmt.Errorf("Containerfile size is outside the allowed range")

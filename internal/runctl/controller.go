@@ -3,7 +3,9 @@
 package runctl
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -26,7 +28,7 @@ type Backend interface {
 
 type StateStore interface {
 	Create(runstate.Manifest) (runstate.Manifest, error)
-	Activate(string, runstate.SSHConnection) (runstate.Manifest, error)
+	Activate(string, runstate.SSHConnection, string) (runstate.Manifest, error)
 	RecordError(string, error) (runstate.Manifest, error)
 }
 
@@ -175,8 +177,13 @@ func (controller Controller) StartPrepared(
 	if err != nil {
 		return runstate.Manifest{}, err
 	}
-	if _, err := controller.podman(ctx, nil, materializeArgs...); err != nil {
+	materializedOutput, err := controller.podman(ctx, nil, materializeArgs...)
+	if err != nil {
 		return runstate.Manifest{}, fmt.Errorf("materialize staged repository: %w", err)
+	}
+	materialized, err := decodeMaterializedSnapshot(materializedOutput, prepared.Snapshot)
+	if err != nil {
+		return runstate.Manifest{}, err
 	}
 	cleanupStageArgs, err := spec.CleanupStageArgs()
 	if err != nil {
@@ -196,11 +203,41 @@ func (controller Controller) StartPrepared(
 		KnownHostsFile:     endpoint.KnownHostsFile,
 		ConfigFile:         endpoint.ConfigFile,
 		HostKeyFingerprint: endpoint.HostKeyFingerprint,
-	})
+	}, materialized.BaselineCommit)
 	if err != nil {
 		return runstate.Manifest{}, fmt.Errorf("activate run manifest: %w", err)
 	}
 	return manifest, nil
+}
+
+func decodeMaterializedSnapshot(
+	output []byte,
+	hostSnapshot gitstage.Snapshot,
+) (gitstage.Snapshot, error) {
+	if len(output) > 1<<20 {
+		return gitstage.Snapshot{}, errors.New("materialized snapshot exceeds size limit")
+	}
+	decoder := json.NewDecoder(io.LimitReader(bytes.NewReader(output), 1<<20))
+	decoder.DisallowUnknownFields()
+	var materialized gitstage.Snapshot
+	if err := decoder.Decode(&materialized); err != nil {
+		return gitstage.Snapshot{}, fmt.Errorf("decode materialized snapshot: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return gitstage.Snapshot{}, errors.New("materialized snapshot contains trailing data")
+		}
+		return gitstage.Snapshot{}, fmt.Errorf("decode materialized snapshot trailer: %w", err)
+	}
+	if materialized.SourceRoot != "" ||
+		materialized.RunID != hostSnapshot.RunID ||
+		materialized.SourceHead != hostSnapshot.SourceHead ||
+		materialized.WorkRef != hostSnapshot.WorkRef ||
+		!materialized.CreatedAt.Equal(hostSnapshot.CreatedAt) {
+		return gitstage.Snapshot{}, errors.New("materialized snapshot does not match prepared run")
+	}
+	return materialized, nil
 }
 
 func (controller Controller) podman(

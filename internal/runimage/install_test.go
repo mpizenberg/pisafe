@@ -153,41 +153,33 @@ func TestRecipeDigestSeparatesArtifactBoundaries(t *testing.T) {
 	}
 }
 
-func TestLoadArtifactsAcceptsRegularARM64Helper(t *testing.T) {
+func TestLoadPackagedArtifactsAcceptsRegularARM64Helper(t *testing.T) {
 	root := t.TempDir()
-	containerfilePath := filepath.Join(root, "Containerfile")
 	guestPath := filepath.Join(root, "pisafe-guest")
-	if err := os.WriteFile(containerfilePath, []byte("FROM scratch\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.WriteFile(guestPath, minimalARM64ELF(), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	artifacts, err := LoadArtifacts(containerfilePath, guestPath)
+	artifacts, err := LoadPackagedArtifacts(guestPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(artifacts.Containerfile) != "FROM scratch\n" {
-		t.Fatalf("Containerfile = %q", artifacts.Containerfile)
+	if !bytes.Equal(artifacts.Containerfile, packagedContainerfile) {
+		t.Fatal("packaged Containerfile was not loaded")
 	}
 }
 
-func TestLoadArtifactsRejectsSymlink(t *testing.T) {
+func TestLoadPackagedArtifactsRejectsSymlink(t *testing.T) {
 	root := t.TempDir()
-	realPath := filepath.Join(root, "real-Containerfile")
-	linkPath := filepath.Join(root, "Containerfile")
-	guestPath := filepath.Join(root, "pisafe-guest")
-	if err := os.WriteFile(realPath, []byte("FROM scratch\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(realPath, linkPath); err != nil {
-		t.Fatal(err)
-	}
+	guestPath := filepath.Join(root, "real-pisafe-guest")
+	linkPath := filepath.Join(root, "pisafe-guest")
 	if err := os.WriteFile(guestPath, minimalARM64ELF(), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadArtifacts(linkPath, guestPath); err == nil {
-		t.Fatal("LoadArtifacts accepted a symlink")
+	if err := os.Symlink(guestPath, linkPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadPackagedArtifacts(linkPath); err == nil {
+		t.Fatal("LoadPackagedArtifacts accepted a symlink")
 	}
 }
 

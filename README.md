@@ -6,8 +6,9 @@
 The implementation now contains:
 
 - a dependency-free Go controller;
-- `pisafe doctor` for host prerequisite checks and `pisafe list` for durable
-  run records;
+- `pisafe run` for creating an isolated run from the current repository,
+  `pisafe list` for durable records, `pisafe zed` for reopening a connection
+  explicitly saved in Zed, and `pisafe doctor` for prerequisites;
 - a split Git staging core: the Mac produces a bundle and tracked-state patch,
   while materialization happens after transfer inside the isolated
   environment;
@@ -34,29 +35,43 @@ The next boundary slice is also implemented internally:
   and temporary-filesystem limits; and
 - a controller transaction that imports the stage into private volumes,
   materializes it inside the container, and rolls back partial creation;
-- content-addressed run-image installation that sends only the Containerfile
-  and static Linux helper and returns a validated immutable image ID; and
+- content-addressed run-image installation that sends only the embedded
+  Containerfile and packaged static Linux helper and returns a validated
+  immutable image ID; and
 - a root-owned VM security-profile fingerprint checked on every start, so an
   instance created from an older security definition fails closed; and
 - unique per-run Ed25519 client and host keys, a non-root loopback-only SSH
   daemon, strict host-key pinning, and a portless ProxyCommand through Lima's
   control SSH connection.
 
-User-facing run creation is still hidden. Fresh-VM provisioning, restricted
-sudo, clock synchronization, security-profile drift detection, managed-image
-installation/reuse, repository materialization, and the Zed-compatible
-OpenSSH path into the exact Pi workspace are live-validated. Automatic Zed
-launch, persistent disk quota, wall-clock enforcement, inference brokering,
-and confirmed discard must still be completed.
+Fresh-VM provisioning, restricted sudo, clock synchronization,
+security-profile drift detection, managed-image installation/reuse,
+user-facing repository materialization, and the Zed-compatible OpenSSH path
+into the exact Pi workspace are live-validated. `pisafe run` prints the exact
+OpenSSH command to paste once into Zed's Remote Projects dialog; it does not
+silently edit global SSH or Zed settings. Persistent disk quota, wall-clock
+enforcement, inference brokering, and confirmed discard must still be
+completed.
 
 ## Development
 
 ```sh
 go test ./...
-go build ./cmd/pisafe ./cmd/pisafe-guest
+go build -trimpath -buildvcs=false -o pisafe ./cmd/pisafe
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+  go build -trimpath -buildvcs=false \
+  -o pisafe-guest-linux-arm64 ./cmd/pisafe-guest
 ./pisafe doctor
 ./pisafe list
+./pisafe run
 ```
+
+The release layout places `pisafe-guest-linux-arm64` beside `pisafe`. During
+development, `PISAFE_GUEST_HELPER=/absolute/path/to/helper` may select the
+sidecar explicitly. The Containerfile is compiled into the controller.
+
+`pisafe run` leaves Pi inference unavailable until the broker exists; it never
+injects a provider credential as a shortcut.
 
 The gated live suite creates or reuses the dedicated `pisafe` VM and exercises
 the mount, rootless-container, and network boundaries:

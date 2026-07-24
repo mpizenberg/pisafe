@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -18,6 +19,8 @@ import (
 )
 
 const manifestVersion = 2
+
+var gitObjectPattern = regexp.MustCompile(`^(?:[a-f0-9]{40}|[a-f0-9]{64})$`)
 
 type State string
 
@@ -189,7 +192,11 @@ func (store Store) Transition(runID string, next State) (Manifest, error) {
 	return manifest, nil
 }
 
-func (store Store) Activate(runID string, connection SSHConnection) (Manifest, error) {
+func (store Store) Activate(
+	runID string,
+	connection SSHConnection,
+	baselineCommit string,
+) (Manifest, error) {
 	manifest, err := store.Get(runID)
 	if err != nil {
 		return Manifest{}, err
@@ -204,9 +211,13 @@ func (store Store) Activate(runID string, connection SSHConnection) (Manifest, e
 	if err := validateSSHConnection(manifest.RunID, connection); err != nil {
 		return Manifest{}, err
 	}
+	if baselineCommit != "" && !gitObjectPattern.MatchString(baselineCommit) {
+		return Manifest{}, fmt.Errorf("invalid materialized baseline commit")
+	}
 	now := store.now().UTC()
 	manifest.State = StateActive
 	manifest.SSH = &connection
+	manifest.Snapshot.BaselineCommit = baselineCommit
 	manifest.LastError = ""
 	manifest.UpdatedAt = now
 	path, err := store.manifestPath(runID)

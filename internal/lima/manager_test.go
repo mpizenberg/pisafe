@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/netip"
 	"strings"
 	"testing"
 )
@@ -55,6 +56,35 @@ func TestManagerCreateValidatesBeforeCreating(t *testing.T) {
 		t,
 		runner.calls[2],
 		"--tty=false", "create", "--name=pisafe", "/tmp/pisafe.yaml",
+	)
+}
+
+func TestManagerEnsureCreatesStartsAndVerifiesAbsentVM(t *testing.T) {
+	prefix := netip.MustParsePrefix("192.168.2.0/24")
+	runner := &fakeRunner{outputs: [][]byte{
+		nil,
+		nil,
+		nil,
+		nil,
+		[]byte("pisafe\tRunning\n"),
+		[]byte(securityProfileDigest([]string{prefix.String()}) + "\n"),
+		nil,
+		[]byte(prefix.String() + "\n"),
+	}}
+	manager := Manager{instance: InstanceName, runner: runner}
+
+	if err := manager.Ensure(context.Background(), []netip.Prefix{prefix}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 8 {
+		t.Fatalf("calls = %#v", runner.calls)
+	}
+	assertArgs(t, runner.calls[3],
+		"--tty=false", "create", "--name=pisafe", runner.calls[3].args[3],
+	)
+	assertArgs(
+		t, runner.calls[5],
+		"shell", "pisafe", "cat", "/etc/pisafe/security-profile",
 	)
 }
 

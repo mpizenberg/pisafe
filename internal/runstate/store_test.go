@@ -24,7 +24,7 @@ func TestStoreLifecycleAndList(t *testing.T) {
 		t.Fatalf("created = %#v", created)
 	}
 	now = now.Add(time.Minute)
-	active, err := store.Activate("run-one", testSSHConnection(root, "run-one"))
+	active, err := store.Activate("run-one", testSSHConnection(root, "run-one"), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,6 +114,7 @@ func TestStoreRecordsAndClearsOperationError(t *testing.T) {
 	active, err := store.Activate(
 		"run-one",
 		testSSHConnection(store.root, "run-one"),
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -130,12 +131,15 @@ func TestStoreActivatesWithRunScopedSSHConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	connection := testSSHConnection(root, "run-one")
-	active, err := store.Activate("run-one", connection)
+	active, err := store.Activate("run-one", connection, strings.Repeat("a", 40))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if active.State != StateActive || active.SSH == nil || *active.SSH != connection {
 		t.Fatalf("active = %#v", active)
+	}
+	if active.Snapshot.BaselineCommit != strings.Repeat("a", 40) {
+		t.Fatalf("baseline = %q", active.Snapshot.BaselineCommit)
 	}
 	stored, err := store.Get("run-one")
 	if err != nil {
@@ -153,8 +157,23 @@ func TestStoreRejectsMismatchedSSHConnection(t *testing.T) {
 	}
 	if _, err := store.Activate("run-one", SSHConnection{
 		Alias: "pisafe-other",
-	}); err == nil {
+	}, ""); err == nil {
 		t.Fatal("mismatched SSH connection was accepted")
+	}
+}
+
+func TestStoreRejectsInvalidMaterializedBaseline(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	if _, err := store.Create(testManifest("run-one")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(
+		"run-one",
+		testSSHConnection(root, "run-one"),
+		"not-a-git-object",
+	); err == nil {
+		t.Fatal("invalid baseline commit was accepted")
 	}
 }
 

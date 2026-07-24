@@ -9,7 +9,7 @@ next.
 
 ## Current milestone
 
-Phase 1 is in progress. Four implementation slices now exist:
+Phase 1 is in progress. Five implementation slices now exist:
 
 1. The Go controller skeleton and single-repository Git isolation core.
 2. The dedicated Lima VM backend, host-network discovery, and initial static
@@ -19,10 +19,11 @@ Phase 1 is in progress. Four implementation slices now exist:
    creation transaction.
 4. Per-run SSH credentials, non-root container `sshd`, strict host-key
    pinning, and a portless Lima control-SSH ProxyCommand.
+5. User-facing run creation, fresh/reused VM orchestration, packaged image
+   artifacts, excluded-input reporting, and explicit Zed connection launch.
 
-There is still no user-facing `pisafe run`. Do not add a local-workspace
-fallback: the tested path streams through the mountless VM and materializes
-inside a private rootless container volume.
+`pisafe run` now uses the tested mountless path and materializes inside a
+private rootless container volume. Do not add a local-workspace fallback.
 
 ## Implemented
 
@@ -48,6 +49,8 @@ inside a private rootless container volume.
   repositories.
 - External diff and text-conversion drivers are disabled during host capture.
 - NUL-delimited parsing preserves unusual Git filenames.
+- User-facing staging reports untracked and ignored inputs separately and
+  excludes all of them. Output is safely quoted and capped to remain readable.
 
 ### Host-network discovery
 
@@ -141,9 +144,12 @@ inside a private rootless container volume.
 - Pi is pinned to `@earendil-works/pi-coding-agent@0.82.0`; the downloaded
   package tarball is checked against its registry SHA-512 integrity before
   installation.
-- `runimage.Installer` derives a recipe digest from the exact Containerfile and
-  static guest-helper bytes, streams a tar context containing only those two
-  files, and passes that digest into an image label.
+- `runimage.Installer` derives a recipe digest from the exact embedded
+  Containerfile and static guest-helper bytes, streams a tar context containing
+  only those two files, and passes that digest into an image label.
+- The macOS controller embeds the Containerfile. Release/development layouts
+  provide a sibling `pisafe-guest-linux-arm64` sidecar; an explicit
+  `PISAFE_GUEST_HELPER` path is available for development.
 - A mutable, recipe-derived local tag is used only as a cache key. Reuse
   requires matching recipe, base, and Pi labels, Linux/ARM64 platform, and a
   valid immutable SHA-256 image ID. Run containers continue to receive only
@@ -206,7 +212,22 @@ inside a private rootless container volume.
   cleanup, manifest activation, and bounded rollback.
 - Creation rollback removes partial SSH client state along with the container,
   volumes, and VM-side transfer directory.
-- `pisafe list` displays these durable records. Run creation remains internal.
+- Activation records the baseline commit returned by actual in-container
+  materialization rather than retaining the host's pre-materialization
+  placeholder.
+- `pisafe run` now:
+  - resolves the current Git root and creates a project-derived run ID with a
+    UTC timestamp plus 48 bits of cryptographic entropy;
+  - discovers the current Mac networks;
+  - creates or reuses and verifies the dedicated VM;
+  - installs/reuses the managed image;
+  - prepares and starts the run through `runctl`; and
+  - prints the run, workspace, branch, exact `ssh -F` command, excluded input
+    summary, and current inference limitation.
+- `pisafe zed <run>` opens an active connection after the user has explicitly
+  saved the printed `ssh -F` command through Zed's "Connect New Server" flow.
+  PiSafe never edits global SSH or Zed settings.
+- `pisafe list` displays the durable records.
 
 ## Tests and verification
 
@@ -215,7 +236,9 @@ Normal checks:
 ```sh
 go test -race -cover ./...
 go vet ./...
-go build -trimpath ./cmd/pisafe
+go build -trimpath -buildvcs=false ./cmd/pisafe
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+  go build -trimpath -buildvcs=false ./cmd/pisafe-guest
 git diff --check
 ```
 
@@ -223,16 +246,17 @@ Current package coverage at this milestone:
 
 ```text
 pisafe-guest  52.8%
-cli           26.0%
-gitstage      68.7%
+cli           31.7%
+gitstage      68.8%
 hostnet       50.0%
-lima          70.6%
+lima          75.3%
 runcontainer  72.2%
-runctl        72.8%
-runid        100.0%
-runimage      74.4%
-runssh        65.7%
-runstate      69.7%
+runctl        71.2%
+runid         92.3%
+runimage      74.6%
+runssh        68.0%
+runstart      70.0%
+runstate      70.1%
 ```
 
 The generated YAML is checked by the installed Lima validator in the normal
@@ -263,9 +287,9 @@ Verified against a real ARM64 VM:
 - The final local image has:
 
   ```text
-  recipe digest:   sha256:c4c10720d220f2ebcd2f3fa67997d7cf964939ea5bcd874604fdf9399b26b02d
-  image ID:        sha256:d0acf9f290d4bf49792a03fc2ed9080ccb18631ba2bfea9fb25696045a589a73
-  manifest digest: sha256:d7181f8d5716a088597edaace6c7cfc9c42709c5a7aa780a3f4a3aab96b420b4
+  recipe digest:   sha256:2ffa36731cbcc11510a87a1f2dbe205d788407cb3e8ba60dc74387f5471ad052
+  image ID:        sha256:1643ca05afc1674b6aba93238e72d6adad6f7edee7c37c9c00c50864d0691f3d
+  manifest digest: sha256:282a06d3798815916615cd5d48130485ce99d7a61a7ab62182f58c5e9ca3ff07
   ```
 
 - The managed installer built that image from its two-file tar stream,
@@ -282,12 +306,18 @@ Verified against a real ARM64 VM:
   Zed-compatible OpenSSH session. A Pi executable in the same container saw
   that exact file and workspace. The SSH session ran as UID 1000 with no
   forwarded agent or `/Users`, and `podman port` reported no published port.
+- The actual `pisafe run` CLI was exercised from this working tree with
+  isolated temporary Mac state. It reused the verified VM, installed the
+  current recipe, created an active manifest containing the real dirty
+  baseline commit, reported all five then-untracked implementation files as
+  excluded, and connected through its printed SSH command as UID 1000. The
+  imported baseline was clean and the original checkout remained unchanged.
 
 Run that end-to-end test with:
 
 ```sh
 PISAFE_LIVE_LIMA=1 \
-PISAFE_LIVE_RUN_IMAGE=sha256:d0acf9f290d4bf49792a03fc2ed9080ccb18631ba2bfea9fb25696045a589a73 \
+PISAFE_LIVE_RUN_IMAGE=sha256:1643ca05afc1674b6aba93238e72d6adad6f7edee7c37c9c00c50864d0691f3d \
 go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
 ```
 
@@ -296,7 +326,7 @@ go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
 A persistent Lima instance named `pisafe` was left running. It contains no
 project runs or user data. It was freshly provisioned from the current
 generated configuration and contains only cached base/test images plus the
-current `localhost/pisafe-run:managed-c4c10720d220f2eb` image. Older managed
+current `localhost/pisafe-run:managed-2ffa36731cbcc115` image. Older managed
 recipe images remain only as rebuildable cache entries.
 
 Fresh provisioning verified all security-sensitive setup together:
@@ -349,11 +379,12 @@ sandboxed result.
 
 ## Known gaps
 
-- No user-facing `run`, `connect`, `diff`, `apply`, `cp`, `discard`, or `gc`
-  implementation exists. `list` is the only lifecycle command exposed.
-- The Zed-compatible SSH transport is live-verified, but `pisafe zed` and
-  automatic Zed launch are not wired. Internal creation writes an isolated
-  per-run config and deliberately does not edit global SSH or Zed settings.
+- No user-facing `connect`, `diff`, `apply`, `cp`, `discard`, or `gc`
+  implementation exists.
+- `pisafe zed` launches a connection that was explicitly saved once in Zed.
+  Fully automatic first-launch remains intentionally absent because Zed's CLI
+  URL cannot carry `-F` and PiSafe does not silently edit global SSH or Zed
+  settings.
 - Persistent workspace disk quota and wall-clock enforcement are missing.
   CPU, memory, PID, and tmpfs limits are implemented and live-verified.
 - Selected untracked/ignored input archive handling is missing.
@@ -375,16 +406,11 @@ sandboxed result.
 
 Finish the first run lifecycle without weakening the boundary:
 
-1. Wire `pisafe run` around host-network verification, managed-image
-   installation, `gitstage.Prepare`, and `runctl.StartPrepared`; keep Pi
-   inference unavailable rather than injecting a credential. Print the
-   generated SSH command/config and add explicit Zed launch without silently
-   editing global user settings.
-2. Implement stop/resume and exact-confirmation discard, including reliable
+1. Implement stop/resume and exact-confirmation discard, including reliable
    cleanup recovery and wall-clock enforcement. Choose and live-test a
    persistent workspace disk-quota mechanism before claiming the disk limit.
-3. Implement the reverse inference relay and run-scoped capability.
-4. Then add selected untracked inputs and submodule-aware journaled apply
+2. Implement the reverse inference relay and run-scoped capability.
+3. Then add selected untracked inputs and submodule-aware journaled apply
    before exposing `pisafe apply`.
 
 ## Useful references

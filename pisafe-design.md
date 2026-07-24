@@ -135,8 +135,9 @@ This is preferable to the existing general-purpose Podman machine, which
 currently exposes `/Users`, `/private`, and `/var/folders` read-write inside the
 VM. A container escape there could reach Mac files without a hypervisor escape.
 
-The current `pisafe/Containerfile` remains useful as a starting point for the
-run image, but Podman should run inside this dedicated mountless VM.
+The controller embeds its managed run-image Containerfile and packages the
+static Linux ARM64 guest helper as a sidecar. Podman builds that exact context
+inside the dedicated mountless VM.
 
 ### Per-run container
 
@@ -693,14 +694,28 @@ The first usable release should prove:
   across stop/resume and require a second process-lifecycle mechanism. This is
   inexpensive to reverse before lifecycle commands are exposed.
 - PiSafe writes one strict SSH config fragment per run and does not edit the
-  user's global SSH or Zed settings during internal run creation. Automatic
-  Zed launch will be added with the user-facing lifecycle so that any one-time
-  configuration change is explicit. Reversing this choice later is cheap.
+  user's global SSH or Zed settings. `pisafe run` prints the exact command for
+  Zed's explicit "Connect New Server" flow, and `pisafe zed` opens a connection
+  only after Zed has saved it. Editing global SSH config automatically was not
+  retained because Zed supports `-F` in that one-time flow and the design
+  should not own unrelated user configuration. Reversing this choice later is
+  cheap.
 - Run manifests moved to version 2 and activation now atomically requires the
   SSH connection record. Accepting version-1 active records with no connection
-  data was not retained because no user-facing runs exist yet and a
-  compatibility path would weaken the lifecycle invariant. Reversing this
-  after release would require an explicit manifest migration.
+  data was not retained because no user-facing runs existed when the format
+  changed and a compatibility path would weaken the lifecycle invariant.
+  Reversing this after release would require an explicit manifest migration.
+- The run-image Containerfile is embedded in the controller while the static
+  Linux ARM64 guest helper is a sibling release artifact. Building the helper
+  at runtime or checking a generated binary into Git were not retained because
+  the installed product should not require a Go toolchain and source history
+  should remain reviewable. Reversing the release layout later is inexpensive,
+  but would change the managed recipe digest.
+- `pisafe run` is exposed before inference brokering and reports Pi as
+  unavailable. Waiting to expose the isolated editor workspace or injecting a
+  raw provider credential were not retained because the former would delay
+  lifecycle validation and the latter would violate the core boundary. This is
+  cheap to reverse when the broker lands.
 
 ## Primary references
 
