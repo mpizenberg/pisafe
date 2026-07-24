@@ -169,6 +169,22 @@ func (spec Spec) MaterializeArgs(projectDirectory string) ([]string, error) {
 	}, nil
 }
 
+// ConfigureInferenceArgs installs the Pi provider configuration piped through
+// stdin into the run home. It runs after activation and resume so a fresh
+// capability always replaces the previous one.
+func (spec Spec) ConfigureInferenceArgs() ([]string, error) {
+	if err := spec.Validate(); err != nil {
+		return nil, err
+	}
+	return []string{
+		"exec",
+		"--interactive",
+		"--user", containerUser,
+		spec.ContainerName(),
+		"pisafe-guest", "configure-inference",
+	}, nil
+}
+
 func (spec Spec) CleanupStageArgs() ([]string, error) {
 	if err := spec.Validate(); err != nil {
 		return nil, err

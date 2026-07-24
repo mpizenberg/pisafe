@@ -32,7 +32,9 @@ func TestRenderConfigContainsSecurityBoundary(t *testing.T) {
 		"type filter hook forward",
 		"elements = { 192.168.4.0/24, 203.0.113.0/24 }",
 		"net.ipv6.conf.all.disable_ipv6 = 1",
-		"PermitListen 192.0.2.1:*",
+		"PermitListen 192.0.2.1:18080",
+		"ip daddr 192.0.2.1 tcp dport 18080 accept",
+		"ip addr replace 192.0.2.1/32 dev pisafe-broker",
 		"meta skuid 0 udp sport 68 udp dport 67 accept",
 		"sudo /usr/local/sbin/pisafe-firewall-status",
 		"usermod --add-subuids 100000-165535",
@@ -61,6 +63,9 @@ func TestRenderConfigContainsSecurityBoundary(t *testing.T) {
 	}
 	if strings.Contains(text, "pisafe-firewall-refresh") {
 		t.Error("config grants a runtime firewall mutation path")
+	}
+	if strings.Contains(text, "broker_ports") {
+		t.Error("config retains a mutable broker port set")
 	}
 	if strings.Contains(text, "@@") {
 		t.Error("config retains an unreplaced template value")

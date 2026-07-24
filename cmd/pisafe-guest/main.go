@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,8 +21,9 @@ import (
 )
 
 const (
-	sshHome          = "/home/node"
-	sshPublicKeySize = 4096
+	sshHome               = "/home/node"
+	sshPublicKeySize      = 4096
+	modelsConfigSizeLimit = int64(1 << 20)
 )
 
 func main() {
@@ -46,6 +48,11 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 			return usageError()
 		}
 		return configureSSH(ctx, sshHome, in, out, generateHostKey)
+	case "configure-inference":
+		if len(args) != 1 {
+			return usageError()
+		}
+		return configureInference(sshHome, in)
 	case "serve-ssh":
 		if len(args) != 1 {
 			return usageError()
@@ -63,8 +70,66 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 
 func usageError() error {
 	return errors.New(
-		"usage: pisafe-guest <materialize <stage-directory> <workspace>|configure-ssh|serve-ssh|proxy-ssh>",
+		"usage: pisafe-guest <materialize <stage-directory> <workspace>" +
+			"|configure-ssh|configure-inference|serve-ssh|proxy-ssh>",
 	)
+}
+
+// configureInference replaces ~/.pi/agent/models.json with the content piped
+// from the Mac controller. It replaces atomically because resume rotates the
+// run capability while Pi may already be installed and configured.
+func configureInference(home string, in io.Reader) error {
+	content, err := io.ReadAll(io.LimitReader(in, modelsConfigSizeLimit+1))
+	if err != nil {
+		return fmt.Errorf("read models configuration: %w", err)
+	}
+	if int64(len(content)) > modelsConfigSizeLimit {
+		return errors.New("models configuration exceeds size limit")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	var parsed map[string]any
+	if err := decoder.Decode(&parsed); err != nil {
+		return fmt.Errorf("models configuration is not a JSON object: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return errors.New("models configuration contains trailing data")
+	}
+
+	agentDirectory := filepath.Join(filepath.Clean(home), ".pi", "agent")
+	if err := os.MkdirAll(agentDirectory, 0o700); err != nil {
+		return fmt.Errorf("create Pi agent directory: %w", err)
+	}
+	target := filepath.Join(agentDirectory, "models.json")
+	temporary, err := os.CreateTemp(agentDirectory, ".models-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary models configuration: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	complete := false
+	defer func() {
+		temporary.Close()
+		if !complete {
+			os.Remove(temporaryPath)
+		}
+	}()
+	if err := temporary.Chmod(0o600); err != nil {
+		return fmt.Errorf("restrict models configuration: %w", err)
+	}
+	if _, err := temporary.Write(content); err != nil {
+		return fmt.Errorf("write models configuration: %w", err)
+	}
+	if err := temporary.Sync(); err != nil {
+		return fmt.Errorf("sync models configuration: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close models configuration: %w", err)
+	}
+	if err := os.Rename(temporaryPath, target); err != nil {
+		return fmt.Errorf("install models configuration: %w", err)
+	}
+	complete = true
+	return nil
 }
 
 func materialize(

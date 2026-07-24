@@ -743,6 +743,32 @@ The first usable release should prove:
   wall-clock history would be untrustworthy. Adding an explicit migration
   later remains possible, but released version-2 records would need a policy
   for their unknown elapsed time.
+- The broker relay port is the static firewall exception `192.0.2.1:18080`,
+  baked into the nftables ruleset and an exact `PermitListen` at provisioning.
+  A runtime-mutable broker port set (and any sudo helper to populate it) was
+  not retained because the boundary deliberately grants the VM user no
+  firewall-mutation privilege, and one fixed port is all the design needs.
+  Changing the port or address requires VM recreation.
+- Until `pisafe login` exists, the broker upstream is configured on the Mac
+  through `PISAFE_INFERENCE_UPSTREAM/API/KEY/MODELS`. Waiting for the OAuth
+  broker before shipping the relay, or injecting a raw credential into runs,
+  were not retained: the environment key stays on the Mac exactly where the
+  future Keychain-backed credential will live, so the boundary is unchanged
+  and the configuration surface is cheap to replace.
+- Run manifests moved to version 4: the inference capability is a manifest
+  field bound to the active state, issued at activation, rotated on resume,
+  and cleared on stop/discard. The broker validates every request against the
+  durable records rather than in-memory sessions, so revocation needs no
+  broker restart. No version-3 migration was retained because no released
+  records existed; reversing after release would need an explicit migration.
+- The reverse forward is a dedicated `ssh -N -R` child with multiplexing
+  disabled and `ExitOnForwardFailure=yes`; the run-side `models.json` is
+  installed by `pisafe-guest configure-inference` through `podman exec` stdin
+  at activation and resume. Reusing Lima's control master, or writing the
+  configuration only at image/home initialization, were not retained because
+  the forward must die exactly with the broker process and the capability
+  rotates while the home directory persists. Both choices are cheap to
+  reverse.
 - Lima's default VZ user-mode network remains in the generated profile.
   Native `vzNAT` was tested but not retained because it exhibited the same
   stopped-VM SSH recovery failure and made its Mac-side interface appear only

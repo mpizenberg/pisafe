@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/mpizenberg/pisafe/internal/broker"
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/hostnet"
 	"github.com/mpizenberg/pisafe/internal/lima"
@@ -37,6 +38,10 @@ func runCreate(ctx context.Context, out io.Writer) error {
 			err,
 		)
 	}
+	provider, err := broker.FromEnvironment()
+	if err != nil {
+		return err
+	}
 	prefixes, err := hostnet.OnLinkIPv4(ctx)
 	if err != nil {
 		return fmt.Errorf("discover host networks: %w", err)
@@ -50,6 +55,7 @@ func runCreate(ctx context.Context, out io.Writer) error {
 		transport,
 		runstate.NewStore(stateRoot),
 		runssh.NewStore(filepath.Join(stateRoot, "ssh")),
+		inferenceConfig(provider),
 	)
 	service := runstart.New(
 		lima.NewManager(),
@@ -63,7 +69,16 @@ func runCreate(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return printRunResult(out, result)
+	return printRunResult(out, result, provider != nil)
+}
+
+// inferenceConfig avoids handing runctl a non-nil interface wrapping a nil
+// provider when no upstream is configured.
+func inferenceConfig(provider *broker.Provider) runctl.InferenceConfig {
+	if provider == nil {
+		return nil
+	}
+	return provider
 }
 
 func packagedGuestPath() (string, error) {
@@ -81,7 +96,7 @@ func packagedGuestPath() (string, error) {
 	return filepath.Join(filepath.Dir(executable), "pisafe-guest-linux-arm64"), nil
 }
 
-func printRunResult(out io.Writer, result runstart.Result) error {
+func printRunResult(out io.Writer, result runstart.Result, inferenceConfigured bool) error {
 	manifest := result.Manifest
 	if manifest.SSH == nil {
 		return fmt.Errorf("active run has no SSH connection")
@@ -112,7 +127,11 @@ func printRunResult(out io.Writer, result runstart.Result) error {
 	}
 	fmt.Fprintln(out, "Zed:      Remote Projects > Connect New Server, then paste the SSH command")
 	fmt.Fprintf(out, "           After that: pisafe zed %s\n", manifest.RunID)
-	fmt.Fprintln(out, "Pi:        inference unavailable until the broker is implemented")
+	if inferenceConfigured {
+		fmt.Fprintln(out, "Pi:        keep `pisafe broker` running on this Mac to serve inference")
+	} else {
+		fmt.Fprintln(out, "Pi:        inference unavailable; set PISAFE_INFERENCE_* and use pisafe broker")
+	}
 	return nil
 }
 

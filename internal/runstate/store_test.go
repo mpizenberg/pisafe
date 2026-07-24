@@ -24,7 +24,7 @@ func TestStoreLifecycleAndList(t *testing.T) {
 		t.Fatalf("created = %#v", created)
 	}
 	now = now.Add(time.Minute)
-	active, err := store.Activate("run-one", testSSHConnection(root, "run-one"), "", time.Time{})
+	active, err := store.Activate("run-one", testSSHConnection(root, "run-one"), "", testCapability(), time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,6 +74,7 @@ func TestStoreRejectsInvalidTransitions(t *testing.T) {
 		"run-one",
 		testSSHConnection(root, "run-one"),
 		"",
+		testCapability(),
 		time.Time{},
 	); err != nil {
 		t.Fatal(err)
@@ -82,10 +83,10 @@ func TestStoreRejectsInvalidTransitions(t *testing.T) {
 		!strings.Contains(err.Error(), "invalid run transition") {
 		t.Fatalf("error = %v", err)
 	}
-	if _, err := store.Resume("run-one", time.Now()); err == nil {
+	if _, err := store.Resume("run-one", testCapability(), time.Now()); err == nil {
 		t.Fatal("active run resumed")
 	}
-	if _, err := store.Resume("../escape", time.Now()); err == nil {
+	if _, err := store.Resume("../escape", testCapability(), time.Now()); err == nil {
 		t.Fatal("unsafe run ID was accepted")
 	}
 }
@@ -101,7 +102,7 @@ func TestStoreRejectsDuplicateAndCorruptManifest(t *testing.T) {
 	}
 	if err := os.WriteFile(
 		filepath.Join(root, "bad.json"),
-		[]byte(`{"version":3,"run_id":"other"}`),
+		[]byte(`{"version":4,"run_id":"other"}`),
 		0o600,
 	); err != nil {
 		t.Fatal(err)
@@ -127,6 +128,7 @@ func TestStoreRecordsAndClearsOperationError(t *testing.T) {
 		"run-one",
 		testSSHConnection(store.root, "run-one"),
 		"",
+		testCapability(),
 		time.Time{},
 	)
 	if err != nil {
@@ -148,6 +150,7 @@ func TestStoreActivatesWithRunScopedSSHConnection(t *testing.T) {
 		"run-one",
 		connection,
 		strings.Repeat("a", 40),
+		testCapability(),
 		time.Time{},
 	)
 	if err != nil {
@@ -175,7 +178,7 @@ func TestStoreRejectsMismatchedSSHConnection(t *testing.T) {
 	}
 	if _, err := store.Activate("run-one", SSHConnection{
 		Alias: "pisafe-other",
-	}, "", time.Time{}); err == nil {
+	}, "", testCapability(), time.Time{}); err == nil {
 		t.Fatal("mismatched SSH connection was accepted")
 	}
 }
@@ -190,6 +193,7 @@ func TestStoreRejectsInvalidMaterializedBaseline(t *testing.T) {
 		"run-one",
 		testSSHConnection(root, "run-one"),
 		"not-a-git-object",
+		testCapability(),
 		time.Time{},
 	); err == nil {
 		t.Fatal("invalid baseline commit was accepted")
@@ -204,7 +208,7 @@ func TestStoreAccountsCumulativeActiveWallClock(t *testing.T) {
 	if _, err := store.Create(testManifest("run-one")); err != nil {
 		t.Fatal(err)
 	}
-	active, err := store.Activate("run-one", testSSHConnection(root, "run-one"), "", time.Time{})
+	active, err := store.Activate("run-one", testSSHConnection(root, "run-one"), "", testCapability(), time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,13 +225,96 @@ func TestStoreAccountsCumulativeActiveWallClock(t *testing.T) {
 		t.Fatalf("active elapsed = %d", stopped.ActiveElapsedSeconds)
 	}
 	now = now.Add(24 * time.Hour)
-	resumed, err := store.Resume("run-one", now)
+	resumed, err := store.Resume("run-one", testCapability(), now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := RemainingSeconds(resumed, now); got != 28800-5401 {
 		t.Fatalf("remaining = %d", got)
 	}
+}
+
+func TestStoreIssuesRotatesAndRevokesInferenceCapability(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	if _, err := store.Create(testManifest("run-one")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(
+		"run-one",
+		testSSHConnection(root, "run-one"),
+		"",
+		"not-a-capability",
+		time.Time{},
+	); err == nil {
+		t.Fatal("invalid inference capability was accepted")
+	}
+	first := testCapability()
+	active, err := store.Activate(
+		"run-one",
+		testSSHConnection(root, "run-one"),
+		"",
+		first,
+		time.Time{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.InferenceCapability != first {
+		t.Fatalf("active capability = %q", active.InferenceCapability)
+	}
+	stopped, err := store.Stop("run-one", time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopped.InferenceCapability != "" {
+		t.Fatal("stopped run retained its inference capability")
+	}
+	if _, err := store.Resume("run-one", "", time.Now()); err == nil {
+		t.Fatal("resume without a fresh capability was accepted")
+	}
+	second := "pisafe-cap-" + strings.Repeat("cd", 32)
+	resumed, err := store.Resume("run-one", second, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.InferenceCapability != second {
+		t.Fatalf("resumed capability = %q", resumed.InferenceCapability)
+	}
+	if _, err := store.Stop("run-one", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	discarded, err := store.Discard("run-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if discarded.InferenceCapability != "" {
+		t.Fatal("discarded run retained its inference capability")
+	}
+}
+
+func TestNewInferenceCapabilityIsValidAndUnique(t *testing.T) {
+	first, err := NewInferenceCapability()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewInferenceCapability()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ValidInferenceCapability(first) || !ValidInferenceCapability(second) {
+		t.Fatalf("generated capabilities are invalid: %q %q", first, second)
+	}
+	if first == second {
+		t.Fatal("generated capabilities are not unique")
+	}
+	if ValidInferenceCapability("pisafe-cap-XYZ") {
+		t.Fatal("malformed capability validated")
+	}
+}
+
+func testCapability() string {
+	return "pisafe-cap-" + strings.Repeat("ab", 32)
 }
 
 func testManifest(runID string) Manifest {

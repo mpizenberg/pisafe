@@ -69,7 +69,7 @@ func TestPrintRunResultShowsExactConnectionAndExclusions(t *testing.T) {
 			Ignored:   []string{"build/one", "build/two"},
 		},
 	}
-	if err := printRunResult(&output, result); err != nil {
+	if err := printRunResult(&output, result, false); err != nil {
 		t.Fatal(err)
 	}
 	for _, expected := range []string{
@@ -85,6 +85,14 @@ func TestPrintRunResultShowsExactConnectionAndExclusions(t *testing.T) {
 		if !strings.Contains(output.String(), expected) {
 			t.Errorf("output lacks %q:\n%s", expected, output.String())
 		}
+	}
+
+	output.Reset()
+	if err := printRunResult(&output, result, true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "pisafe broker") {
+		t.Errorf("configured output lacks broker guidance:\n%s", output.String())
 	}
 }
 

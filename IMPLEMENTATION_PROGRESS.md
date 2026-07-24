@@ -9,7 +9,7 @@ next.
 
 ## Current milestone
 
-Phase 1 is in progress. Six implementation slices now exist:
+Phase 1 is in progress. Seven implementation slices now exist:
 
 1. The Go controller skeleton and single-repository Git isolation core.
 2. The dedicated Lima VM backend, host-network discovery, and initial static
@@ -24,6 +24,10 @@ Phase 1 is in progress. Six implementation slices now exist:
 6. Stop/resume, exact-confirmation discard and failed-creation cleanup
    recovery, cumulative wall-clock enforcement, and quota-backed persistent
    run storage.
+7. The reverse inference relay: a static broker firewall exception, run-scoped
+   revocable capabilities in the manifest lifecycle, the Mac-side `pisafe
+   broker` relay with fail-closed request contract, and run-side Pi provider
+   configuration.
 
 `pisafe run` now uses the tested mountless path and materializes inside private
 quota-backed VM storage. Do not add a local-workspace fallback.
@@ -91,10 +95,10 @@ quota-backed VM storage. Do not add a local-workspace fallback.
   `Manager.Start` checks it before clock or firewall verification, so an older
   or locally modified security definition fails closed.
 - IPv6 is disabled.
-- A dedicated `192.0.2.1/32` dummy address is reserved for the future
-  inference-broker reverse relay.
-- SSH remote forwarding is restricted to that address; the dynamic
-  `broker_ports` nftables set is empty by default.
+- A dedicated `192.0.2.1/32` dummy address carries the inference-broker
+  reverse relay.
+- SSH remote forwarding is restricted to exactly `192.0.2.1:18080` through
+  `PermitListen`; there is no dynamic broker port set.
 - The generated configuration removes the cloud image's unrestricted
   passwordless sudo and removes the Lima user from `wheel`. It grants only
   two exact no-argument helpers: clock synchronization and firewall status.
@@ -104,13 +108,13 @@ quota-backed VM storage. Do not add a local-workspace fallback.
 - A boot-persistent `pisafe-firewall.service` owns the nftables ruleset.
 - `firewalld` is disabled in the dedicated VM.
 - Input defaults to drop, with established traffic, DHCP replies, control SSH,
-  and future allowed broker ports admitted.
+  and exactly `192.0.2.1:18080` (the broker relay) admitted.
 - Both output and forward hooks deny:
   - IPv4 loopback;
   - RFC1918;
   - CGNAT;
   - link-local and metadata;
-  - TEST-NET broker space except an explicitly enabled broker port;
+  - TEST-NET broker space except the static `192.0.2.1:18080` exception;
   - multicast and reserved/broadcast ranges; and
   - the Mac's current on-link networks.
 - Root DHCP and root loopback exceptions keep VM infrastructure functional.
@@ -208,11 +212,51 @@ quota-backed VM storage. Do not add a local-workspace fallback.
   host-key fingerprint. A creating run can become active only through the
   activation operation that supplies this connection record.
 
+### Inference broker relay and run-scoped capability
+
+- `internal/broker` is the Mac-side relay. Provider credentials never leave
+  the Mac; runs authenticate with a `pisafe-cap-<64 hex>` capability minted
+  from 32 bytes of `crypto/rand`.
+- Capabilities live only in the version-4 manifest: activation and resume
+  require a fresh one, stop and discard clear it, and a stored manifest is
+  invalid if an inactive state retains one. The broker re-reads the durable
+  records on every request, so a stopped, discarded, or wall-clock-exhausted
+  run is rejected immediately with the same uniform 401. Matching is
+  constant-time over SHA-256 digests.
+- The relay accepts exactly one method and path derived from the configured
+  API (`POST /v1/messages`, `/v1/chat/completions`, or `/v1/responses`),
+  rejects unknown paths/methods, caps request bodies at 64 MiB, caps each run
+  at 4 concurrent upstream requests, refuses upstream redirects, and streams
+  responses (SSE-safe flushing) without rewriting them.
+- Until `pisafe login` exists, the upstream is configured on the Mac through
+  `PISAFE_INFERENCE_UPSTREAM`, `PISAFE_INFERENCE_API` (`anthropic-messages`,
+  `openai-completions`, or `openai-responses`), `PISAFE_INFERENCE_KEY`, and
+  `PISAFE_INFERENCE_MODELS` (comma-separated IDs). HTTPS is required except
+  for loopback test upstreams.
+- `pisafe broker` runs in the foreground: it verifies the VM boundary, serves
+  the relay on an ephemeral `127.0.0.1` port, and publishes it at
+  `192.0.2.1:18080` inside the VM through a dedicated
+  `ssh -N -R` child over Lima's generated SSH config with
+  `ExitOnForwardFailure` and multiplexing disabled. The VM listener dies with
+  the process, a second broker fails loudly instead of stealing the binding,
+  and startup confirms reachability by probing `/dev/tcp/192.0.2.1/18080`
+  from inside the VM.
+- Run creation and resume exec `pisafe-guest configure-inference`, which
+  atomically installs a validated `~/.pi/agent/models.json` (mode 0600) whose
+  `apiKey` is the run's current capability. The pinned Pi clients were
+  inspected to fix the base URLs: `http://192.0.2.1:18080` for
+  anthropic-messages and `http://192.0.2.1:18080/v1` for the OpenAI APIs.
+- The upstream auth header matches the API (`x-api-key` for
+  anthropic-messages, `Authorization: Bearer` otherwise); client auth headers
+  are never forwarded upstream, and the relay works whether Pi presents the
+  capability as `x-api-key` or a Bearer token.
+
 ### Run records and internal controller
 
-- `internal/runstate` writes version-3, mode-0600 JSON manifests atomically
+- `internal/runstate` writes version-4, mode-0600 JSON manifests atomically
   under the user config directory (or `PISAFE_STATE_DIR`).
-- It enforces `creating → active → stopped → active|imported|discarded|expired`.
+- It enforces `creating → active → stopped → active|imported|discarded|expired`,
+  and binds one inference capability to exactly the active state.
 - Failed creation remains visibly `creating` with `last_error`; it is not
   silently deleted or mislabeled active.
 - `internal/runctl.StartPrepared` composes stage upload, private-storage import,
@@ -235,7 +279,7 @@ quota-backed VM storage. Do not add a local-workspace fallback.
   - installs/reuses the managed image;
   - prepares and starts the run through `runctl`; and
   - prints the run, workspace, branch, exact `ssh -F` command, excluded input
-    summary, and current inference limitation.
+    summary, and whether `pisafe broker` will serve inference.
 - `pisafe zed <run>` opens an active connection after the user has explicitly
   saved the printed `ssh -F` command through Zed's "Connect New Server" flow.
   PiSafe never edits global SSH or Zed settings.
@@ -268,19 +312,26 @@ Current package coverage at this milestone:
 
 ```text
 pisafe        0.0%
-pisafe-guest  52.8%
-cli           26.1%
+pisafe-guest  56.9%
+broker        96.2%
+cli           20.3%
 gitstage      68.8%
 hostnet       50.0%
-lima          74.8%
-runcontainer  72.2%
-runctl        67.3%
+lima          68.0%
+runcontainer  66.7%
+runctl        67.6%
 runid         92.3%
 runimage      74.6%
 runssh        68.0%
 runstart      70.0%
-runstate      68.1%
+runstate      71.8%
 ```
+
+The broker contract is covered directly: capability auth against durable
+records (unknown, malformed, stopped, and deadline-exhausted capabilities all
+return the same 401), missing-provider 503, method/path/oversize fail-closed
+responses, upstream credential injection without leaking the client header,
+SSE streaming fidelity, redirect refusal, and the per-run concurrency cap.
 
 The generated YAML is checked by the installed Lima validator in the normal
 test suite.
@@ -360,9 +411,29 @@ go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
 ## Live VM state
 
 A persistent Lima instance named `pisafe` was left running. It contains no
-project runs or user data. It was freshly provisioned from the current
-generated configuration and contains only cached base/test images plus the
-current `localhost/pisafe-run:managed-2ffa36731cbcc115` image.
+project runs or user data, only cached base/test images plus the
+`localhost/pisafe-run:managed-2ffa36731cbcc115` image.
+
+**The running VM predates the broker-relay slice.** The generated definition
+now bakes the static `192.0.2.1:18080` exception into the firewall and
+`PermitListen`, so the security profile digest changed and every controller
+command correctly fails closed against this VM until it is recreated:
+
+```sh
+limactl delete -f pisafe
+PISAFE_LIVE_LIMA=1 go test -v -timeout 30m ./internal/lima
+PISAFE_LIVE_LIMA=1 go test -v -timeout 30m ./internal/runimage
+# then rerun the end-to-end test with the image ID printed by the installer
+```
+
+Recreation was not performed in the relay session because deleting the VM is
+destructive and was left as an explicit user action. The relay live tests
+(`TestLiveBrokerReverseRelay`, `TestLiveSecondRelayFailsClosed`) therefore
+have not run against a real VM yet; they are part of the gated suite above.
+
+Everything below was verified against the previous profile
+(`sha256:6a9c31943325290e23272c7c95af4ae80df8c94718c3ed8ec5e1824efbfcc927`)
+and is expected to hold identically after recreation.
 
 Fresh provisioning verified all security-sensitive setup together:
 
@@ -436,11 +507,21 @@ sandboxed result.
   settings.
 - Selected untracked/ignored input archive handling is missing.
 - Submodule staging and journaled multi-repository apply are missing.
-- The broker port set and reverse SSH inference relay are not implemented.
-- No inference broker or OAuth/Keychain integration exists.
+- The relay and capability are implemented but not yet live-verified; the VM
+  recreation and gated live suite above are the remaining step.
+- No ChatGPT OAuth or Keychain integration exists yet. The interim
+  `PISAFE_INFERENCE_*` environment configuration keeps the key on the Mac but
+  is meant to be replaced by `pisafe login` backed by `pi-ai` OAuth and the
+  Keychain.
+- Broker model entries carry only IDs; context-window and cost metadata fall
+  back to Pi's defaults until the login flow curates them.
+- While no broker is connected, a process escaped to the unprivileged VM user
+  could bind `192.0.2.1:18080` itself. It gains nothing beyond what that user
+  already has (it relays pasta traffic and can read run storage), and a real
+  broker then fails loudly at bind time instead of silently coexisting.
 - Firewall behavioral coverage still needs DNS-to-private answers, redirects,
-  raw UDP, `host.containers.internal`, VM loopback attempts, and the exact
-  broker exception.
+  raw UDP, `host.containers.internal`, and VM loopback attempts; the exact
+  broker exception now has gated live tests pending their first run.
 - Security-profile drift is detected and fails closed, but automated
   replacement/reconciliation is intentionally absent because deleting a VM is
   destructive and must be an explicit lifecycle operation.
@@ -448,8 +529,6 @@ sandboxed result.
   On this host, a cleanly stopped Lima 2.2.0 VZ VM boots but does not regain
   SSH over either default user-mode networking or `vzNAT`; automatic
   stopped-VM recovery is therefore not yet reliable.
-- Pi is installed, but inference intentionally remains unusable until the
-  broker/relay exists. No raw provider credential may be added as a shortcut.
 - Pi's top-level tarball is integrity-pinned, but a reproducible published
   image/digest workflow is still needed to freeze transitive npm resolution.
 
@@ -457,10 +536,15 @@ sandboxed result.
 
 Continue Phase 1 without weakening the boundary:
 
-1. Implement the reverse inference relay and run-scoped capability.
-2. Then add selected untracked inputs and submodule-aware journaled apply
+1. Recreate the VM and run the gated live suites, including the new relay
+   tests and an end-to-end `pisafe run` + `pisafe broker` inference check
+   against a real upstream.
+2. Implement `pisafe login chatgpt`: the `pi-ai`-based OAuth broker upstream
+   with Keychain persistence, replacing the `PISAFE_INFERENCE_*` interim
+   configuration.
+3. Then add selected untracked inputs and submodule-aware journaled apply
    before exposing `pisafe apply`.
-3. Add `diff`, hardened `cp`, and seven-day GC after the apply transaction is
+4. Add `diff`, hardened `cp`, and seven-day GC after the apply transaction is
    durable.
 
 ## Useful references

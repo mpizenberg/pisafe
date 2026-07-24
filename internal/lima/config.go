@@ -16,6 +16,7 @@ import (
 const (
 	InstanceName       = "pisafe"
 	BrokerAddress      = "192.0.2.1"
+	BrokerPort         = 18080
 	MinimumLimaVersion = "2.2.0"
 )
 
@@ -53,6 +54,8 @@ func RenderConfig(options ConfigOptions) ([]byte, error) {
 		"@@HOST_PREFIX_LINES@@", strings.Join(prefixes, "\n    "),
 		"@@SECURITY_PROFILE_DIGEST@@", securityProfile,
 		"@@RUN_STORAGE_BYTES@@", strconv.FormatInt(runcontainer.DefaultPersistent, 10),
+		"@@BROKER_ADDRESS@@", BrokerAddress,
+		"@@BROKER_PORT@@", strconv.Itoa(BrokerPort),
 	)
 	return []byte(replacements.Replace(configTemplate)), nil
 }
@@ -181,7 +184,7 @@ provision:
     AllowAgentForwarding no
     AllowTcpForwarding remote
     GatewayPorts clientspecified
-    PermitListen 192.0.2.1:*
+    PermitListen @@BROKER_ADDRESS@@:@@BROKER_PORT@@
     PermitTunnel no
     X11Forwarding no
     PISAFE_SSHD
@@ -213,10 +216,6 @@ provision:
         elements = { @@HOST_PREFIXES@@ }
       }
 
-      set broker_ports {
-        type inet_service
-      }
-
       chain input {
         type filter hook input priority filter
         policy drop
@@ -225,7 +224,7 @@ provision:
         udp sport 67 udp dport 68 accept
         iifname "lo" accept
         tcp dport 22 accept
-        ip daddr 192.0.2.1 tcp dport @broker_ports accept
+        ip daddr @@BROKER_ADDRESS@@ tcp dport @@BROKER_PORT@@ accept
       }
 
       chain output {
@@ -233,7 +232,7 @@ provision:
         policy accept
         meta skuid 0 ip daddr 127.0.0.0/8 accept
         meta skuid 0 udp sport 68 udp dport 67 accept
-        ip daddr 192.0.2.1 tcp dport @broker_ports accept
+        ip daddr @@BROKER_ADDRESS@@ tcp dport @@BROKER_PORT@@ accept
         ip daddr @fixed_denied_v4 reject
         ip daddr @host_onlink_v4 reject
       }
@@ -241,7 +240,7 @@ provision:
       chain forward {
         type filter hook forward priority filter
         policy accept
-        ip daddr 192.0.2.1 tcp dport @broker_ports accept
+        ip daddr @@BROKER_ADDRESS@@ tcp dport @@BROKER_PORT@@ accept
         ip daddr @fixed_denied_v4 reject
         ip daddr @host_onlink_v4 reject
       }
@@ -264,7 +263,7 @@ provision:
     sysctl --system
     ip link show pisafe-broker >/dev/null 2>&1 ||
       ip link add pisafe-broker type dummy
-    ip addr replace 192.0.2.1/32 dev pisafe-broker
+    ip addr replace @@BROKER_ADDRESS@@/32 dev pisafe-broker
     ip link set pisafe-broker up
     nft --check --file /etc/pisafe/firewall.nft
     nft --file /etc/pisafe/firewall.nft

@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/mpizenberg/pisafe/internal/broker"
 	"github.com/mpizenberg/pisafe/internal/hostnet"
 	"github.com/mpizenberg/pisafe/internal/lima"
 	"github.com/mpizenberg/pisafe/internal/runctl"
@@ -72,6 +73,10 @@ func prepareLifecycle(ctx context.Context) (runctl.Controller, error) {
 	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
 		return runctl.Controller{}, fmt.Errorf("pisafe lifecycle commands require macOS on ARM64")
 	}
+	provider, err := broker.FromEnvironment()
+	if err != nil {
+		return runctl.Controller{}, err
+	}
 	prefixes, err := hostnet.OnLinkIPv4(ctx)
 	if err != nil {
 		return runctl.Controller{}, fmt.Errorf("discover host networks: %w", err)
@@ -91,5 +96,6 @@ func prepareLifecycle(ctx context.Context) (runctl.Controller, error) {
 		lima.NewTransport(),
 		runstate.NewStore(root),
 		runssh.NewStore(filepath.Join(root, "ssh")),
+		inferenceConfig(provider),
 	), nil
 }

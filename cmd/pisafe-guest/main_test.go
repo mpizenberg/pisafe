@@ -170,6 +170,58 @@ func TestConfigureSSHFailsClosed(t *testing.T) {
 	}
 }
 
+func TestConfigureInferenceInstallsAndReplacesModelsConfig(t *testing.T) {
+	home := t.TempDir()
+	first := `{"providers":{"pisafe":{"apiKey":"first"}}}`
+	if err := configureInference(home, strings.NewReader(first)); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(home, ".pi", "agent", "models.json")
+	content, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != first {
+		t.Fatalf("models.json = %q", content)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("models.json mode = %#o", info.Mode().Perm())
+	}
+
+	second := `{"providers":{"pisafe":{"apiKey":"second"}}}`
+	if err := configureInference(home, strings.NewReader(second)); err != nil {
+		t.Fatal(err)
+	}
+	content, err = os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != second {
+		t.Fatalf("replaced models.json = %q", content)
+	}
+}
+
+func TestConfigureInferenceFailsClosed(t *testing.T) {
+	for name, input := range map[string]string{
+		"not json":   "providers",
+		"trailing":   `{"providers":{}} extra`,
+		"oversize":   `{"pad":"` + strings.Repeat("x", int(modelsConfigSizeLimit)) + `"}`,
+		"non-object": `["providers"]`,
+	} {
+		home := t.TempDir()
+		if err := configureInference(home, strings.NewReader(input)); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+		if _, err := os.Stat(filepath.Join(home, ".pi", "agent", "models.json")); err == nil {
+			t.Errorf("%s left a models.json behind", name)
+		}
+	}
+}
+
 func TestProxySSHRelaysBinaryStdio(t *testing.T) {
 	client, server := net.Pipe()
 	defer client.Close()

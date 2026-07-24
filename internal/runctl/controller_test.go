@@ -190,7 +190,7 @@ func TestStartPreparedActivatesOnlyAfterMaterialization(t *testing.T) {
 	backend := &fakeBackend{}
 	store := runstate.NewStore(t.TempDir())
 	ssh := &fakeSSHStore{}
-	controller := New(backend, store, ssh)
+	controller := New(backend, store, ssh, testInference{})
 
 	manifest, err := controller.StartPrepared(
 		context.Background(),
@@ -215,6 +215,7 @@ func TestStartPreparedActivatesOnlyAfterMaterialization(t *testing.T) {
 		"pisafe-guest materialize",
 		"rm -rf /work/stage",
 		"remove-stage",
+		"pisafe-guest configure-inference",
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Errorf("calls lack %q:\n%s", expected, joined)
@@ -223,6 +224,15 @@ func TestStartPreparedActivatesOnlyAfterMaterialization(t *testing.T) {
 	if manifest.SSH == nil ||
 		manifest.SSH.Alias != "pisafe-run-123" {
 		t.Fatalf("manifest SSH = %#v", manifest.SSH)
+	}
+	if !runstate.ValidInferenceCapability(manifest.InferenceCapability) {
+		t.Fatalf("manifest capability = %q", manifest.InferenceCapability)
+	}
+	if stdin := stdinFor(backend.calls, "configure-inference"); !strings.Contains(
+		stdin,
+		manifest.InferenceCapability,
+	) {
+		t.Fatalf("inference configuration lacks the run capability: %q", stdin)
 	}
 	if manifest.Snapshot.BaselineCommit != strings.Repeat("b", 40) {
 		t.Fatalf("manifest baseline = %q", manifest.Snapshot.BaselineCommit)
@@ -236,7 +246,7 @@ func TestStartPreparedRollsBackAndRecordsFailure(t *testing.T) {
 	backend := &fakeBackend{failAt: "pisafe-guest materialize"}
 	store := runstate.NewStore(t.TempDir())
 	ssh := &fakeSSHStore{}
-	controller := New(backend, store, ssh)
+	controller := New(backend, store, ssh, testInference{})
 
 	_, err := controller.StartPrepared(
 		context.Background(),
@@ -273,7 +283,7 @@ func TestStartPreparedRollsBackAndRecordsFailure(t *testing.T) {
 func TestStartPreparedCleansStorageAfterAmbiguousCreateFailure(t *testing.T) {
 	backend := &fakeBackend{failAt: "create-storage"}
 	store := runstate.NewStore(t.TempDir())
-	controller := New(backend, store, &fakeSSHStore{})
+	controller := New(backend, store, &fakeSSHStore{}, testInference{})
 
 	if _, err := controller.StartPrepared(
 		context.Background(),
@@ -303,7 +313,7 @@ func TestLifecycleStopsAndResumesWithRemainingBudget(t *testing.T) {
 			spec.ContainerName(),
 		),
 	}
-	controller := New(backend, store, &fakeSSHStore{})
+	controller := New(backend, store, &fakeSSHStore{}, testInference{})
 
 	stopped, err := controller.Stop(context.Background(), manifest.RunID)
 	if err != nil {
@@ -329,6 +339,16 @@ func TestLifecycleStopsAndResumesWithRemainingBudget(t *testing.T) {
 	if !strings.Contains(callsString(backend.calls), "--timeout "+fmt.Sprint(remaining)) {
 		t.Fatalf("resume did not apply remaining timeout:\n%s", callsString(backend.calls))
 	}
+	if !runstate.ValidInferenceCapability(resumed.InferenceCapability) ||
+		resumed.InferenceCapability == manifest.InferenceCapability {
+		t.Fatalf("resume did not rotate the capability: %q", resumed.InferenceCapability)
+	}
+	if stdin := stdinFor(backend.calls, "configure-inference"); !strings.Contains(
+		stdin,
+		resumed.InferenceCapability,
+	) {
+		t.Fatalf("resumed inference configuration lacks the fresh capability: %q", stdin)
+	}
 }
 
 func TestResumeCleansContainerAfterAmbiguousStartFailure(t *testing.T) {
@@ -345,7 +365,7 @@ func TestResumeCleansContainerAfterAmbiguousStartFailure(t *testing.T) {
 			spec.ContainerName(),
 		),
 	}
-	controller := New(backend, store, &fakeSSHStore{})
+	controller := New(backend, store, &fakeSSHStore{}, testInference{})
 	if _, err := controller.Stop(context.Background(), manifest.RunID); err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +428,7 @@ func TestDiscardCleansActiveAndFailedCreatingRuns(t *testing.T) {
 				)
 			}
 			ssh := &fakeSSHStore{}
-			controller := New(backend, store, ssh)
+			controller := New(backend, store, ssh, testInference{})
 			discarded, err := controller.Discard(context.Background(), manifest.RunID)
 			if err != nil {
 				t.Fatal(err)
@@ -440,7 +460,7 @@ func TestLifecycleRefusesMismatchedContainerBeforeDeletion(t *testing.T) {
 	)
 	inspection.Config.Labels["io.pisafe.run"] = "other-run"
 	backend := &fakeBackend{container: inspection}
-	controller := New(backend, store, &fakeSSHStore{})
+	controller := New(backend, store, &fakeSSHStore{}, testInference{})
 
 	if _, err := controller.Stop(context.Background(), manifest.RunID); err == nil ||
 		!strings.Contains(err.Error(), "label does not match") {
@@ -449,6 +469,14 @@ func TestLifecycleRefusesMismatchedContainerBeforeDeletion(t *testing.T) {
 	if backend.container == nil {
 		t.Fatal("mismatched container was deleted")
 	}
+}
+
+// testInference stands in for a configured provider; the rendered content
+// only needs to be recognizable in the recorded podman exec stdin.
+type testInference struct{}
+
+func (testInference) ModelsJSON(capability string) ([]byte, error) {
+	return []byte(`{"providers":{"pisafe":{"apiKey":"` + capability + `"}}}`), nil
 }
 
 func testPrepared() gitstage.PreparedStage {
@@ -470,6 +498,18 @@ func callsString(calls []backendCall) string {
 		lines = append(lines, strings.TrimSpace(call.kind+" "+strings.Join(call.args, " ")))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// stdinFor returns the stdin recorded for the most recent call whose argv
+// mentions marker.
+func stdinFor(calls []backendCall, marker string) string {
+	stdin := ""
+	for _, call := range calls {
+		if strings.Contains(strings.Join(call.args, " "), marker) {
+			stdin = call.stdin
+		}
+	}
+	return stdin
 }
 
 func inspectionFromRunArgs(args []string, name string) *containerInspection {
@@ -546,6 +586,7 @@ func activeManifest(t *testing.T, store runstate.Store) runstate.Manifest {
 			HostKeyFingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		},
 		strings.Repeat("b", 40),
+		"pisafe-cap-"+strings.Repeat("ab", 32),
 		time.Time{},
 	)
 	if err != nil {

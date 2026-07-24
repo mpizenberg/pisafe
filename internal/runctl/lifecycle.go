@@ -135,7 +135,21 @@ func (controller Controller) Resume(
 			errors.Join(err, cleanupErr),
 		)
 	}
-	resumed, err := controller.store.Resume(runID, inspection.State.StartedAt)
+	capability, err := runstate.NewInferenceCapability()
+	if err == nil {
+		err = controller.configureInference(ctx, spec, capability)
+	}
+	if err != nil {
+		cleanupContext, cancelCleanup := lifecycleCleanupContext(ctx)
+		defer cancelCleanup()
+		_, cleanupErr := controller.stopAndRemoveContainer(cleanupContext, spec)
+		return runstate.Manifest{}, controller.recordLifecycleError(
+			runID,
+			"resume",
+			errors.Join(err, cleanupErr),
+		)
+	}
+	resumed, err := controller.store.Resume(runID, capability, inspection.State.StartedAt)
 	if err != nil {
 		cleanupContext, cancelCleanup := lifecycleCleanupContext(ctx)
 		defer cancelCleanup()

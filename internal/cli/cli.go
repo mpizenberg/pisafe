@@ -12,7 +12,7 @@ import (
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
-var errUsage = errors.New("usage: pisafe <run|stop|resume|discard|list|zed|doctor|help>")
+var errUsage = errors.New("usage: pisafe <run|stop|resume|discard|list|zed|broker|doctor|help>")
 
 func Run(ctx context.Context, args []string, out io.Writer) error {
 	if len(args) == 0 {
@@ -26,6 +26,11 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 			return errUsage
 		}
 		return runCreate(ctx, out)
+	case "broker":
+		if len(args) != 1 {
+			return errUsage
+		}
+		return runBroker(ctx, out)
 	case "doctor":
 		if len(args) != 1 {
 			return errUsage
@@ -80,11 +85,15 @@ Usage:
   pisafe discard RUN --confirm RUN
                    Permanently delete one exact run workspace
   pisafe zed RUN   Open a configured run in Zed
+  pisafe broker    Relay brokered inference to active runs (foreground)
   pisafe doctor    Check Phase 1 host prerequisites
   pisafe list      Show durable run records
   pisafe help      Show this help
 
-Pi inference remains unavailable until the credential broker is implemented.
+Runs never receive provider credentials; pisafe broker keeps them on the Mac
+and relays inference to a revocable per-run capability. Configure the interim
+upstream with PISAFE_INFERENCE_UPSTREAM, PISAFE_INFERENCE_API,
+PISAFE_INFERENCE_KEY, and PISAFE_INFERENCE_MODELS.
 After creating a run, use the printed one-time Zed Remote Projects command;
 pisafe never edits global SSH or Zed settings.`)
 }

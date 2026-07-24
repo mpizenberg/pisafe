@@ -2,7 +2,9 @@
 package runstate
 
 import (
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,9 +20,27 @@ import (
 	"github.com/mpizenberg/pisafe/internal/runid"
 )
 
-const manifestVersion = 3
+const manifestVersion = 4
 
-var gitObjectPattern = regexp.MustCompile(`^(?:[a-f0-9]{40}|[a-f0-9]{64})$`)
+var (
+	gitObjectPattern  = regexp.MustCompile(`^(?:[a-f0-9]{40}|[a-f0-9]{64})$`)
+	capabilityPattern = regexp.MustCompile(`^pisafe-cap-[a-f0-9]{64}$`)
+)
+
+// NewInferenceCapability creates the revocable secret that lets one active
+// run consume brokered inference. It is the only credential pisafe ever hands
+// to sandboxed code.
+func NewInferenceCapability() (string, error) {
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return "", fmt.Errorf("generate inference capability: %w", err)
+	}
+	return "pisafe-cap-" + hex.EncodeToString(secret), nil
+}
+
+func ValidInferenceCapability(capability string) bool {
+	return capabilityPattern.MatchString(capability)
+}
 
 type State string
 
@@ -43,6 +63,7 @@ type Manifest struct {
 	Container            string            `json:"container,omitempty"`
 	Workspace            string            `json:"workspace,omitempty"`
 	SSH                  *SSHConnection    `json:"ssh,omitempty"`
+	InferenceCapability  string            `json:"inference_capability,omitempty"`
 	ActiveLimitSeconds   int64             `json:"active_limit_seconds"`
 	ActiveElapsedSeconds int64             `json:"active_elapsed_seconds"`
 	ActiveStartedAt      *time.Time        `json:"active_started_at,omitempty"`
@@ -197,6 +218,7 @@ func (store Store) Stop(runID string, endedAt time.Time) (Manifest, error) {
 	manifest.ActiveElapsedSeconds += elapsedSeconds
 	manifest.ActiveStartedAt = nil
 	manifest.ActiveDeadline = nil
+	manifest.InferenceCapability = ""
 	manifest.State = StateStopped
 	manifest.LastError = ""
 	manifest.UpdatedAt = now
@@ -204,7 +226,7 @@ func (store Store) Stop(runID string, endedAt time.Time) (Manifest, error) {
 	return store.replace(manifest)
 }
 
-func (store Store) Resume(runID string, startedAt time.Time) (Manifest, error) {
+func (store Store) Resume(runID string, capability string, startedAt time.Time) (Manifest, error) {
 	manifest, err := store.Get(runID)
 	if err != nil {
 		return Manifest{}, err
@@ -219,6 +241,9 @@ func (store Store) Resume(runID string, startedAt time.Time) (Manifest, error) {
 	remaining := manifest.ActiveLimitSeconds - manifest.ActiveElapsedSeconds
 	if remaining <= 0 {
 		return Manifest{}, fmt.Errorf("run %q exhausted its active wall-clock limit", runID)
+	}
+	if !ValidInferenceCapability(capability) {
+		return Manifest{}, fmt.Errorf("resume requires a fresh inference capability")
 	}
 	now := store.now().UTC()
 	startedAt = startedAt.UTC()
@@ -235,6 +260,7 @@ func (store Store) Resume(runID string, startedAt time.Time) (Manifest, error) {
 	manifest.State = StateActive
 	manifest.ActiveStartedAt = &startedAt
 	manifest.ActiveDeadline = &deadline
+	manifest.InferenceCapability = capability
 	manifest.LastError = ""
 	manifest.UpdatedAt = now
 	return store.replace(manifest)
@@ -256,6 +282,7 @@ func (store Store) Discard(runID string) (Manifest, error) {
 	manifest.State = StateDiscarded
 	manifest.ActiveStartedAt = nil
 	manifest.ActiveDeadline = nil
+	manifest.InferenceCapability = ""
 	manifest.LastError = ""
 	manifest.UpdatedAt = now
 	manifest.DiscardedAt = &now
@@ -266,6 +293,7 @@ func (store Store) Activate(
 	runID string,
 	connection SSHConnection,
 	baselineCommit string,
+	capability string,
 	startedAt time.Time,
 ) (Manifest, error) {
 	manifest, err := store.Get(runID)
@@ -284,6 +312,9 @@ func (store Store) Activate(
 	}
 	if baselineCommit != "" && !gitObjectPattern.MatchString(baselineCommit) {
 		return Manifest{}, fmt.Errorf("invalid materialized baseline commit")
+	}
+	if !ValidInferenceCapability(capability) {
+		return Manifest{}, fmt.Errorf("activation requires an inference capability")
 	}
 	now := store.now().UTC()
 	if manifest.ActiveLimitSeconds <= 0 {
@@ -305,6 +336,7 @@ func (store Store) Activate(
 	manifest.Snapshot.BaselineCommit = baselineCommit
 	manifest.ActiveStartedAt = &startedAt
 	manifest.ActiveDeadline = &deadline
+	manifest.InferenceCapability = capability
 	manifest.LastError = ""
 	manifest.UpdatedAt = now
 	path, err := store.manifestPath(runID)
@@ -471,6 +503,9 @@ func validateStoredManifest(manifest Manifest, expectedRunID string) error {
 			return fmt.Errorf("invalid stored SSH connection: %w", err)
 		}
 	}
+	if manifest.State != StateActive && manifest.InferenceCapability != "" {
+		return fmt.Errorf("inactive run retains an inference capability")
+	}
 	switch manifest.State {
 	case StateCreating:
 		if manifest.SSH != nil ||
@@ -481,6 +516,9 @@ func validateStoredManifest(manifest Manifest, expectedRunID string) error {
 	case StateActive:
 		if manifest.SSH == nil {
 			return fmt.Errorf("run state %q requires an SSH connection", manifest.State)
+		}
+		if !ValidInferenceCapability(manifest.InferenceCapability) {
+			return fmt.Errorf("active run requires an inference capability")
 		}
 		if manifest.ActiveStartedAt == nil || manifest.ActiveDeadline == nil {
 			return fmt.Errorf("active run requires wall-clock timestamps")

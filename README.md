@@ -55,8 +55,10 @@ into the exact Pi workspace are live-validated. `pisafe run` prints the exact
 OpenSSH command to paste once into Zed's Remote Projects dialog; it does not
 silently edit global SSH or Zed settings. Each run has a live-validated
 10 GiB fixed-capacity persistent filesystem and eight cumulative active hours
-enforced by Podman. Stop/resume and confirmed discard are live-validated;
-inference brokering remains unavailable.
+enforced by Podman. Stop/resume and confirmed discard are live-validated.
+`pisafe broker` relays inference from the Mac into runs over a reverse SSH
+forward to `192.0.2.1:18080`, the firewall's single static exception; runs
+hold only a revocable per-run capability, never a provider credential.
 
 ## Development
 
@@ -72,14 +74,17 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
 ./pisafe stop RUN
 ./pisafe resume RUN
 ./pisafe discard RUN --confirm RUN
+./pisafe broker
 ```
 
 The release layout places `pisafe-guest-linux-arm64` beside `pisafe`. During
 development, `PISAFE_GUEST_HELPER=/absolute/path/to/helper` may select the
 sidecar explicitly. The Containerfile is compiled into the controller.
 
-`pisafe run` leaves Pi inference unavailable until the broker exists; it never
-injects a provider credential as a shortcut.
+Pi inference works while `pisafe broker` runs on the Mac. Until
+`pisafe login` exists, the upstream provider is configured through
+`PISAFE_INFERENCE_UPSTREAM`, `PISAFE_INFERENCE_API`, `PISAFE_INFERENCE_KEY`,
+and `PISAFE_INFERENCE_MODELS`; the key never enters the VM or a run.
 
 The gated live suite creates or reuses the dedicated `pisafe` VM and exercises
 the mount, rootless-container, and network boundaries:

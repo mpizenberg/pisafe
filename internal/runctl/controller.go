@@ -31,10 +31,10 @@ type Backend interface {
 
 type StateStore interface {
 	Create(runstate.Manifest) (runstate.Manifest, error)
-	Activate(string, runstate.SSHConnection, string, time.Time) (runstate.Manifest, error)
+	Activate(string, runstate.SSHConnection, string, string, time.Time) (runstate.Manifest, error)
 	Get(string) (runstate.Manifest, error)
 	Stop(string, time.Time) (runstate.Manifest, error)
-	Resume(string, time.Time) (runstate.Manifest, error)
+	Resume(string, string, time.Time) (runstate.Manifest, error)
 	Discard(string) (runstate.Manifest, error)
 	RecordError(string, error) (runstate.Manifest, error)
 }
@@ -45,14 +45,27 @@ type SSHStore interface {
 	Remove(string) error
 }
 
-type Controller struct {
-	backend Backend
-	store   StateStore
-	ssh     SSHStore
+// InferenceConfig renders the run-side Pi provider configuration around one
+// run-scoped capability. A nil InferenceConfig means no provider is
+// configured yet; the capability is still issued and rotated.
+type InferenceConfig interface {
+	ModelsJSON(capability string) ([]byte, error)
 }
 
-func New(backend Backend, store StateStore, ssh SSHStore) Controller {
-	return Controller{backend: backend, store: store, ssh: ssh}
+type Controller struct {
+	backend   Backend
+	store     StateStore
+	ssh       SSHStore
+	inference InferenceConfig
+}
+
+func New(
+	backend Backend,
+	store StateStore,
+	ssh SSHStore,
+	inference InferenceConfig,
+) Controller {
+	return Controller{backend: backend, store: store, ssh: ssh, inference: inference}
 }
 
 // StartPrepared creates a run from host-prepared artifacts. The image must
@@ -202,17 +215,50 @@ func (controller Controller) StartPrepared(
 	}
 	remoteAllocated = false
 
+	capability, err := runstate.NewInferenceCapability()
+	if err != nil {
+		return runstate.Manifest{}, err
+	}
+	if err := controller.configureInference(ctx, spec, capability); err != nil {
+		return runstate.Manifest{}, err
+	}
+
 	manifest, err = controller.store.Activate(spec.RunID, runstate.SSHConnection{
 		Alias:              endpoint.Alias,
 		IdentityFile:       endpoint.IdentityFile,
 		KnownHostsFile:     endpoint.KnownHostsFile,
 		ConfigFile:         endpoint.ConfigFile,
 		HostKeyFingerprint: endpoint.HostKeyFingerprint,
-	}, materialized.BaselineCommit, inspection.State.StartedAt)
+	}, materialized.BaselineCommit, capability, inspection.State.StartedAt)
 	if err != nil {
 		return runstate.Manifest{}, fmt.Errorf("activate run manifest: %w", err)
 	}
 	return manifest, nil
+}
+
+// configureInference writes the run's models.json when a provider is
+// configured. Without one, the run simply has no Pi provider entry until the
+// next resume after configuration.
+func (controller Controller) configureInference(
+	ctx context.Context,
+	spec runcontainer.Spec,
+	capability string,
+) error {
+	if controller.inference == nil {
+		return nil
+	}
+	content, err := controller.inference.ModelsJSON(capability)
+	if err != nil {
+		return fmt.Errorf("render run inference configuration: %w", err)
+	}
+	args, err := spec.ConfigureInferenceArgs()
+	if err != nil {
+		return err
+	}
+	if _, err := controller.podman(ctx, bytes.NewReader(content), args...); err != nil {
+		return fmt.Errorf("install run inference configuration: %w", err)
+	}
+	return nil
 }
 
 func decodeMaterializedSnapshot(
