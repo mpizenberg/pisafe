@@ -4,8 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+
+	"github.com/mpizenberg/pisafe/internal/hostnet"
+	limabackend "github.com/mpizenberg/pisafe/internal/lima"
 )
 
 type prerequisite struct {
@@ -45,8 +50,41 @@ func runDoctor(ctx context.Context, out io.Writer) error {
 		missingRequired = true
 		fmt.Fprintln(out, "MISSING  platform (Phase 1 requires macOS on ARM64)")
 	}
+	if !missingRequired {
+		if err := checkGeneratedLimaConfig(ctx, out); err != nil {
+			missingRequired = true
+			fmt.Fprintf(out, "MISSING  boundary (%v)\n", err)
+		}
+	}
 	if missingRequired {
 		return fmt.Errorf("required host prerequisites are missing")
 	}
+	return nil
+}
+
+func checkGeneratedLimaConfig(ctx context.Context, out io.Writer) error {
+	prefixes, err := hostnet.OnLinkIPv4(ctx)
+	if err != nil {
+		return fmt.Errorf("host networks: %w", err)
+	}
+	config, err := limabackend.RenderConfig(limabackend.DefaultConfigOptions(prefixes))
+	if err != nil {
+		return fmt.Errorf("render Lima configuration: %w", err)
+	}
+
+	tempDir, err := os.MkdirTemp("", "pisafe-doctor-*")
+	if err != nil {
+		return fmt.Errorf("create temporary directory: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+	configPath := filepath.Join(tempDir, "pisafe.yaml")
+	if err := os.WriteFile(configPath, config, 0o600); err != nil {
+		return fmt.Errorf("write temporary Lima configuration: %w", err)
+	}
+	command := exec.CommandContext(ctx, "limactl", "template", "validate", configPath)
+	if output, err := command.CombinedOutput(); err != nil {
+		return fmt.Errorf("validate Lima configuration: %s", output)
+	}
+	fmt.Fprintf(out, "OK       Boundary %d host IPv4 prefixes; Lima config valid\n", len(prefixes))
 	return nil
 }
