@@ -82,10 +82,11 @@ func (manager Manager) Create(ctx context.Context, configPath string) error {
 	return nil
 }
 
-// Start starts (or reuses) the VM and refreshes the host-network deny set
-// before returning. Callers must not start run containers if this fails.
+// Start starts (or reuses) the VM and verifies that its immutable host-network
+// deny set still matches the Mac. Callers must not start run containers if
+// this fails.
 func (manager Manager) Start(ctx context.Context, hostPrefixes []string) error {
-	if _, err := renderPrefixUpdate(hostPrefixes); err != nil {
+	if _, err := renderPrefixInput(hostPrefixes); err != nil {
 		return err
 	}
 	status, err := manager.Status(ctx)
@@ -110,32 +111,61 @@ func (manager Manager) Start(ctx context.Context, hostPrefixes []string) error {
 	default:
 		return fmt.Errorf("unsupported Lima status %q", status)
 	}
-	return manager.RefreshFirewall(ctx, hostPrefixes)
-}
-
-// RefreshFirewall atomically replaces the host on-link prefix set after each
-// start or resume. It must complete before any run container is resumed.
-func (manager Manager) RefreshFirewall(ctx context.Context, prefixes []string) error {
-	batch, err := renderPrefixUpdate(prefixes)
-	if err != nil {
+	if err := manager.SyncClock(ctx); err != nil {
 		return err
 	}
+	return manager.VerifyFirewall(ctx, hostPrefixes)
+}
+
+// SyncClock steps a clock that drifted while the plain-mode VM was suspended.
+// Plain mode has no Lima guest agent to perform host/guest time correction.
+func (manager Manager) SyncClock(ctx context.Context) error {
 	if _, err := manager.runner.Run(
 		ctx,
-		strings.NewReader(batch),
+		nil,
 		"shell",
 		manager.instance,
 		"sudo",
-		"nft",
-		"--file",
-		"-",
+		"/usr/local/sbin/pisafe-clock-step",
 	); err != nil {
-		return fmt.Errorf("refresh VM firewall: %w", err)
+		return fmt.Errorf("synchronize VM clock: %w", err)
 	}
 	return nil
 }
 
-func renderPrefixUpdate(prefixes []string) (string, error) {
+// VerifyFirewall refuses to reuse a VM after the Mac's on-link networks
+// change. The prefix set is immutable at runtime so a process that escapes to
+// the Lima user cannot use a privileged refresh operation to weaken it.
+func (manager Manager) VerifyFirewall(ctx context.Context, prefixes []string) error {
+	expected, err := renderPrefixInput(prefixes)
+	if err != nil {
+		return err
+	}
+	output, err := manager.runner.Run(
+		ctx,
+		nil,
+		"shell",
+		manager.instance,
+		"cat",
+		"/etc/pisafe/host-prefixes",
+	)
+	if err != nil {
+		return fmt.Errorf("read VM firewall networks: %w", err)
+	}
+	actualLines := strings.Fields(string(output))
+	actual, err := renderPrefixInput(actualLines)
+	if err != nil {
+		return fmt.Errorf("validate VM firewall networks: %w", err)
+	}
+	if actual != expected {
+		return fmt.Errorf(
+			"VM firewall networks are stale; recreate the pisafe VM before starting a run",
+		)
+	}
+	return nil
+}
+
+func renderPrefixInput(prefixes []string) (string, error) {
 	if len(prefixes) == 0 {
 		return "", errors.New("host IPv4 prefixes are required; refusing to empty the firewall set")
 	}
@@ -151,10 +181,7 @@ func renderPrefixUpdate(prefixes []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf(
-		"flush set inet pisafe host_onlink_v4\nadd element inet pisafe host_onlink_v4 { %s }\n",
-		strings.Join(canonical, ", "),
-	), nil
+	return strings.Join(canonical, "\n") + "\n", nil
 }
 
 type execRunner struct {

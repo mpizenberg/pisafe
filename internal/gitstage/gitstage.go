@@ -12,8 +12,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"time"
+
+	"github.com/mpizenberg/pisafe/internal/runid"
 )
 
 const (
@@ -22,7 +23,6 @@ const (
 )
 
 var (
-	runIDPattern          = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 	ErrBranchExists       = errors.New("pisafe import branch already exists")
 	ErrSubmodulesNotReady = errors.New("submodule staging is not implemented yet")
 	ErrLFSNotSupported    = errors.New("Git LFS repositories are not supported yet")
@@ -55,8 +55,8 @@ type PreparedStage struct {
 // a Git bundle rooted at HEAD and a binary patch of the final tracked state.
 // packageDir must not already exist.
 func Prepare(ctx context.Context, sourcePath, packageDir, runID string) (prepared PreparedStage, err error) {
-	if !runIDPattern.MatchString(runID) {
-		return PreparedStage{}, fmt.Errorf("invalid run ID %q", runID)
+	if err := runid.Validate(runID); err != nil {
+		return PreparedStage{}, err
 	}
 	if _, err := os.Stat(packageDir); !errors.Is(err, os.ErrNotExist) {
 		if err == nil {
@@ -136,8 +136,8 @@ func Prepare(ctx context.Context, sourcePath, packageDir, runID string) (prepare
 // Materialize consumes a transferred stage package inside the isolated
 // environment. It does not access Snapshot.SourceRoot.
 func Materialize(ctx context.Context, prepared PreparedStage, workspace string) (snapshot Snapshot, err error) {
-	if !runIDPattern.MatchString(prepared.Snapshot.RunID) {
-		return Snapshot{}, fmt.Errorf("invalid run ID %q", prepared.Snapshot.RunID)
+	if err := runid.Validate(prepared.Snapshot.RunID); err != nil {
+		return Snapshot{}, err
 	}
 	if prepared.Snapshot.WorkRef != "refs/heads/work/"+prepared.Snapshot.RunID {
 		return Snapshot{}, fmt.Errorf("work ref does not match run ID")

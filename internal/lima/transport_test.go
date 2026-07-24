@@ -1,0 +1,145 @@
+package lima
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/mpizenberg/pisafe/internal/gitstage"
+)
+
+func TestTransportCreateStageStreamsVerifiedArtifacts(t *testing.T) {
+	root := t.TempDir()
+	bundle := filepath.Join(root, "source.bundle")
+	patch := filepath.Join(root, "tracked.patch")
+	if err := os.WriteFile(bundle, []byte("bundle\x00content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(patch, []byte("patch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{}
+	transport := Transport{instance: InstanceName, runner: runner}
+	prepared := gitstage.PreparedStage{
+		Snapshot: gitstage.Snapshot{
+			RunID:      "safe-run",
+			SourceRoot: "/Users/alice/secret-path/project",
+			SourceHead: strings.Repeat("a", 40),
+			WorkRef:    "refs/heads/work/safe-run",
+			CreatedAt:  time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC),
+		},
+		BundlePath: bundle,
+		PatchPath:  patch,
+	}
+
+	runner.outputs = [][]byte{[]byte("/home/piz/.local/share/pisafe/runs/safe-run/stage\n")}
+	stagePath, err := transport.CreateStage(context.Background(), prepared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stagePath != "/home/piz/.local/share/pisafe/runs/safe-run/stage" {
+		t.Fatalf("stage path = %q", stagePath)
+	}
+	if len(runner.calls) != 4 {
+		t.Fatalf("calls = %d, want 4", len(runner.calls))
+	}
+	assertArgsPrefix(t, runner.calls[0], "shell", "pisafe", "sh", "-ceu")
+	if got := runner.calls[1].stdin; got != "bundle\x00content" {
+		t.Fatalf("bundle stdin = %q", got)
+	}
+	if got := runner.calls[2].stdin; got != "patch\n" {
+		t.Fatalf("patch stdin = %q", got)
+	}
+	if strings.Contains(runner.calls[3].stdin, "/Users/") {
+		t.Fatalf("snapshot disclosed host path: %s", runner.calls[3].stdin)
+	}
+	if !strings.Contains(runner.calls[3].stdin, `"run_id":"safe-run"`) {
+		t.Fatalf("snapshot stdin = %q", runner.calls[3].stdin)
+	}
+
+	bundleDigest := sha256.Sum256([]byte("bundle\x00content"))
+	uploadArgs := runner.calls[1].args
+	if got, want := uploadArgs[len(uploadArgs)-4:], []string{
+		"safe-run", "source.bundle", "14", hex.EncodeToString(bundleDigest[:]),
+	}; strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("upload args = %#v, want %#v", got, want)
+	}
+}
+
+func TestTransportRejectsUnsafeRunBeforeCallingLima(t *testing.T) {
+	runner := &fakeRunner{}
+	transport := Transport{instance: InstanceName, runner: runner}
+	_, err := transport.CreateStage(context.Background(), gitstage.PreparedStage{
+		Snapshot: gitstage.Snapshot{RunID: "../escape"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid run ID") {
+		t.Fatalf("error = %v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("calls = %#v", runner.calls)
+	}
+}
+
+func TestTransportRemoveRunUsesPositionalArgument(t *testing.T) {
+	runner := &fakeRunner{}
+	transport := Transport{instance: InstanceName, runner: runner}
+	if err := transport.RemoveRun(context.Background(), "run-123"); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls = %#v", runner.calls)
+	}
+	call := runner.calls[0]
+	assertArgsPrefix(t, call, "shell", "pisafe", "sh", "-ceu")
+	if got := call.args[len(call.args)-1]; got != "run-123" {
+		t.Fatalf("run argument = %q", got)
+	}
+	if strings.Contains(call.args[4], "run-123") {
+		t.Fatal("run ID was interpolated into the remote script")
+	}
+}
+
+func TestTransportImportStageIsRunScoped(t *testing.T) {
+	runner := &fakeRunner{}
+	transport := Transport{instance: InstanceName, runner: runner}
+	if err := transport.ImportStage(
+		context.Background(),
+		"run-123",
+		"pisafe-work-run-123",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls = %#v", runner.calls)
+	}
+	call := runner.calls[0]
+	assertArgsPrefix(t, call, "shell", "pisafe", "bash", "-ceu")
+	if got := call.args[len(call.args)-2:]; strings.Join(got, "|") !=
+		"run-123|pisafe-work-run-123" {
+		t.Fatalf("positional arguments = %#v", got)
+	}
+	if err := transport.ImportStage(
+		context.Background(),
+		"run-123",
+		"pisafe-work-other",
+	); err == nil {
+		t.Fatal("mismatched volume was accepted")
+	}
+}
+
+func assertArgsPrefix(t *testing.T, call recordedCall, want ...string) {
+	t.Helper()
+	if len(call.args) < len(want) {
+		t.Fatalf("args = %#v", call.args)
+	}
+	for index := range want {
+		if call.args[index] != want[index] {
+			t.Fatalf("args = %#v, want prefix %#v", call.args, want)
+		}
+	}
+}

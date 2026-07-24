@@ -34,15 +34,22 @@ func TestRenderConfigContainsSecurityBoundary(t *testing.T) {
 		"net.ipv6.conf.all.disable_ipv6 = 1",
 		"PermitListen 192.0.2.1:*",
 		"meta skuid 0 udp sport 68 udp dport 67 accept",
-		"sudo nft list table inet pisafe",
+		"sudo /usr/local/sbin/pisafe-firewall-status",
 		"usermod --add-subuids 100000-165535",
 		"podman system migrate",
 		"podman unshare cat /proc/self/uid_map",
+		"/etc/pisafe/host-prefixes",
+		"pisafe-clock-step",
+		`sed -i "\|^${pisafe_user} .*NOPASSWD:ALL|d"`,
+		`gpasswd --delete "${pisafe_user}" wheel`,
 	}
 	for _, fragment := range required {
 		if !strings.Contains(text, fragment) {
 			t.Errorf("config does not contain %q", fragment)
 		}
+	}
+	if strings.Contains(text, "pisafe-firewall-refresh") {
+		t.Error("config grants a runtime firewall mutation path")
 	}
 }
 

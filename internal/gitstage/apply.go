@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/mpizenberg/pisafe/internal/runid"
 )
 
 type PreparedApply struct {
@@ -29,8 +31,8 @@ func PrepareApply(
 	workspace string,
 	bundlePath string,
 ) (PreparedApply, error) {
-	if !runIDPattern.MatchString(snapshot.RunID) {
-		return PreparedApply{}, fmt.Errorf("invalid run ID %q", snapshot.RunID)
+	if err := runid.Validate(snapshot.RunID); err != nil {
+		return PreparedApply{}, err
 	}
 	if snapshot.WorkRef != "refs/heads/work/"+snapshot.RunID {
 		return PreparedApply{}, fmt.Errorf("work ref does not match run ID")
@@ -94,7 +96,7 @@ func PrepareApply(
 // ImportApply runs on the Mac. It verifies the transferred bundle before
 // creating a new branch with a compare-and-swap ref update.
 func ImportApply(ctx context.Context, snapshot Snapshot, prepared PreparedApply) (ApplyResult, error) {
-	if !runIDPattern.MatchString(snapshot.RunID) || prepared.RunID != snapshot.RunID {
+	if runid.Validate(snapshot.RunID) != nil || prepared.RunID != snapshot.RunID {
 		return ApplyResult{}, fmt.Errorf("apply package does not match run")
 	}
 	sourceRoot, err := filepath.EvalSymlinks(snapshot.SourceRoot)

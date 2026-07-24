@@ -3,10 +3,11 @@
 `pisafe` is an implementation in progress of the isolation model described in
 [`pisafe-design.md`](pisafe-design.md).
 
-The first implementation slice contains:
+The implementation now contains:
 
 - a dependency-free Go controller;
-- `pisafe doctor` for host prerequisite checks;
+- `pisafe doctor` for host prerequisite checks and `pisafe list` for durable
+  run records;
 - a split Git staging core: the Mac produces a bundle and tracked-state patch,
   while materialization happens after transfer inside the isolated
   environment;
@@ -20,18 +21,31 @@ The Lima backend now also generates and manages a dedicated plain-mode Fedora
 VM with a pinned image digest, no host mounts, no forwarded agent or Podman
 socket, rootless Podman, disabled IPv6, and an nftables boundary covering both
 VM and container egress. The controller discovers the Mac's active IPv4
-on-link prefixes and refreshes the corresponding nftables set at start/resume.
+on-link prefixes and verifies the VM's baked-in deny set at start/resume,
+failing closed if the Mac has changed networks.
 
-The run lifecycle is not exposed yet. It still needs the SSH artifact
-transport, hardened run image/container, and submodule-aware journaled apply
-protocol.
+The next boundary slice is also implemented internally:
+
+- size- and SHA-256-verified Git artifact streams through Lima control SSH;
+- atomic Mac-side run manifests and strict lifecycle transitions;
+- a pinned ARM64 run image containing Pi 0.82.0 and a Linux guest helper;
+- rootless Podman launch arguments enforcing a non-root user, read-only root,
+  dropped capabilities, `no-new-privileges`, public DNS, and CPU, memory, PID,
+  and temporary-filesystem limits; and
+- a controller transaction that imports the stage into private volumes,
+  materializes it inside the container, and rolls back partial creation.
+
+User-facing run creation is still hidden. Image installation, persistent disk
+quota, wall-clock enforcement, per-run SSH/Zed access, inference brokering,
+and confirmed discard must be completed first.
 
 ## Development
 
 ```sh
 go test ./...
-go build ./cmd/pisafe
+go build ./cmd/pisafe ./cmd/pisafe-guest
 ./pisafe doctor
+./pisafe list
 ```
 
 The gated live suite creates or reuses the dedicated `pisafe` VM and exercises
@@ -39,4 +53,13 @@ the mount, rootless-container, and network boundaries:
 
 ```sh
 PISAFE_LIVE_LIMA=1 go test -v ./internal/lima
+```
+
+The end-to-end artifact/container test additionally requires the immutable ID
+of a locally built run image:
+
+```sh
+PISAFE_LIVE_LIMA=1 \
+PISAFE_LIVE_RUN_IMAGE=sha256:<image-id> \
+go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
 ```

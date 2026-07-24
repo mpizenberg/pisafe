@@ -61,23 +61,8 @@ func TestManagerCreateValidatesBeforeCreating(t *testing.T) {
 func TestManagerStartIsIdempotent(t *testing.T) {
 	runner := &fakeRunner{outputs: [][]byte{
 		[]byte("pisafe\tRunning\n"),
-	}}
-	manager := Manager{instance: InstanceName, runner: runner}
-
-	if err := manager.Start(context.Background(), []string{"192.168.2.0/24"}); err != nil {
-		t.Fatal(err)
-	}
-	if len(runner.calls) != 2 {
-		t.Fatalf("calls = %#v", runner.calls)
-	}
-	assertArgs(t, runner.calls[1], "shell", "pisafe", "sudo", "nft", "--file", "-")
-}
-
-func TestManagerStartRefreshesAfterResume(t *testing.T) {
-	runner := &fakeRunner{outputs: [][]byte{
-		[]byte("pisafe\tStopped\n"),
 		nil,
-		nil,
+		[]byte("192.168.2.0/24\n"),
 	}}
 	manager := Manager{instance: InstanceName, runner: runner}
 
@@ -87,8 +72,36 @@ func TestManagerStartRefreshesAfterResume(t *testing.T) {
 	if len(runner.calls) != 3 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
+	assertArgs(t, runner.calls[1], "shell", "pisafe", "sudo", "/usr/local/sbin/pisafe-clock-step")
+	assertArgs(
+		t,
+		runner.calls[2],
+		"shell", "pisafe", "cat", "/etc/pisafe/host-prefixes",
+	)
+}
+
+func TestManagerStartRefreshesAfterResume(t *testing.T) {
+	runner := &fakeRunner{outputs: [][]byte{
+		[]byte("pisafe\tStopped\n"),
+		nil,
+		nil,
+		[]byte("192.168.2.0/24\n"),
+	}}
+	manager := Manager{instance: InstanceName, runner: runner}
+
+	if err := manager.Start(context.Background(), []string{"192.168.2.0/24"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 4 {
+		t.Fatalf("calls = %#v", runner.calls)
+	}
 	assertArgs(t, runner.calls[1], "--tty=false", "start", "pisafe")
-	assertArgs(t, runner.calls[2], "shell", "pisafe", "sudo", "nft", "--file", "-")
+	assertArgs(t, runner.calls[2], "shell", "pisafe", "sudo", "/usr/local/sbin/pisafe-clock-step")
+	assertArgs(
+		t,
+		runner.calls[3],
+		"shell", "pisafe", "cat", "/etc/pisafe/host-prefixes",
+	)
 }
 
 func TestManagerStartFailsBeforeLimaWhenPrefixesAreMissing(t *testing.T) {
@@ -103,11 +116,13 @@ func TestManagerStartFailsBeforeLimaWhenPrefixesAreMissing(t *testing.T) {
 	}
 }
 
-func TestRefreshFirewallUsesOneNftTransaction(t *testing.T) {
-	runner := &fakeRunner{}
+func TestVerifyFirewallAcceptsCanonicalEquivalentPrefixes(t *testing.T) {
+	runner := &fakeRunner{outputs: [][]byte{
+		[]byte("203.0.113.9/32\n192.168.2.0/24\n"),
+	}}
 	manager := Manager{instance: InstanceName, runner: runner}
 
-	err := manager.RefreshFirewall(
+	err := manager.VerifyFirewall(
 		context.Background(),
 		[]string{"192.168.2.0/24", "192.168.2.1/32", "203.0.113.9/32"},
 	)
@@ -117,18 +132,28 @@ func TestRefreshFirewallUsesOneNftTransaction(t *testing.T) {
 	if len(runner.calls) != 1 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
-	assertArgs(t, runner.calls[0], "shell", "pisafe", "sudo", "nft", "--file", "-")
-	want := "flush set inet pisafe host_onlink_v4\n" +
-		"add element inet pisafe host_onlink_v4 { 192.168.2.0/24, 203.0.113.9/32 }\n"
-	if runner.calls[0].stdin != want {
-		t.Fatalf("stdin = %q, want %q", runner.calls[0].stdin, want)
+	assertArgs(
+		t,
+		runner.calls[0],
+		"shell", "pisafe", "cat", "/etc/pisafe/host-prefixes",
+	)
+}
+
+func TestVerifyFirewallRejectsInjectedPrefix(t *testing.T) {
+	manager := Manager{instance: InstanceName, runner: &fakeRunner{}}
+	err := manager.VerifyFirewall(context.Background(), []string{"10.0.0.0/8 } delete table inet pisafe"})
+	if err == nil || !strings.Contains(err.Error(), "invalid IPv4 prefix") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
-func TestRefreshFirewallRejectsInjectedPrefix(t *testing.T) {
-	manager := Manager{instance: InstanceName, runner: &fakeRunner{}}
-	err := manager.RefreshFirewall(context.Background(), []string{"10.0.0.0/8 } delete table inet pisafe"})
-	if err == nil || !strings.Contains(err.Error(), "invalid IPv4 prefix") {
+func TestVerifyFirewallFailsClosedOnNetworkChange(t *testing.T) {
+	runner := &fakeRunner{outputs: [][]byte{
+		[]byte("192.168.2.0/24\n"),
+	}}
+	manager := Manager{instance: InstanceName, runner: runner}
+	err := manager.VerifyFirewall(context.Background(), []string{"10.20.30.0/24"})
+	if err == nil || !strings.Contains(err.Error(), "stale") {
 		t.Fatalf("error = %v", err)
 	}
 }

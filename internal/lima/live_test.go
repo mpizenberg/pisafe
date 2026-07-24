@@ -39,7 +39,7 @@ test ! -S /run/user/"$(id -u)"/podman/podman.sock
 test "$(sysctl -n net.ipv6.conf.all.disable_ipv6)" = 1
 test "$(podman unshare cat /proc/self/uid_map | wc -l)" -ge 2
 sudo systemctl is-active --quiet pisafe-firewall.service
-sudo nft list table inet pisafe >/dev/null
+sudo /usr/local/sbin/pisafe-firewall-status >/dev/null
 `)
 	runLive(t, ctx, "podman", "run", "--rm", "docker.io/library/alpine:3.22", "sh", "-ec", `
 wget -qO- https://example.com >/dev/null

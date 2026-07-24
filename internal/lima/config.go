@@ -44,6 +44,7 @@ func RenderConfig(options ConfigOptions) ([]byte, error) {
 		"@@MEMORY@@", fmt.Sprintf("%dGiB", options.MemoryGiB),
 		"@@DISK@@", fmt.Sprintf("%dGiB", options.DiskGiB),
 		"@@HOST_PREFIXES@@", strings.Join(prefixes, ", "),
+		"@@HOST_PREFIX_LINES@@", strings.Join(prefixes, "\n    "),
 	)
 	return []byte(replacements.Replace(configTemplate)), nil
 }
@@ -130,8 +131,9 @@ provision:
     set -eux -o pipefail
 
     dnf -y install --best --setopt=install_weak_deps=False \
-      git nftables openssh-server podman
+      chrony git nftables openssh-server podman
     systemctl disable --now firewalld 2>/dev/null || true
+    systemctl enable --now chronyd.service
 
     pisafe_user="$(
       getent passwd |
@@ -222,6 +224,11 @@ provision:
     }
     PISAFE_NFT
 
+    tee /etc/pisafe/host-prefixes >/dev/null <<'PISAFE_PREFIXES'
+    @@HOST_PREFIX_LINES@@
+    PISAFE_PREFIXES
+    chmod 0444 /etc/pisafe/host-prefixes
+
     tee /usr/local/sbin/pisafe-firewall >/dev/null <<'PISAFE_FIREWALL'
     #!/bin/bash
     set -eux -o pipefail
@@ -234,6 +241,22 @@ provision:
     nft --file /etc/pisafe/firewall.nft
     PISAFE_FIREWALL
     chmod 0755 /usr/local/sbin/pisafe-firewall
+
+    tee /usr/local/sbin/pisafe-firewall-status >/dev/null <<'PISAFE_STATUS'
+    #!/bin/bash
+    set -euo pipefail
+    exec nft list table inet pisafe
+    PISAFE_STATUS
+    chmod 0755 /usr/local/sbin/pisafe-firewall-status
+
+    tee /usr/local/sbin/pisafe-clock-step >/dev/null <<'PISAFE_CLOCK'
+    #!/bin/bash
+    set -euo pipefail
+    chronyc -a 'burst 4/4'
+    chronyc -a makestep
+    exec chronyc waitsync 30 0.5 1000 1
+    PISAFE_CLOCK
+    chmod 0755 /usr/local/sbin/pisafe-clock-step
 
     tee /etc/systemd/system/pisafe-firewall.service >/dev/null <<'PISAFE_SERVICE'
     [Unit]
@@ -255,6 +278,18 @@ provision:
     sshd -t
     systemctl restart sshd.service
 
+    tee /etc/sudoers.d/90-pisafe-controller >/dev/null <<PISAFE_SUDOERS
+    ${pisafe_user} ALL=(root) NOPASSWD: /usr/local/sbin/pisafe-clock-step ""
+    ${pisafe_user} ALL=(root) NOPASSWD: /usr/local/sbin/pisafe-firewall-status ""
+    PISAFE_SUDOERS
+    chmod 0440 /etc/sudoers.d/90-pisafe-controller
+    if [[ -f /etc/sudoers.d/90-cloud-init-users ]]; then
+      sed -i "\|^${pisafe_user} .*NOPASSWD:ALL|d" \
+        /etc/sudoers.d/90-cloud-init-users
+    fi
+    gpasswd --delete "${pisafe_user}" wheel 2>/dev/null || true
+    visudo --check --file=/etc/sudoers.d/90-pisafe-controller
+
 probes:
 - description: pisafe VM security boundary
   script: |
@@ -264,6 +299,6 @@ probes:
     podman info >/dev/null
     test "$(podman unshare cat /proc/self/uid_map | wc -l)" -ge 2
     systemctl is-active --quiet pisafe-firewall.service
-    sudo nft list table inet pisafe >/dev/null
+    sudo /usr/local/sbin/pisafe-firewall-status >/dev/null
     test "$(sysctl -n net.ipv6.conf.all.disable_ipv6)" = 1
 `
