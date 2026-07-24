@@ -769,6 +769,16 @@ The first usable release should prove:
   the forward must die exactly with the broker process and the capability
   rotates while the home directory persists. Both choices are cheap to
   reverse.
+- The output and forward chains accept `ct state established,related` like the
+  input chain always has, after live testing showed the broker handshake dying:
+  reply packets of an accepted connection (sshd's SYN-ACK from
+  `192.0.2.1:18080`) carry the client's ephemeral port and were rejected by the
+  TEST-NET deny. A narrow return rule matching only the broker source address
+  and port was not retained because per-flow exceptions recreate this bug for
+  every future accepted flow; the stateful design gates connection initiation
+  once and lets conntrack own replies. Deny-set changes now stop new
+  connections rather than tearing down established ones, which is acceptable
+  because start/resume already fail closed on network change.
 - Lima's default VZ user-mode network remains in the generated profile.
   Native `vzNAT` was tested but not retained because it exhibited the same
   stopped-VM SSH recovery failure and made its Mac-side interface appear only

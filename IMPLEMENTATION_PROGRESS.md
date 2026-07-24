@@ -107,9 +107,11 @@ quota-backed VM storage. Do not add a local-workspace fallback.
 
 - A boot-persistent `pisafe-firewall.service` owns the nftables ruleset.
 - `firewalld` is disabled in the dedicated VM.
-- Input defaults to drop, with established traffic, DHCP replies, control SSH,
-  and exactly `192.0.2.1:18080` (the broker relay) admitted.
-- Both output and forward hooks deny:
+- All three chains accept established/related conntrack traffic, so policy
+  gates connection initiation and conntrack owns replies.
+- Input otherwise defaults to drop, with DHCP replies, control SSH, and
+  exactly `192.0.2.1:18080` (the broker relay) admitted.
+- Both output and forward hooks deny new connections toward:
   - IPv4 loopback;
   - RFC1918;
   - CGNAT;
@@ -368,7 +370,7 @@ Verified against a real ARM64 VM:
 
 - The managed installer built that image from its two-file tar stream,
   validated its labels/platform/immutable ID, and reused it on the next call.
-- The final recreated VM uses security profile
+- That verification session's VM used security profile
   `sha256:6a9c31943325290e23272c7c95af4ae80df8c94718c3ed8ec5e1824efbfcc927`.
 - The storage helper created an exact mapped-UID 10 GiB ext4 filesystem,
   accepted an allocation within the limit, rejected an over-limit allocation,
@@ -414,10 +416,15 @@ A persistent Lima instance named `pisafe` was left running. It contains no
 project runs or user data, only cached base/test images plus the
 `localhost/pisafe-run:managed-2ffa36731cbcc115` image.
 
-**The running VM predates the broker-relay slice.** The generated definition
-now bakes the static `192.0.2.1:18080` exception into the firewall and
-`PermitListen`, so the security profile digest changed and every controller
-command correctly fails closed against this VM until it is recreated:
+**The running VM predates the stateful-firewall fix.** The first live run of
+the relay tests against a recreated VM failed: sshd bound `192.0.2.1:18080`
+correctly, but its SYN-ACK replies carry the client's ephemeral port, matched
+no accept rule in the stateless output chain, and were rejected by the
+TEST-NET deny — every broker connection timed out. The template now accepts
+established/related conntrack traffic in the output and forward chains (the
+input chain always did), which changed the security profile digest again, so
+every controller command correctly fails closed against this VM until it is
+recreated:
 
 ```sh
 limactl delete -f pisafe
@@ -426,13 +433,17 @@ PISAFE_LIVE_LIMA=1 go test -v -timeout 30m ./internal/runimage
 # then rerun the end-to-end test with the image ID printed by the installer
 ```
 
-Recreation was not performed in the relay session because deleting the VM is
+Recreation was not performed in the fix session because deleting the VM is
 destructive and was left as an explicit user action. The relay live tests
 (`TestLiveBrokerReverseRelay`, `TestLiveSecondRelayFailsClosed`) therefore
-have not run against a real VM yet; they are part of the gated suite above.
+have not passed against a real VM yet; they are part of the gated suite
+above. Everything else in the gated lima suite passed against the recreated
+(pre-fix) VM.
 
-Everything below was verified against the previous profile
-(`sha256:6a9c31943325290e23272c7c95af4ae80df8c94718c3ed8ec5e1824efbfcc927`)
+Everything below was first verified against profile
+`sha256:6a9c31943325290e23272c7c95af4ae80df8c94718c3ed8ec5e1824efbfcc927`,
+re-verified by the gated suite against the currently running pre-fix VM
+(`sha256:09d7403a26d8ce72710609b9e5812f30cb8dbe877b65cd07375e05c7cab73381`),
 and is expected to hold identically after recreation.
 
 Fresh provisioning verified all security-sensitive setup together:
@@ -441,8 +452,8 @@ Fresh provisioning verified all security-sensitive setup together:
 - the clock-step, firewall-status, and fixed-policy run-storage helpers work
   through their narrow sudo rules;
 - unrestricted `sudo -n true` is denied;
-- the root-owned security-profile record is mode 0444 and currently contains
-  `sha256:6a9c31943325290e23272c7c95af4ae80df8c94718c3ed8ec5e1824efbfcc927`;
+- the root-owned security-profile record is mode 0444 and matches the
+  generated definition;
 - the full container network suite passes; and
 - the managed image install/reuse and end-to-end staging tests pass.
 

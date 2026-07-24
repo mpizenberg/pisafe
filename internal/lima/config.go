@@ -230,6 +230,7 @@ provision:
       chain output {
         type filter hook output priority filter
         policy accept
+        ct state established,related accept
         meta skuid 0 ip daddr 127.0.0.0/8 accept
         meta skuid 0 udp sport 68 udp dport 67 accept
         ip daddr @@BROKER_ADDRESS@@ tcp dport @@BROKER_PORT@@ accept
@@ -240,6 +241,7 @@ provision:
       chain forward {
         type filter hook forward priority filter
         policy accept
+        ct state established,related accept
         ip daddr @@BROKER_ADDRESS@@ tcp dport @@BROKER_PORT@@ accept
         ip daddr @fixed_denied_v4 reject
         ip daddr @host_onlink_v4 reject

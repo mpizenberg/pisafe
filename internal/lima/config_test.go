@@ -61,6 +61,9 @@ func TestRenderConfigContainsSecurityBoundary(t *testing.T) {
 			t.Errorf("config does not contain %q", fragment)
 		}
 	}
+	if count := strings.Count(text, "ct state established,related accept"); count != 3 {
+		t.Errorf("%d stateful chains, want input, output, and forward", count)
+	}
 	if strings.Contains(text, "pisafe-firewall-refresh") {
 		t.Error("config grants a runtime firewall mutation path")
 	}
