@@ -46,8 +46,8 @@ Usage:
   pisafe help      Show this help
 
 Run creation is still under construction. The mountless VM transport and
-hardened container path are implemented internally but remain hidden until
-image installation and lifecycle cleanup are complete.`)
+hardened SSH container path are implemented internally but remain hidden until
+user-facing orchestration and confirmed cleanup are complete.`)
 }
 
 func runList(out io.Writer) error {

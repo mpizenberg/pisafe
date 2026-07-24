@@ -37,13 +37,17 @@ The next boundary slice is also implemented internally:
 - content-addressed run-image installation that sends only the Containerfile
   and static Linux helper and returns a validated immutable image ID; and
 - a root-owned VM security-profile fingerprint checked on every start, so an
-  instance created from an older security definition fails closed.
+  instance created from an older security definition fails closed; and
+- unique per-run Ed25519 client and host keys, a non-root loopback-only SSH
+  daemon, strict host-key pinning, and a portless ProxyCommand through Lima's
+  control SSH connection.
 
 User-facing run creation is still hidden. Fresh-VM provisioning, restricted
 sudo, clock synchronization, security-profile drift detection, managed-image
-installation/reuse, and end-to-end repository materialization are
-live-validated. Persistent disk quota, wall-clock enforcement, per-run SSH/Zed
-access, inference brokering, and confirmed discard must still be completed.
+installation/reuse, repository materialization, and the Zed-compatible
+OpenSSH path into the exact Pi workspace are live-validated. Automatic Zed
+launch, persistent disk quota, wall-clock enforcement, inference brokering,
+and confirmed discard must still be completed.
 
 ## Development
 

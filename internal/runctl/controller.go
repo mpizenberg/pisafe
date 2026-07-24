@@ -12,6 +12,7 @@ import (
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/runcontainer"
+	"github.com/mpizenberg/pisafe/internal/runssh"
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
@@ -20,21 +21,29 @@ type Backend interface {
 	ImportStage(context.Context, string, string) error
 	Execute(context.Context, io.Reader, ...string) ([]byte, error)
 	RemoveRun(context.Context, string) error
+	SSHGateway(context.Context) (runssh.Gateway, error)
 }
 
 type StateStore interface {
 	Create(runstate.Manifest) (runstate.Manifest, error)
-	Transition(string, runstate.State) (runstate.Manifest, error)
+	Activate(string, runstate.SSHConnection) (runstate.Manifest, error)
 	RecordError(string, error) (runstate.Manifest, error)
+}
+
+type SSHStore interface {
+	Prepare(context.Context, string) (runssh.Prepared, error)
+	Finalize(runssh.Prepared, string, runssh.Gateway, string) (runssh.Endpoint, error)
+	Remove(string) error
 }
 
 type Controller struct {
 	backend Backend
 	store   StateStore
+	ssh     SSHStore
 }
 
-func New(backend Backend, store StateStore) Controller {
-	return Controller{backend: backend, store: store}
+func New(backend Backend, store StateStore, ssh SSHStore) Controller {
+	return Controller{backend: backend, store: store, ssh: ssh}
 }
 
 // StartPrepared creates a run from host-prepared artifacts. The image must
@@ -68,6 +77,7 @@ func (controller Controller) StartPrepared(
 	remoteAllocated := false
 	var createdVolumes []string
 	containerAllocated := false
+	sshAllocated := false
 	defer func() {
 		if returnErr == nil {
 			return
@@ -83,6 +93,7 @@ func (controller Controller) StartPrepared(
 			remoteAllocated,
 			createdVolumes,
 			containerAllocated,
+			sshAllocated,
 		)
 		recordErr := returnErr
 		if cleanupErr != nil {
@@ -94,6 +105,12 @@ func (controller Controller) StartPrepared(
 		}
 		returnErr = recordErr
 	}()
+
+	preparedSSH, err := controller.ssh.Prepare(ctx, spec.RunID)
+	if err != nil {
+		return runstate.Manifest{}, fmt.Errorf("prepare run SSH credentials: %w", err)
+	}
+	sshAllocated = true
 
 	if _, err := controller.backend.CreateStage(ctx, prepared); err != nil {
 		return runstate.Manifest{}, fmt.Errorf("stream stage into VM: %w", err)
@@ -118,6 +135,19 @@ func (controller Controller) StartPrepared(
 		return runstate.Manifest{}, err
 	}
 
+	configureSSHArgs, err := spec.ConfigureSSHArgs()
+	if err != nil {
+		return runstate.Manifest{}, err
+	}
+	hostPublicKey, err := controller.podman(
+		ctx,
+		strings.NewReader(preparedSSH.PublicKey+"\n"),
+		configureSSHArgs...,
+	)
+	if err != nil {
+		return runstate.Manifest{}, fmt.Errorf("configure run SSH server: %w", err)
+	}
+
 	runArgs, err := spec.RunArgs()
 	if err != nil {
 		return runstate.Manifest{}, err
@@ -126,6 +156,20 @@ func (controller Controller) StartPrepared(
 		return runstate.Manifest{}, fmt.Errorf("start run container: %w", err)
 	}
 	containerAllocated = true
+
+	gateway, err := controller.backend.SSHGateway(ctx)
+	if err != nil {
+		return runstate.Manifest{}, err
+	}
+	endpoint, err := controller.ssh.Finalize(
+		preparedSSH,
+		string(hostPublicKey),
+		gateway,
+		spec.ContainerName(),
+	)
+	if err != nil {
+		return runstate.Manifest{}, fmt.Errorf("finalize run SSH connection: %w", err)
+	}
 
 	materializeArgs, err := spec.MaterializeArgs(projectDirectory)
 	if err != nil {
@@ -146,7 +190,13 @@ func (controller Controller) StartPrepared(
 	}
 	remoteAllocated = false
 
-	manifest, err = controller.store.Transition(spec.RunID, runstate.StateActive)
+	manifest, err = controller.store.Activate(spec.RunID, runstate.SSHConnection{
+		Alias:              endpoint.Alias,
+		IdentityFile:       endpoint.IdentityFile,
+		KnownHostsFile:     endpoint.KnownHostsFile,
+		ConfigFile:         endpoint.ConfigFile,
+		HostKeyFingerprint: endpoint.HostKeyFingerprint,
+	})
 	if err != nil {
 		return runstate.Manifest{}, fmt.Errorf("activate run manifest: %w", err)
 	}
@@ -171,6 +221,7 @@ func (controller Controller) rollback(
 	remoteAllocated bool,
 	createdVolumes []string,
 	containerAllocated bool,
+	sshAllocated bool,
 ) error {
 	var failures []error
 	if containerAllocated {
@@ -194,6 +245,11 @@ func (controller Controller) rollback(
 	if remoteAllocated {
 		if err := controller.backend.RemoveRun(ctx, spec.RunID); err != nil {
 			failures = append(failures, fmt.Errorf("remove failed remote stage: %w", err))
+		}
+	}
+	if sshAllocated {
+		if err := controller.ssh.Remove(spec.RunID); err != nil {
+			failures = append(failures, fmt.Errorf("remove failed SSH credentials: %w", err))
 		}
 	}
 	return errors.Join(failures...)

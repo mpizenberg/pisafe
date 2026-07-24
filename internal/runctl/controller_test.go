@@ -4,18 +4,21 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/runssh"
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
 const testImage = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 type backendCall struct {
-	kind string
-	args []string
+	kind  string
+	args  []string
+	stdin string
 }
 
 type fakeBackend struct {
@@ -49,15 +52,27 @@ func (backend *fakeBackend) ImportStage(
 
 func (backend *fakeBackend) Execute(
 	_ context.Context,
-	_ io.Reader,
+	stdin io.Reader,
 	args ...string,
 ) ([]byte, error) {
+	var input string
+	if stdin != nil {
+		content, err := io.ReadAll(stdin)
+		if err != nil {
+			return nil, err
+		}
+		input = string(content)
+	}
 	backend.calls = append(backend.calls, backendCall{
-		kind: "execute",
-		args: append([]string(nil), args...),
+		kind:  "execute",
+		args:  append([]string(nil), args...),
+		stdin: input,
 	})
 	if backend.failAt != "" && strings.Contains(strings.Join(args, " "), backend.failAt) {
 		return nil, errors.New("execute failed")
+	}
+	if strings.Contains(strings.Join(args, " "), "pisafe-guest configure-ssh") {
+		return []byte("ssh-ed25519 host-key\n"), nil
 	}
 	return nil, nil
 }
@@ -67,10 +82,55 @@ func (backend *fakeBackend) RemoveRun(_ context.Context, _ string) error {
 	return nil
 }
 
+func (backend *fakeBackend) SSHGateway(_ context.Context) (runssh.Gateway, error) {
+	backend.calls = append(backend.calls, backendCall{kind: "ssh-gateway"})
+	return runssh.Gateway{
+		ConfigFile: "/Users/alice/.lima/pisafe/ssh.config",
+		Alias:      "lima-pisafe",
+	}, nil
+}
+
+type fakeSSHStore struct {
+	removed bool
+}
+
+func (store *fakeSSHStore) Prepare(
+	_ context.Context,
+	runID string,
+) (runssh.Prepared, error) {
+	return runssh.Prepared{
+		RunID:        runID,
+		PublicKey:    "ssh-ed25519 client-key",
+		IdentityFile: "/state/ssh/" + runID + "/id_ed25519",
+	}, nil
+}
+
+func (store *fakeSSHStore) Finalize(
+	prepared runssh.Prepared,
+	_ string,
+	_ runssh.Gateway,
+	_ string,
+) (runssh.Endpoint, error) {
+	root := filepath.Dir(prepared.IdentityFile)
+	return runssh.Endpoint{
+		Alias:              "pisafe-" + prepared.RunID,
+		IdentityFile:       prepared.IdentityFile,
+		KnownHostsFile:     filepath.Join(root, "known_hosts"),
+		ConfigFile:         filepath.Join(root, "ssh.config"),
+		HostKeyFingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+	}, nil
+}
+
+func (store *fakeSSHStore) Remove(_ string) error {
+	store.removed = true
+	return nil
+}
+
 func TestStartPreparedActivatesOnlyAfterMaterialization(t *testing.T) {
 	backend := &fakeBackend{}
 	store := runstate.NewStore(t.TempDir())
-	controller := New(backend, store)
+	ssh := &fakeSSHStore{}
+	controller := New(backend, store, ssh)
 
 	manifest, err := controller.StartPrepared(
 		context.Background(),
@@ -89,7 +149,9 @@ func TestStartPreparedActivatesOnlyAfterMaterialization(t *testing.T) {
 		"stage",
 		"podman volume create",
 		"import",
+		"pisafe-guest configure-ssh",
 		"podman run",
+		"ssh-gateway",
 		"pisafe-guest materialize",
 		"rm -rf /work/stage",
 		"remove-stage",
@@ -98,12 +160,20 @@ func TestStartPreparedActivatesOnlyAfterMaterialization(t *testing.T) {
 			t.Errorf("calls lack %q:\n%s", expected, joined)
 		}
 	}
+	if manifest.SSH == nil ||
+		manifest.SSH.Alias != "pisafe-run-123" {
+		t.Fatalf("manifest SSH = %#v", manifest.SSH)
+	}
+	if ssh.removed {
+		t.Fatal("active run SSH credentials were removed")
+	}
 }
 
 func TestStartPreparedRollsBackAndRecordsFailure(t *testing.T) {
 	backend := &fakeBackend{failAt: "pisafe-guest materialize"}
 	store := runstate.NewStore(t.TempDir())
-	controller := New(backend, store)
+	ssh := &fakeSSHStore{}
+	controller := New(backend, store, ssh)
 
 	_, err := controller.StartPrepared(
 		context.Background(),
@@ -133,12 +203,15 @@ func TestStartPreparedRollsBackAndRecordsFailure(t *testing.T) {
 			t.Errorf("rollback calls lack %q:\n%s", expected, joined)
 		}
 	}
+	if !ssh.removed {
+		t.Fatal("failed run SSH credentials were not removed")
+	}
 }
 
 func TestStartPreparedDoesNotDeleteVolumeItDidNotCreate(t *testing.T) {
 	backend := &fakeBackend{failAt: "pisafe-home-run-123"}
 	store := runstate.NewStore(t.TempDir())
-	controller := New(backend, store)
+	controller := New(backend, store, &fakeSSHStore{})
 
 	if _, err := controller.StartPrepared(
 		context.Background(),

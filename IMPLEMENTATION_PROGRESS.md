@@ -9,7 +9,7 @@ next.
 
 ## Current milestone
 
-Phase 1 is in progress. Three implementation slices now exist:
+Phase 1 is in progress. Four implementation slices now exist:
 
 1. The Go controller skeleton and single-repository Git isolation core.
 2. The dedicated Lima VM backend, host-network discovery, and initial static
@@ -17,6 +17,8 @@ Phase 1 is in progress. Three implementation slices now exist:
 3. The SSH artifact transport, durable run records, pinned run image, hardened
    Podman launch contract, Linux materialization helper, and internal run
    creation transaction.
+4. Per-run SSH credentials, non-root container `sshd`, strict host-key
+   pinning, and a portless Lima control-SSH ProxyCommand.
 
 There is still no user-facing `pisafe run`. Do not add a local-workspace
 fallback: the tested path streams through the mountless VM and materializes
@@ -149,8 +151,9 @@ inside a private rootless container volume.
 - Artifact loading rejects symlinks, file swaps, oversize inputs, non-ELF or
   non-ARM64 helpers, dynamic interpreters, and imported shared libraries.
 - The image contains Git, OpenSSH, Tini, Pi, and the static ARM64 guest helper.
-- Build-time SSH host keys are removed. Per-run keys/configuration are not
-  implemented yet.
+- Build-time SSH host keys are removed. A network-disabled one-shot container
+  generates each run's host key and installs only its client public key into
+  the private home volume.
 - Run commands require an immutable `sha256:` image ID and use:
   - UID/GID 1000;
   - read-only root;
@@ -163,16 +166,46 @@ inside a private rootless container volume.
 - No Podman/Docker socket, forwarded SSH agent, or credential environment is
   added.
 
+### Per-run SSH boundary
+
+- `internal/runssh` creates a unique Ed25519 client key under mode-0700
+  run-local Mac state; private and public key files are restricted to 0600.
+- Both client and host public keys are decoded and validated as exact
+  32-byte Ed25519 SSH wire values rather than accepted as arbitrary text.
+- The container generates its own Ed25519 host key. The Mac stores a strict
+  per-run `known_hosts` file and SHA-256 fingerprint before activation.
+- `sshd` runs as UID/GID 1000 and is the container's main process. It listens
+  only on container-local `127.0.0.1:2222`, permits public-key authentication
+  only, and disables password, keyboard-interactive, root, agent, X11, tunnel,
+  user-RC, and TCP-forwarding paths.
+- No SSH port is published into the VM or onto macOS.
+- The generated per-run OpenSSH config uses Lima's generated SSH config and a
+  `ProxyCommand` that executes:
+
+  ```text
+  podman exec --interactive <run-container> pisafe-guest proxy-ssh
+  ```
+
+  The static guest helper relays binary stdio only to container loopback.
+- The client private key never enters Lima or the run. The authorized public
+  key is further restricted against agent, TCP, X11, and user-RC forwarding.
+- Run manifests record the alias, identity/config/known-hosts paths, and pinned
+  host-key fingerprint. A creating run can become active only through the
+  activation operation that supplies this connection record.
+
 ### Run records and internal controller
 
-- `internal/runstate` writes versioned, mode-0600 JSON manifests atomically
+- `internal/runstate` writes version-2, mode-0600 JSON manifests atomically
   under the user config directory (or `PISAFE_STATE_DIR`).
 - It enforces `creating → active → stopped → active|imported|discarded|expired`.
 - Failed creation remains visibly `creating` with `last_error`; it is not
   silently deleted or mislabeled active.
 - `internal/runctl.StartPrepared` composes stage upload, private-volume import,
-  hardened container start, in-container materialization, transfer cleanup,
-  manifest activation, and bounded rollback.
+  per-run key generation, network-disabled SSH initialization, hardened
+  container start, host-key pinning, in-container materialization, transfer
+  cleanup, manifest activation, and bounded rollback.
+- Creation rollback removes partial SSH client state along with the container,
+  volumes, and VM-side transfer directory.
 - `pisafe list` displays these durable records. Run creation remains internal.
 
 ## Tests and verification
@@ -189,16 +222,17 @@ git diff --check
 Current package coverage at this milestone:
 
 ```text
-pisafe-guest  64.3%
+pisafe-guest  52.8%
 cli           26.0%
 gitstage      68.7%
 hostnet       50.0%
-lima          70.8%
-runcontainer  72.7%
-runctl        73.6%
+lima          70.6%
+runcontainer  72.2%
+runctl        72.8%
 runid        100.0%
 runimage      74.4%
-runstate      68.3%
+runssh        65.7%
+runstate      69.7%
 ```
 
 The generated YAML is checked by the installed Lima validator in the normal
@@ -229,9 +263,9 @@ Verified against a real ARM64 VM:
 - The final local image has:
 
   ```text
-  recipe digest:   sha256:b43217fe1c358fe8b01e7355f1888ce691863c857b39297103ca3b932830bc56
-  image ID:        sha256:f3d9de4937cef75c3f333affcd2afd26015edce04f2fc2dfc67fcca6f9c697e4
-  manifest digest: sha256:3df3e2d488cf9f6e105ee3dedf52a590b7449a192a5edea7693187f7c5df07e5
+  recipe digest:   sha256:c4c10720d220f2ebcd2f3fa67997d7cf964939ea5bcd874604fdf9399b26b02d
+  image ID:        sha256:d0acf9f290d4bf49792a03fc2ed9080ccb18631ba2bfea9fb25696045a589a73
+  manifest digest: sha256:d7181f8d5716a088597edaace6c7cfc9c42709c5a7aa780a3f4a3aab96b420b4
   ```
 
 - The managed installer built that image from its two-file tar stream,
@@ -243,12 +277,17 @@ Verified against a real ARM64 VM:
   dirty tracked state crossed Lima SSH, entered a private volume, materialized
   inside the hardened container, and could be deleted there without altering
   the Mac checkout.
+- That same live test generated fresh client and host keys, pinned the host
+  key, connected with the generated ProxyCommand, and wrote a file through the
+  Zed-compatible OpenSSH session. A Pi executable in the same container saw
+  that exact file and workspace. The SSH session ran as UID 1000 with no
+  forwarded agent or `/Users`, and `podman port` reported no published port.
 
 Run that end-to-end test with:
 
 ```sh
 PISAFE_LIVE_LIMA=1 \
-PISAFE_LIVE_RUN_IMAGE=sha256:f3d9de4937cef75c3f333affcd2afd26015edce04f2fc2dfc67fcca6f9c697e4 \
+PISAFE_LIVE_RUN_IMAGE=sha256:d0acf9f290d4bf49792a03fc2ed9080ccb18631ba2bfea9fb25696045a589a73 \
 go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
 ```
 
@@ -257,7 +296,8 @@ go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
 A persistent Lima instance named `pisafe` was left running. It contains no
 project runs or user data. It was freshly provisioned from the current
 generated configuration and contains only cached base/test images plus the
-managed `localhost/pisafe-run:managed-b43217fe1c358fe8` image above.
+current `localhost/pisafe-run:managed-c4c10720d220f2eb` image. Older managed
+recipe images remain only as rebuildable cache entries.
 
 Fresh provisioning verified all security-sensitive setup together:
 
@@ -293,6 +333,13 @@ were:
 9. Fedora Podman's image-inspection `Id` is a bare 64-character hex value,
    while run specs deliberately require `sha256:` form. The installer now
    validates and normalizes it before returning the immutable ID.
+10. Fedora Podman rejects `uid=` and `gid=` in `--tmpfs` option strings. The
+    bounded writable `/run` now uses Podman's supported
+    `type=tmpfs,...,U=true` mount form.
+11. A VM-loopback published SSH port could not cross the intended firewall,
+    which denies loopback to the unprivileged Lima user. SSH now uses a
+    portless `podman exec` stdio relay to container loopback instead of adding
+    a mutable firewall exception.
 
 When Codex runs inside a restricted filesystem sandbox, it may be unable to
 connect to `~/.lima/pisafe/ha.sock`; `limactl list` then falsely labels the
@@ -304,8 +351,9 @@ sandboxed result.
 
 - No user-facing `run`, `connect`, `diff`, `apply`, `cp`, `discard`, or `gc`
   implementation exists. `list` is the only lifecycle command exposed.
-- Per-run SSH host/client keys, sshd configuration, a Lima `ProxyCommand`, and
-  Zed Remote are missing.
+- The Zed-compatible SSH transport is live-verified, but `pisafe zed` and
+  automatic Zed launch are not wired. Internal creation writes an isolated
+  per-run config and deliberately does not edit global SSH or Zed settings.
 - Persistent workspace disk quota and wall-clock enforcement are missing.
   CPU, memory, PID, and tmpfs limits are implemented and live-verified.
 - Selected untracked/ignored input archive handling is missing.
@@ -327,17 +375,16 @@ sandboxed result.
 
 Finish the first run lifecycle without weakening the boundary:
 
-1. Generate per-run sandbox SSH host/client keys, configure non-root sshd, and
-   connect through a Lima control-SSH `ProxyCommand`; then prove Zed and Pi see
-   the same workspace.
-2. Wire `pisafe run` around host-network verification, managed-image
+1. Wire `pisafe run` around host-network verification, managed-image
    installation, `gitstage.Prepare`, and `runctl.StartPrepared`; keep Pi
-   inference unavailable rather than injecting a credential.
-3. Implement stop/resume and exact-confirmation discard, including reliable
+   inference unavailable rather than injecting a credential. Print the
+   generated SSH command/config and add explicit Zed launch without silently
+   editing global user settings.
+2. Implement stop/resume and exact-confirmation discard, including reliable
    cleanup recovery and wall-clock enforcement. Choose and live-test a
    persistent workspace disk-quota mechanism before claiming the disk limit.
-4. Implement the reverse inference relay and run-scoped capability.
-5. Then add selected untracked inputs and submodule-aware journaled apply
+3. Implement the reverse inference relay and run-scoped capability.
+4. Then add selected untracked inputs and submodule-aware journaled apply
    before exposing `pisafe apply`.
 
 ## Useful references

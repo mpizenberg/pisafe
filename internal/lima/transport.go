@@ -15,6 +15,7 @@ import (
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/runid"
+	"github.com/mpizenberg/pisafe/internal/runssh"
 )
 
 const (
@@ -85,6 +86,34 @@ func NewTransport() Transport {
 		instance: InstanceName,
 		runner:   execRunner{binary: "limactl"},
 	}
+}
+
+func (transport Transport) SSHGateway(ctx context.Context) (runssh.Gateway, error) {
+	output, err := transport.runner.Run(
+		ctx,
+		nil,
+		"list",
+		"--format", "{{.SSHConfigFile}}",
+		transport.instance,
+	)
+	if err != nil {
+		return runssh.Gateway{}, fmt.Errorf("locate Lima SSH config: %w", err)
+	}
+	configFile := strings.TrimSpace(string(output))
+	if !filepath.IsAbs(configFile) || strings.Contains(configFile, "\n") {
+		return runssh.Gateway{}, fmt.Errorf("Lima returned an invalid SSH config path")
+	}
+	info, err := os.Lstat(configFile)
+	if err != nil {
+		return runssh.Gateway{}, fmt.Errorf("inspect Lima SSH config: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return runssh.Gateway{}, fmt.Errorf("Lima SSH config is not a regular file")
+	}
+	return runssh.Gateway{
+		ConfigFile: configFile,
+		Alias:      "lima-" + transport.instance,
+	}, nil
 }
 
 // Execute runs one argv-style command in the dedicated VM.

@@ -2,6 +2,7 @@ package lima
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/runcontainer"
+	"github.com/mpizenberg/pisafe/internal/runssh"
 )
 
 func TestLiveSSHStageAndContainerMaterialize(t *testing.T) {
@@ -58,11 +60,58 @@ func TestLiveSSHStageAndContainerMaterialize(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	sshStore := runssh.NewStore(filepath.Join(t.TempDir(), "ssh"))
+	preparedSSH, err := sshStore.Prepare(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := sshStore.Remove(runID); err != nil {
+			t.Errorf("remove live SSH state: %v", err)
+		}
+	}()
+	configureSSHArgs, err := spec.ConfigureSSHArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostPublicKey, err := transport.Execute(
+		ctx,
+		strings.NewReader(preparedSSH.PublicKey+"\n"),
+		append([]string{"podman"}, configureSSHArgs...)...,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	runArgs, err := spec.RunArgs()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := transport.Execute(ctx, nil, append([]string{"podman"}, runArgs...)...); err != nil {
+		t.Fatal(err)
+	}
+	publishedPorts, err := transport.Execute(
+		ctx,
+		nil,
+		"podman", "port", spec.ContainerName(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(publishedPorts)) != "" {
+		t.Fatalf("run container exposed VM ports: %s", publishedPorts)
+	}
+	gateway, err := transport.SSHGateway(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint, err := sshStore.Finalize(
+		preparedSSH,
+		string(hostPublicKey),
+		gateway,
+		spec.ContainerName(),
+	)
+	if err != nil {
 		t.Fatal(err)
 	}
 	materializeArgs, err := spec.MaterializeArgs("project")
@@ -99,7 +148,6 @@ func TestLiveSSHStageAndContainerMaterialize(t *testing.T) {
 		`test "$(git -C /work/project status --short)" = ""`,
 		`test "$(cat /work/project/tracked.txt)" = changed`,
 		"test ! -e /work/stage",
-		"rm -rf /work/project",
 	}
 	execArgs := []string{
 		"podman", "exec",
@@ -111,6 +159,56 @@ func TestLiveSSHStageAndContainerMaterialize(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	sshOutput, err := waitForLiveSSH(ctx, endpoint, `set -eu
+test "$(id -u)" = 1000
+test -z "${SSH_AUTH_SOCK-}"
+test ! -e /Users
+test "$(cat /work/project/tracked.txt)" = changed
+printf 'from-zed-compatible-ssh\n' > /work/project/zed-visible.txt
+printf '%s\n' "$HOME"
+`)
+	if err != nil {
+		logs, _ := transport.Execute(
+			ctx,
+			nil,
+			"podman", "logs", spec.ContainerName(),
+		)
+		state, _ := transport.Execute(
+			ctx,
+			nil,
+			"podman", "inspect",
+			"--format", "{{.State.Status}} {{.State.ExitCode}}",
+			spec.ContainerName(),
+		)
+		t.Fatalf("SSH connection: %v\ncontainer: %s\nlogs:\n%s", err, state, logs)
+	}
+	if strings.TrimSpace(sshOutput) != "/home/node" {
+		t.Fatalf("SSH HOME = %q", sshOutput)
+	}
+	if _, err := transport.Execute(
+		ctx,
+		nil,
+		"podman", "exec",
+		"--user", "1000:1000",
+		spec.ContainerName(),
+		"sh", "-ceu",
+		`test "$(cat /work/project/zed-visible.txt)" = from-zed-compatible-ssh
+test -x "$(command -v pi)"
+pi --version >/dev/null`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.Execute(
+		ctx,
+		nil,
+		"podman", "exec",
+		"--user", "1000:1000",
+		spec.ContainerName(),
+		"rm", "-rf", "/work/project",
+	); err != nil {
+		t.Fatal(err)
+	}
+
 	hostContent, err := os.ReadFile(filepath.Join(source, "tracked.txt"))
 	if err != nil {
 		t.Fatal(err)
@@ -118,6 +216,36 @@ func TestLiveSSHStageAndContainerMaterialize(t *testing.T) {
 	if string(hostContent) != "changed\n" {
 		t.Fatalf("original checkout changed: %q", hostContent)
 	}
+}
+
+func waitForLiveSSH(
+	ctx context.Context,
+	endpoint runssh.Endpoint,
+	script string,
+) (string, error) {
+	var lastOutput []byte
+	var lastErr error
+	for attempt := 0; attempt < 10; attempt++ {
+		command := exec.CommandContext(
+			ctx,
+			"ssh",
+			"-F", endpoint.ConfigFile,
+			"-o", "ConnectTimeout=2",
+			endpoint.Alias,
+			"sh", "-s",
+		)
+		command.Stdin = strings.NewReader(script)
+		lastOutput, lastErr = command.CombinedOutput()
+		if lastErr == nil {
+			return string(lastOutput), nil
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	return "", errors.New(string(lastOutput) + ": " + lastErr.Error())
 }
 
 func initLiveRepository(t *testing.T) string {

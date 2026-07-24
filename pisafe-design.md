@@ -376,7 +376,8 @@ VM-root nftables rules:
   at VM start/resume, so a LAN using globally routed IPv4 space is still
   covered; fail closed if they cannot be determined.
 - Allow one exact exception: the inference broker relay address and port.
-- Deny inbound connections except the per-run SSH endpoint.
+- Deny inbound connections. Per-run SSH enters through Lima's existing
+  control connection and a container-local stdio relay, not a VM listener.
 - Allow everything else, over any protocol.
 
 Two implementation details are load-bearing:
@@ -493,6 +494,15 @@ zed ssh://pisafe-<run>/work/<project>
 ```
 
 Also print this URI and the staged path.
+
+Each alias uses a strict per-run OpenSSH config. Its `ProxyCommand` opens
+Lima's generated control-SSH connection and runs an interactive, non-TTY
+`podman exec` whose only job is to relay bytes to `sshd` on the container's
+loopback. No container port is published in the VM or on macOS. The client
+private key remains on macOS; the container receives only its public key,
+generates its own host key, and runs `sshd` as the non-root run user with
+password, agent, X11, and TCP forwarding disabled. The Mac pins that host key
+before the first connection.
 
 Zed documents that source, language servers, tasks, and terminal commands run
 on the remote machine. This keeps executable project tooling in the sandbox.
@@ -669,6 +679,29 @@ The first usable release should prove:
   notice; inference then fails closed and loudly until the pinned `pi-ai`
   dependency ships a fix and is updated.
 
+## Decisions
+
+- Per-run SSH uses a portless Lima-control-SSH `ProxyCommand` and
+  `podman exec` stdio relay. A VM-loopback published port was not retained
+  because the static firewall correctly denies VM loopback to the unprivileged
+  Lima user; opening dynamic exceptions would add mutable privileged state.
+  Reversing this later would change stored connection metadata and the
+  firewall contract.
+- A network-disabled one-shot container initializes the run home volume, then
+  non-root `sshd` is the run container's main process. A detached `sshd`
+  started after the container was not retained because it would disappear
+  across stop/resume and require a second process-lifecycle mechanism. This is
+  inexpensive to reverse before lifecycle commands are exposed.
+- PiSafe writes one strict SSH config fragment per run and does not edit the
+  user's global SSH or Zed settings during internal run creation. Automatic
+  Zed launch will be added with the user-facing lifecycle so that any one-time
+  configuration change is explicit. Reversing this choice later is cheap.
+- Run manifests moved to version 2 and activation now atomically requires the
+  SSH connection record. Accepting version-1 active records with no connection
+  data was not retained because no user-facing runs exist yet and a
+  compatibility path would weaken the lifecycle invariant. Reversing this
+  after release would require an explicit manifest migration.
+
 ## Primary references
 
 - Pi security: <https://pi.dev/docs/latest/security>
@@ -684,4 +717,3 @@ The first usable release should prove:
   <https://docs.podman.io/en/latest/markdown/podman-machine-init.1.html>
 - Podman rootless `pasta` networking: <https://docs.podman.io/en/stable/markdown/podman-network.1.html>
 - Zed Remote Development: <https://zed.dev/docs/remote-development>
-

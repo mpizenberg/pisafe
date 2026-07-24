@@ -28,9 +28,11 @@ func TestRunArgsAreHardenedAndImmutable(t *testing.T) {
 		"--memory 4294967296",
 		"--memory-swap 4294967296",
 		"--pids-limit 512",
+		"type=tmpfs,dst=/run,tmpfs-size=16777216,tmpfs-mode=0755,U=true",
 		"type=volume,src=pisafe-work-run-123,dst=/work,nodev,nosuid,U=true",
 		"type=volume,src=pisafe-home-run-123,dst=/home/node,nodev,nosuid,U=true",
 		testImageID,
+		"pisafe-guest serve-ssh",
 	} {
 		if !strings.Contains(joined, required) {
 			t.Errorf("run args lack %q:\n%s", required, joined)
@@ -47,8 +49,8 @@ func TestRunArgsAreHardenedAndImmutable(t *testing.T) {
 			t.Errorf("run args contain forbidden value %q", forbidden)
 		}
 	}
-	if args[len(args)-1] != testImageID {
-		t.Fatalf("last argument = %q", args[len(args)-1])
+	if got := strings.Join(args[len(args)-2:], " "); got != "pisafe-guest serve-ssh" {
+		t.Fatalf("container command = %q", got)
 	}
 }
 
@@ -74,6 +76,27 @@ func TestVolumeAndMaterializeArgsAreRunScoped(t *testing.T) {
 		"pisafe-guest materialize /work/stage /work/project",
 	) {
 		t.Fatalf("materialize args = %q", got)
+	}
+	configureSSH, err := spec.ConfigureSSHArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configureJoined := strings.Join(configureSSH, " ")
+	for _, expected := range []string{
+		"--rm",
+		"--interactive",
+		"--network=none",
+		"--user 1000:1000",
+		"--read-only",
+		"--cap-drop=all",
+		"--security-opt=no-new-privileges",
+		"type=volume,src=pisafe-home-run-123,dst=/home/node,nodev,nosuid,U=true",
+		testImageID,
+		"pisafe-guest configure-ssh",
+	} {
+		if !strings.Contains(configureJoined, expected) {
+			t.Errorf("SSH init args lack %q:\n%s", expected, configureJoined)
+		}
 	}
 }
 

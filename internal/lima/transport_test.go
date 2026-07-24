@@ -132,6 +132,32 @@ func TestTransportImportStageIsRunScoped(t *testing.T) {
 	}
 }
 
+func TestTransportReturnsLimaSSHGateway(t *testing.T) {
+	config := filepath.Join(t.TempDir(), "ssh.config")
+	if err := os.WriteFile(config, []byte("Host lima-pisafe\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{outputs: [][]byte{[]byte(config + "\n")}}
+	transport := Transport{instance: InstanceName, runner: runner}
+	gateway, err := transport.SSHGateway(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gateway.ConfigFile != config || gateway.Alias != "lima-pisafe" {
+		t.Fatalf("gateway = %#v", gateway)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("calls = %#v", runner.calls)
+	}
+	assertArgsPrefix(
+		t,
+		runner.calls[0],
+		"list",
+		"--format", "{{.SSHConfigFile}}",
+		InstanceName,
+	)
+}
+
 func assertArgsPrefix(t *testing.T, call recordedCall, want ...string) {
 	t.Helper()
 	if len(call.args) < len(want) {

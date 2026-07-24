@@ -24,7 +24,7 @@ func TestStoreLifecycleAndList(t *testing.T) {
 		t.Fatalf("created = %#v", created)
 	}
 	now = now.Add(time.Minute)
-	active, err := store.Transition("run-one", StateActive)
+	active, err := store.Activate("run-one", testSSHConnection(root, "run-one"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,6 +70,9 @@ func TestStoreRejectsInvalidTransitions(t *testing.T) {
 		!strings.Contains(err.Error(), "invalid run transition") {
 		t.Fatalf("error = %v", err)
 	}
+	if _, err := store.Transition("run-one", StateActive); err == nil {
+		t.Fatal("creating run activated without SSH connection")
+	}
 	if _, err := store.Transition("../escape", StateActive); err == nil {
 		t.Fatal("unsafe run ID was accepted")
 	}
@@ -86,7 +89,7 @@ func TestStoreRejectsDuplicateAndCorruptManifest(t *testing.T) {
 	}
 	if err := os.WriteFile(
 		filepath.Join(root, "bad.json"),
-		[]byte(`{"version":1,"run_id":"other"}`),
+		[]byte(`{"version":2,"run_id":"other"}`),
 		0o600,
 	); err != nil {
 		t.Fatal(err)
@@ -108,12 +111,50 @@ func TestStoreRecordsAndClearsOperationError(t *testing.T) {
 	if failed.State != StateCreating || failed.LastError == "" {
 		t.Fatalf("failed = %#v", failed)
 	}
-	active, err := store.Transition("run-one", StateActive)
+	active, err := store.Activate(
+		"run-one",
+		testSSHConnection(store.root, "run-one"),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if active.LastError != "" {
 		t.Fatalf("active retained error %q", active.LastError)
+	}
+}
+
+func TestStoreActivatesWithRunScopedSSHConnection(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	if _, err := store.Create(testManifest("run-one")); err != nil {
+		t.Fatal(err)
+	}
+	connection := testSSHConnection(root, "run-one")
+	active, err := store.Activate("run-one", connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.State != StateActive || active.SSH == nil || *active.SSH != connection {
+		t.Fatalf("active = %#v", active)
+	}
+	stored, err := store.Get("run-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.SSH == nil || *stored.SSH != connection {
+		t.Fatalf("stored = %#v", stored)
+	}
+}
+
+func TestStoreRejectsMismatchedSSHConnection(t *testing.T) {
+	store := NewStore(t.TempDir())
+	if _, err := store.Create(testManifest("run-one")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate("run-one", SSHConnection{
+		Alias: "pisafe-other",
+	}); err == nil {
+		t.Fatal("mismatched SSH connection was accepted")
 	}
 }
 
@@ -125,5 +166,15 @@ func testManifest(runID string) Manifest {
 			RunID:   runID,
 			WorkRef: "refs/heads/work/" + runID,
 		},
+	}
+}
+
+func testSSHConnection(root string, runID string) SSHConnection {
+	return SSHConnection{
+		Alias:              "pisafe-" + runID,
+		IdentityFile:       filepath.Join(root, "id_ed25519"),
+		KnownHostsFile:     filepath.Join(root, "known_hosts"),
+		ConfigFile:         filepath.Join(root, "ssh.config"),
+		HostKeyFingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 	}
 }

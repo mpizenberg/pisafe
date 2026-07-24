@@ -121,7 +121,7 @@ func (spec Spec) RunArgs() ([]string, error) {
 		"--memory-swap", memory,
 		"--pids-limit", strconv.Itoa(spec.PIDs),
 		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=" + tmpSize,
-		"--tmpfs", "/run:rw,nosuid,nodev,size=16777216",
+		"--mount", "type=tmpfs,dst=/run,tmpfs-size=16777216,tmpfs-mode=0755,U=true",
 		"--mount", "type=volume,src=" + spec.WorkspaceVolume() + ",dst=" + containerWorkRoot + ",nodev,nosuid,U=true",
 		"--mount", "type=volume,src=" + spec.HomeVolume() + ",dst=" + containerHome + ",nodev,nosuid,U=true",
 		"--workdir", containerWorkRoot,
@@ -130,6 +130,31 @@ func (spec Spec) RunArgs() ([]string, error) {
 		"--env", "PI_CODING_AGENT_DIR=" + containerHome + "/.pi/agent",
 		"--env", "PI_SKIP_VERSION_CHECK=1",
 		spec.ImageID,
+		"pisafe-guest", "serve-ssh",
+	}, nil
+}
+
+func (spec Spec) ConfigureSSHArgs() ([]string, error) {
+	if err := spec.Validate(); err != nil {
+		return nil, err
+	}
+	return []string{
+		"run",
+		"--rm",
+		"--interactive",
+		"--pull=never",
+		"--label", "io.pisafe.run=" + spec.RunID,
+		"--label", "io.pisafe.kind=ssh-init",
+		"--user", containerUser,
+		"--read-only",
+		"--cap-drop=all",
+		"--security-opt=no-new-privileges",
+		"--network=none",
+		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=16777216",
+		"--mount", "type=volume,src=" + spec.HomeVolume() + ",dst=" + containerHome + ",nodev,nosuid,U=true",
+		"--env", "HOME=" + containerHome,
+		spec.ImageID,
+		"pisafe-guest", "configure-ssh",
 	}, nil
 }
 
