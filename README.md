@@ -11,9 +11,9 @@ The implementation now contains:
   `pisafe discard`, `pisafe list` for durable records, `pisafe zed` for
   reopening a connection explicitly saved in Zed, and `pisafe doctor` for
   prerequisites;
-- a split Git staging core: the Mac produces a bundle and tracked-state patch,
-  while materialization happens after transfer inside the isolated
-  environment;
+- a split Git staging core: the Mac produces a bundle and tracked-state patch
+  for the superproject and for each initialized submodule, while
+  materialization happens after transfer inside the isolated environment;
 - tracked dirty-state baseline capture, plus explicitly selected untracked or
   ignored inputs, which are validated, archived, and committed into that same
   baseline while credential-shaped names require an unsafe override;

@@ -26,19 +26,19 @@ const (
 )
 
 var (
-	ErrBranchExists       = errors.New("pisafe import branch already exists")
-	ErrSubmodulesNotReady = errors.New("submodule staging is not implemented yet")
-	ErrLFSNotSupported    = errors.New("Git LFS repositories are not supported yet")
+	ErrBranchExists    = errors.New("pisafe import branch already exists")
+	ErrLFSNotSupported = errors.New("Git LFS repositories are not supported yet")
 )
 
 type Snapshot struct {
-	RunID          string    `json:"run_id"`
-	SourceRoot     string    `json:"source_root"`
-	SourceHead     string    `json:"source_head"`
-	WorkRef        string    `json:"work_ref"`
-	BaselineCommit string    `json:"baseline_commit,omitempty"`
-	Inputs         []string  `json:"inputs,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
+	RunID          string           `json:"run_id"`
+	SourceRoot     string           `json:"source_root"`
+	SourceHead     string           `json:"source_head"`
+	WorkRef        string           `json:"work_ref"`
+	BaselineCommit string           `json:"baseline_commit,omitempty"`
+	Inputs         []string         `json:"inputs,omitempty"`
+	Submodules     []SubmoduleStage `json:"submodules,omitempty"`
+	CreatedAt      time.Time        `json:"created_at"`
 }
 
 type ApplyResult struct {
@@ -54,6 +54,7 @@ type PreparedStage struct {
 	BundlePath string
 	PatchPath  string
 	InputsPath string
+	Submodules []PreparedSubmodule
 }
 
 // PrepareRequest describes one staging operation. Selected inputs are the only
@@ -137,10 +138,11 @@ func Prepare(ctx context.Context, request PrepareRequest) (prepared PreparedStag
 	if err != nil {
 		return PreparedStage{}, fmt.Errorf("resolve HEAD: %w", err)
 	}
-	if err := rejectGitlinks(ctx, root); err != nil {
+	if err := rejectLFS(ctx, root); err != nil {
 		return PreparedStage{}, err
 	}
-	if err := rejectLFS(ctx, root); err != nil {
+	submodules, err := listSubmodules(ctx, root)
+	if err != nil {
 		return PreparedStage{}, err
 	}
 
@@ -155,27 +157,30 @@ func Prepare(ctx context.Context, request PrepareRequest) (prepared PreparedStag
 	}()
 
 	bundlePath := filepath.Join(packageDir, "source.bundle")
-	if err := gitRun(ctx, root, nil, nil, "bundle", "create", bundlePath, "HEAD"); err != nil {
-		return PreparedStage{}, fmt.Errorf("create staging bundle: %w", err)
-	}
-	patch, err := gitOutputBytes(
-		ctx,
-		root,
-		"diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", "HEAD", "--",
-	)
-	if err != nil {
-		return PreparedStage{}, fmt.Errorf("capture tracked working tree: %w", err)
-	}
-	headAfter, err := gitOutput(ctx, root, "rev-parse", "--verify", "HEAD")
-	if err != nil {
-		return PreparedStage{}, fmt.Errorf("recheck HEAD: %w", err)
-	}
-	if headAfter != head {
-		return PreparedStage{}, fmt.Errorf("repository HEAD changed while preparing the run")
-	}
 	patchPath := filepath.Join(packageDir, "tracked.patch")
-	if err := os.WriteFile(patchPath, patch, 0o600); err != nil {
-		return PreparedStage{}, fmt.Errorf("write tracked patch: %w", err)
+	if err := captureRepository(ctx, root, bundlePath, patchPath); err != nil {
+		return PreparedStage{}, err
+	}
+	preparedSubmodules := make([]PreparedSubmodule, 0, len(submodules))
+	for index, submodule := range submodules {
+		working := filepath.Join(root, filepath.FromSlash(submodule.Path))
+		artifacts := PreparedSubmodule{
+			Path:       submodule.Path,
+			BundlePath: filepath.Join(packageDir, submoduleBundleName(index)),
+			PatchPath:  filepath.Join(packageDir, submodulePatchName(index)),
+		}
+		if err := captureRepository(
+			ctx,
+			working,
+			artifacts.BundlePath,
+			artifacts.PatchPath,
+		); err != nil {
+			return PreparedStage{}, fmt.Errorf("submodule %q: %w", submodule.Path, err)
+		}
+		preparedSubmodules = append(preparedSubmodules, artifacts)
+	}
+	if err := recheckHeads(ctx, root, head, submodules); err != nil {
+		return PreparedStage{}, err
 	}
 
 	inputsPath := ""
@@ -196,6 +201,7 @@ func Prepare(ctx context.Context, request PrepareRequest) (prepared PreparedStag
 		SourceHead: head,
 		WorkRef:    "refs/heads/work/" + runID,
 		Inputs:     names,
+		Submodules: submodules,
 		CreatedAt:  time.Now().UTC(),
 	}
 	complete = true
@@ -204,7 +210,38 @@ func Prepare(ctx context.Context, request PrepareRequest) (prepared PreparedStag
 		BundlePath: bundlePath,
 		PatchPath:  patchPath,
 		InputsPath: inputsPath,
+		Submodules: preparedSubmodules,
 	}, nil
+}
+
+// recheckHeads fails the run if the source moved while its artifacts were
+// being captured, so a stage is never assembled from two different states.
+func recheckHeads(
+	ctx context.Context,
+	root, head string,
+	submodules []SubmoduleStage,
+) error {
+	current, err := gitOutput(ctx, root, "rev-parse", "--verify", "HEAD")
+	if err != nil {
+		return fmt.Errorf("recheck HEAD: %w", err)
+	}
+	if current != head {
+		return errors.New("repository HEAD changed while preparing the run")
+	}
+	for _, submodule := range submodules {
+		working := filepath.Join(root, filepath.FromSlash(submodule.Path))
+		current, err := gitOutput(ctx, working, "rev-parse", "--verify", "HEAD")
+		if err != nil {
+			return fmt.Errorf("recheck submodule %q HEAD: %w", submodule.Path, err)
+		}
+		if current != submodule.Head {
+			return fmt.Errorf(
+				"submodule %q HEAD changed while preparing the run",
+				submodule.Path,
+			)
+		}
+	}
+	return nil
 }
 
 // Materialize consumes a transferred stage package inside the isolated
@@ -270,9 +307,19 @@ func Materialize(ctx context.Context, prepared PreparedStage, workspace string) 
 	if err := restoreInputs(ctx, prepared, workspace); err != nil {
 		return Snapshot{}, err
 	}
+	submodules, err := restoreSubmodules(ctx, prepared, workspace)
+	if err != nil {
+		return Snapshot{}, err
+	}
 
+	// The tracked patch, the selected inputs, and every submodule gitlink are
+	// all staged by now, so one question decides whether a baseline is needed.
 	baseline := ""
-	if len(patch) != 0 || len(prepared.Snapshot.Inputs) != 0 {
+	staged, err := indexDiffersFromHead(ctx, workspace)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if staged {
 		if err := commit(ctx, workspace, baselineMessage); err != nil {
 			return Snapshot{}, fmt.Errorf("commit tracked baseline: %w", err)
 		}
@@ -285,7 +332,20 @@ func Materialize(ctx context.Context, prepared PreparedStage, workspace string) 
 	cleanup = false
 	snapshot = prepared.Snapshot
 	snapshot.BaselineCommit = baseline
+	snapshot.Submodules = submodules
 	return snapshot, nil
+}
+
+func indexDiffersFromHead(ctx context.Context, workspace string) (bool, error) {
+	err := gitRun(ctx, workspace, nil, nil, "diff", "--cached", "--quiet", "--")
+	switch {
+	case err == nil:
+		return false, nil
+	case isExitCode(err, 1):
+		return true, nil
+	default:
+		return false, fmt.Errorf("inspect staged baseline: %w", err)
+	}
 }
 
 // Stage is a local composition of Prepare and Materialize, primarily useful
@@ -385,19 +445,6 @@ func sameNames(first, second []string) bool {
 	sort.Strings(left)
 	sort.Strings(right)
 	return slices.Equal(left, right)
-}
-
-func rejectGitlinks(ctx context.Context, root string) error {
-	output, err := gitOutputBytes(ctx, root, "ls-files", "-z", "--stage")
-	if err != nil {
-		return fmt.Errorf("inspect index: %w", err)
-	}
-	for _, entry := range splitNULBytes(output) {
-		if bytes.HasPrefix(entry, []byte("160000 ")) {
-			return ErrSubmodulesNotReady
-		}
-	}
-	return nil
 }
 
 func rejectLFS(ctx context.Context, root string) error {

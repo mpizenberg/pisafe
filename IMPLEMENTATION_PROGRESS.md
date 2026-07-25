@@ -67,7 +67,15 @@ quota-backed VM storage. Do not add a local-workspace fallback.
 - Apply creates only `refs/heads/pisafe/<run>` with a compare-and-swap
   `git update-ref`; it does not change the current branch, index, or working
   tree.
-- Git LFS and submodules currently fail closed rather than staging incomplete
+- Initialized submodules are staged with the superproject: each one
+  contributes its own bundle and tracked-state patch, is reconstructed in the
+  run, absorbs its git directory, and is registered from `.gitmodules`. Its
+  dirty tracked state becomes a baseline commit inside the submodule, and the
+  superproject baseline records the gitlink the submodule actually ended up
+  at. Uninitialized submodules stay uninitialized.
+- The superproject patch ignores submodule changes, so submodule state travels
+  only through the submodule's own artifacts.
+- Nested submodules and Git LFS fail closed rather than staging incomplete
   repositories.
 - External diff and text-conversion drivers are disabled during host capture.
 - NUL-delimited parsing preserves unusual Git filenames.
@@ -356,15 +364,15 @@ Current package coverage at this milestone:
 
 ```text
 pisafe        0.0%
-pisafe-guest  59.9%
+pisafe-guest  60.0%
 broker        96.2%
 chatgpt       70.1%
 cli           24.2%
-gitstage      76.0%
+gitstage      76.5%
 hostnet       50.0%
-lima          68.0%
+lima          68.9%
 runcontainer  66.7%
-runctl        67.6%
+runctl        67.2%
 runid         92.3%
 runimage      74.6%
 runssh        68.0%
@@ -600,7 +608,11 @@ sandboxed result.
   Fully automatic first-launch remains intentionally absent because Zed's CLI
   URL cannot carry `-F` and PiSafe does not silently edit global SSH or Zed
   settings.
-- Submodule staging and journaled multi-repository apply are missing.
+- Journaled multi-repository apply is missing: a run of a repository with
+  submodules stages and materializes correctly, but `ImportApply` still
+  updates only the superproject ref, so applying such a run would create a
+  branch whose gitlinks name commits the Mac does not have. `apply` is not
+  exposed as a command yet, so this is not reachable from the CLI.
 - Login, the Keychain round trip, and the real Codex handshake are
   live-verified, but broker-side token refresh has only ever run against a
   stub: the live session never crossed an access-token expiry. The first
@@ -630,9 +642,10 @@ sandboxed result.
 
 Continue Phase 1 without weakening the boundary:
 
-1. Add submodule-aware staging and journaled multi-repository apply before
-   exposing `pisafe apply`. Selected untracked inputs are done; submodules
-   still fail closed, and apply still updates exactly one ref.
+1. Add journaled multi-repository apply before exposing `pisafe apply`:
+   import the submodule histories, record the intended old/new refs in the run
+   manifest, and update them one repository at a time with compare-and-swap
+   recovery.
 2. Add `diff`, hardened `cp`, and seven-day GC after the apply transaction is
    durable.
 

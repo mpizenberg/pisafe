@@ -202,11 +202,20 @@ func materialize(
 		return errors.New("stage snapshot unexpectedly contains a host source path")
 	}
 
+	submodules := make([]gitstage.PreparedSubmodule, 0, len(snapshot.Submodules))
+	for index, submodule := range snapshot.Submodules {
+		submodules = append(submodules, gitstage.PreparedSubmodule{
+			Path:       submodule.Path,
+			BundlePath: filepath.Join(stageDirectory, fmt.Sprintf("submodule-%d.bundle", index)),
+			PatchPath:  filepath.Join(stageDirectory, fmt.Sprintf("submodule-%d.patch", index)),
+		})
+	}
 	materialized, err := gitstage.Materialize(ctx, gitstage.PreparedStage{
 		Snapshot:   snapshot,
 		BundlePath: filepath.Join(stageDirectory, "source.bundle"),
 		PatchPath:  filepath.Join(stageDirectory, "tracked.patch"),
 		InputsPath: filepath.Join(stageDirectory, "inputs.tar"),
+		Submodules: submodules,
 	}, workspace)
 	if err != nil {
 		return err

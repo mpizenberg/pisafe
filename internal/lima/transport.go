@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -74,6 +75,10 @@ rm -rf -- "$run_root"
 	podman unshare tar --numeric-owner -C "$workspace" -xf -
 `
 )
+
+// submoduleArtifactPattern bounds the stage file names a submodule may
+// contribute, so an artifact name can never become a path.
+var submoduleArtifactPattern = regexp.MustCompile(`^submodule-[0-9]{1,4}\.(bundle|patch)$`)
 
 // Transport executes commands and streams artifacts through Lima's control
 // SSH connection. It does not use a host mount, guest agent, or Podman socket.
@@ -180,6 +185,19 @@ func (transport Transport) CreateStage(
 			path: prepared.InputsPath,
 		})
 	}
+	for index, submodule := range prepared.Submodules {
+		artifacts = append(
+			artifacts,
+			stageArtifact{
+				name: fmt.Sprintf("submodule-%d.bundle", index),
+				path: submodule.BundlePath,
+			},
+			stageArtifact{
+				name: fmt.Sprintf("submodule-%d.patch", index),
+				path: submodule.PatchPath,
+			},
+		)
+	}
 	for _, artifact := range artifacts {
 		if err := transport.uploadArtifact(ctx, runID, artifact.name, artifact.path, artifact.data); err != nil {
 			return "", fmt.Errorf("upload %s: %w", artifact.name, err)
@@ -275,7 +293,9 @@ func (transport Transport) uploadArtifact(
 	switch name {
 	case "source.bundle", "tracked.patch", "snapshot.json", "inputs.tar":
 	default:
-		return fmt.Errorf("unsupported stage artifact %q", name)
+		if !submoduleArtifactPattern.MatchString(name) {
+			return fmt.Errorf("unsupported stage artifact %q", name)
+		}
 	}
 
 	var (

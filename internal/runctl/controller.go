@@ -287,10 +287,27 @@ func decodeMaterializedSnapshot(
 		materialized.SourceHead != hostSnapshot.SourceHead ||
 		materialized.WorkRef != hostSnapshot.WorkRef ||
 		!slices.Equal(materialized.Inputs, hostSnapshot.Inputs) ||
+		!sameSubmodules(materialized.Submodules, hostSnapshot.Submodules) ||
 		!materialized.CreatedAt.Equal(hostSnapshot.CreatedAt) {
 		return gitstage.Snapshot{}, errors.New("materialized snapshot does not match prepared run")
 	}
 	return materialized, nil
+}
+
+// sameSubmodules compares what the Mac staged with what the run reported.
+// Baseline commits are created inside the run, so only identity and the
+// captured head must match.
+func sameSubmodules(materialized, staged []gitstage.SubmoduleStage) bool {
+	if len(materialized) != len(staged) {
+		return false
+	}
+	for index := range staged {
+		if materialized[index].Path != staged[index].Path ||
+			materialized[index].Head != staged[index].Head {
+			return false
+		}
+	}
+	return true
 }
 
 func (controller Controller) podman(

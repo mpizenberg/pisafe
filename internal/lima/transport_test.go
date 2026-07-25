@@ -197,3 +197,72 @@ func assertArgsPrefix(t *testing.T, call recordedCall, want ...string) {
 		}
 	}
 }
+
+func TestTransportStreamsSubmoduleAndInputArtifacts(t *testing.T) {
+	root := t.TempDir()
+	write := func(name, content string) string {
+		t.Helper()
+		path := filepath.Join(root, name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	runner := &fakeRunner{
+		outputs: [][]byte{[]byte("/home/piz/.local/share/pisafe/runs/safe-run/stage\n")},
+	}
+	transport := Transport{instance: InstanceName, runner: runner}
+	prepared := gitstage.PreparedStage{
+		Snapshot: gitstage.Snapshot{
+			RunID:      "safe-run",
+			SourceHead: strings.Repeat("a", 40),
+			WorkRef:    "refs/heads/work/safe-run",
+			Submodules: []gitstage.SubmoduleStage{
+				{Path: "dependency", Head: strings.Repeat("b", 40)},
+			},
+		},
+		BundlePath: write("source.bundle", "bundle"),
+		PatchPath:  write("tracked.patch", "patch"),
+		InputsPath: write("inputs.tar", "inputs"),
+		Submodules: []gitstage.PreparedSubmodule{{
+			Path:       "dependency",
+			BundlePath: write("sub.bundle", "submodule bundle"),
+			PatchPath:  write("sub.patch", "submodule patch"),
+		}},
+	}
+
+	if _, err := transport.CreateStage(context.Background(), prepared); err != nil {
+		t.Fatal(err)
+	}
+	uploaded := map[string]string{}
+	for _, call := range runner.calls[1:] {
+		uploaded[call.args[len(call.args)-3]] = call.stdin
+	}
+	for name, content := range map[string]string{
+		"source.bundle":      "bundle",
+		"tracked.patch":      "patch",
+		"inputs.tar":         "inputs",
+		"submodule-0.bundle": "submodule bundle",
+		"submodule-0.patch":  "submodule patch",
+	} {
+		if uploaded[name] != content {
+			t.Errorf("%s uploaded %q, want %q", name, uploaded[name], content)
+		}
+	}
+	if !strings.Contains(uploaded["snapshot.json"], `"path":"dependency"`) {
+		t.Errorf("snapshot lacks the submodule: %s", uploaded["snapshot.json"])
+	}
+}
+
+func TestUploadArtifactRejectsNamesOutsideTheStageContract(t *testing.T) {
+	transport := Transport{instance: InstanceName, runner: &fakeRunner{}}
+	for _, name := range []string{
+		"../escape", "submodule-.bundle", "submodule-0.tar", "submodule-99999.patch",
+		"submodule-0.bundle.extra", "source.bundle.bak",
+	} {
+		err := transport.uploadArtifact(context.Background(), "safe-run", name, "", []byte("x"))
+		if err == nil || !strings.Contains(err.Error(), "unsupported stage artifact") {
+			t.Errorf("uploadArtifact(%q) error = %v", name, err)
+		}
+	}
+}

@@ -179,28 +179,6 @@ func TestImportRejectsTamperedApplyBundle(t *testing.T) {
 	}
 }
 
-func TestStageRejectsSubmodulesUntilJournaledApplyExists(t *testing.T) {
-	ctx := context.Background()
-	source := newRepository(t)
-	submodule := newRepository(t)
-	runGit(
-		t,
-		source,
-		"-c", "protocol.file.allow=always",
-		"submodule", "add", "--quiet", submodule, "dependency",
-	)
-	runGit(t, source, "commit", "-qm", "add submodule")
-
-	_, err := Stage(
-		ctx,
-		PrepareRequest{SourcePath: source, RunID: "submodule-run"},
-		filepath.Join(t.TempDir(), "workspace"),
-	)
-	if !errors.Is(err, ErrSubmodulesNotReady) {
-		t.Fatalf("Stage error = %v, want ErrSubmodulesNotReady", err)
-	}
-}
-
 func TestStageRejectsGitLFS(t *testing.T) {
 	ctx := context.Background()
 	source := newRepository(t)

@@ -852,6 +852,23 @@ The first usable release should prove:
   of after an image build. `Prepare` re-resolves the selection and remains the
   authority.
 
+- A submodule is staged from its checked-out HEAD, not from the gitlink the
+  superproject index records, and the superproject baseline then records where
+  the submodule actually ended up. The alternative, reconstructing the
+  recorded gitlink with `git submodule update`, would need the bundle to carry
+  a commit that may be unreachable from the submodule's refs and would
+  silently discard a submodule the user had moved. As a consequence the
+  superproject patch is captured with `--ignore-submodules=all`, so gitlink
+  changes travel exactly once.
+- Nested submodules fail closed rather than being staged recursively. One
+  level covers the repositories this is built for, and recursion multiplies
+  the artifact, path-safety, and apply-journal surface. Lifting the limit is
+  additive and does not change the stage format.
+- A dirty submodule working tree is captured and committed inside the
+  submodule, symmetrically with the superproject, rather than refused.
+  Refusing would be simpler but would strand uncommitted submodule work on the
+  Mac with no way to carry it into the run.
+
 ## Primary references
 
 - Pi security: <https://pi.dev/docs/latest/security>
