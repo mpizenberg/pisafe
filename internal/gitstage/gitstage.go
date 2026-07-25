@@ -47,6 +47,16 @@ type ApplyResult struct {
 	FinalCommit  string
 	Untracked    []string
 	BundleSHA256 string
+	Submodules   []AppliedSubmodule
+}
+
+// AppliedSubmodule reports which commit the imported superproject branch
+// expects in one submodule, and the branch that keeps it reachable. Branch is
+// empty when the submodule did not change.
+type AppliedSubmodule struct {
+	Path   string
+	Branch string
+	Tip    string
 }
 
 type PreparedStage struct {

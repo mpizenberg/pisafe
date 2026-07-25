@@ -869,6 +869,16 @@ The first usable release should prove:
   Refusing would be simpler but would strand uncommitted submodule work on the
   Mac with no way to carry it into the run.
 
+- The apply journal records only ref creations, because apply only ever
+  creates `pisafe/<run>`. The documented compare-and-swap discipline and its
+  recovery rules are implemented in full; the general old-value restore is
+  not, because no code path produces a step with a previous value and an
+  untested branch is worse than an absent one. Adding update steps later is
+  additive.
+- Submodule refs are committed before the superproject ref. The reverse order
+  would let an interruption leave a superproject branch whose gitlinks name
+  commits that no ref keeps reachable.
+
 ## Primary references
 
 - Pi security: <https://pi.dev/docs/latest/security>

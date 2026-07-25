@@ -153,12 +153,11 @@ func TestImportRejectsTamperedApplyBundle(t *testing.T) {
 	}
 	mustWrite(t, filepath.Join(workspace, "tracked.txt"), "agent result\n")
 
-	bundlePath := filepath.Join(t.TempDir(), "apply.bundle")
-	prepared, err := PrepareApply(ctx, snapshot, workspace, bundlePath)
+	prepared, err := PrepareApply(ctx, snapshot, workspace, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	file, err := os.OpenFile(bundlePath, os.O_APPEND|os.O_WRONLY, 0)
+	file, err := os.OpenFile(prepared.BundlePath, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

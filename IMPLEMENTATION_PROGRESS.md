@@ -60,13 +60,26 @@ quota-backed VM storage. Do not add a local-workspace fallback.
   on extraction (no absolute, climbing, or `.git` paths, no non-regular
   entries), must match the names recorded in the staged snapshot, and are
   staged with literal pathspecs so they join the baseline commit.
-- Apply is split in the opposite direction:
-  - `gitstage.PrepareApply` creates an incremental bundle in the isolated
-    environment.
-  - `gitstage.ImportApply` verifies and imports it on the Mac.
-- Apply creates only `refs/heads/pisafe/<run>` with a compare-and-swap
-  `git update-ref`; it does not change the current branch, index, or working
-  tree.
+- Apply is split in the opposite direction and journaled across repositories:
+  - `gitstage.PrepareApply` commits whatever the agent left uncommitted, in
+    the submodules first so the superproject records where they ended up, and
+    creates one incremental bundle per changed repository.
+  - `gitstage.ImportApply` verifies and fetches every object set into
+    temporary refs on the Mac before anything user-visible changes, then
+    returns the journal of intended refs.
+  - `gitstage.CommitApply` executes that journal one repository at a time and
+    `gitstage.RollbackApply` undoes a partial one.
+- Apply creates only `refs/heads/pisafe/<run>`, in the superproject and in
+  each changed submodule, with compare-and-swap `git update-ref`; it does not
+  change any current branch, index, or working tree. Submodule refs are
+  created first, so an interruption can leave commits reachable but never a
+  branch whose gitlinks are not.
+- The journal is idempotent: a ref already holding the recorded commit is a
+  completed step, and a ref holding anything else stops with
+  `ErrApplyNeedsReconciliation` rather than overwriting a change made
+  meanwhile. Rollback deletes only refs that still hold what apply wrote.
+- The result reports which commit the imported branch expects in each
+  submodule and which branch keeps it reachable.
 - Initialized submodules are staged with the superproject: each one
   contributes its own bundle and tracked-state patch, is reconstructed in the
   run, absorbs its git directory, and is registered from `.gitmodules`. Its
@@ -368,7 +381,7 @@ pisafe-guest  60.0%
 broker        96.2%
 chatgpt       70.1%
 cli           24.2%
-gitstage      76.5%
+gitstage      78.0%
 hostnet       50.0%
 lima          68.9%
 runcontainer  66.7%
@@ -402,6 +415,16 @@ missing, outside, escaping-symlink, special, and whole-repository selections;
 the per-file size limit; archive entries that climb, are absolute, name
 `.git`, or are devices; a snapshot/archive name mismatch; and the whole-word
 secret matcher.
+
+Submodule staging and journaled apply are covered against real repositories:
+reconstruction of an initialized submodule with dirty state in both
+repositories, an uninitialized submodule left alone, refusal of nested
+submodules and of Git LFS inside a submodule, mismatched submodule artifacts,
+path-escape refusal, import of submodule history with the superproject
+gitlink resolving to exactly the imported commit, an unchanged submodule
+getting no branch, journal replay as a no-op, a contested ref stopping for
+reconciliation instead of being overwritten, and rollback removing only the
+refs apply created.
 
 The generated YAML is checked by the installed Lima validator in the normal
 test suite.
@@ -608,11 +631,11 @@ sandboxed result.
   Fully automatic first-launch remains intentionally absent because Zed's CLI
   URL cannot carry `-F` and PiSafe does not silently edit global SSH or Zed
   settings.
-- Journaled multi-repository apply is missing: a run of a repository with
-  submodules stages and materializes correctly, but `ImportApply` still
-  updates only the superproject ref, so applying such a run would create a
-  branch whose gitlinks name commits the Mac does not have. `apply` is not
-  exposed as a command yet, so this is not reachable from the CLI.
+- Apply is complete as a library but is not wired to a command: nothing yet
+  streams the apply bundles out of a run, persists the journal in the run
+  manifest, or exposes `pisafe apply`. Until the journal is persisted, an
+  apply interrupted between ref updates can be replayed only within the same
+  process.
 - Login, the Keychain round trip, and the real Codex handshake are
   live-verified, but broker-side token refresh has only ever run against a
   stub: the live session never crossed an access-token expiry. The first
@@ -642,10 +665,9 @@ sandboxed result.
 
 Continue Phase 1 without weakening the boundary:
 
-1. Add journaled multi-repository apply before exposing `pisafe apply`:
-   import the submodule histories, record the intended old/new refs in the run
-   manifest, and update them one repository at a time with compare-and-swap
-   recovery.
+1. Expose `pisafe apply`: stream the apply bundles out of the run, persist the
+   journal in the run manifest before the first ref moves, replay or roll it
+   back on restart, and mark the run imported only when every ref matches.
 2. Add `diff`, hardened `cp`, and seven-day GC after the apply transaction is
    durable.
 

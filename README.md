@@ -18,8 +18,9 @@ The implementation now contains:
   ignored inputs, which are validated, archived, and committed into that same
   baseline while credential-shaped names require an unsafe override;
 - final tracked-state capture;
-- split apply preparation/import, with SHA-256 verification and a
-  compare-and-swap update of a new `pisafe/<run>` branch; and
+- split apply preparation/import, with SHA-256 verification and a journaled,
+  idempotent compare-and-swap creation of a new `pisafe/<run>` branch in the
+  superproject and in each changed submodule; and
 - tests proving workspace deletion and apply do not modify the source checkout.
 
 The Lima backend now also generates and manages a dedicated plain-mode Fedora
