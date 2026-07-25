@@ -444,7 +444,7 @@ Run that end-to-end test with:
 
 ```sh
 PISAFE_LIVE_LIMA=1 \
-PISAFE_LIVE_RUN_IMAGE=sha256:e59b19d389e020ae7cfb6ab2dadff405cdbb0d36b1200891a17baa694dc1ca83 \
+PISAFE_LIVE_RUN_IMAGE=sha256:cfd452f96a7948fbf964d6870dad57dc81da3b82393d731bf701736c0092243a \
 go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
 ```
 
@@ -453,11 +453,11 @@ go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
 A persistent Lima instance named `pisafe` was left running with security
 profile
 `sha256:35c2cd370359201ce6861c91bc7fb25d8ada1497cf1db2d29c0017eea7e1f459`.
-It contains no project runs or user data, only cached base/test images plus
-the `localhost/pisafe-run:managed-c19b15ec50196653` image
-(`sha256:e59b19d389e020ae7cfb6ab2dadff405cdbb0d36b1200891a17baa694dc1ca83`;
-the recipe digest moved because the guest helper gained
-`configure-inference`).
+It contains cached base/test images plus the current managed run image
+`sha256:cfd452f96a7948fbf964d6870dad57dc81da3b82393d731bf701736c0092243a`.
+The recipe digest last moved when the guest helper began pinning Pi's
+transport; two consecutive runs built it once and reused it, which live-checks
+content-addressed reuse.
 
 The broker-relay slice is fully live-verified against this VM. The first
 live run of the relay tests failed: sshd bound `192.0.2.1:18080` correctly,
@@ -470,17 +470,39 @@ suites passed, including `TestLiveBrokerReverseRelay`,
 `TestLiveSecondRelayFailsClosed`, and the end-to-end staging test above.
 
 The brokered inference chain was then verified with the real CLI against a
-loopback stub upstream (no provider key was available; the provider config
-deliberately accepts loopback HTTP for this): `pisafe run` installed a
+loopback stub upstream, configured through the interim environment provider
+that the ChatGPT login has since replaced: `pisafe run` installed a
 correct `models.json`, and from inside the run container, requests through
 `http://192.0.2.1:18080` traversed pasta, the firewall, the reverse forward,
 and broker capability auth to reach the stub carrying the upstream key —
 plain JSON and streamed SSE both intact. A wrong capability got 401, a
 non-canonical path 404, the capability replayed after `pisafe stop` got 401,
 and `pisafe resume` rotated the capability, after which the new one worked
-inside the recreated container. Only the real provider handshake remains
-untested until `pisafe login` exists. The scratch run was discarded; no
-containers remain.
+inside the recreated container. The scratch run was discarded; no containers
+remain.
+
+The ChatGPT subscription slice was then verified against the real provider on
+the same VM. `pisafe login chatgpt` completed the browser OAuth flow and stored
+the credential in the Keychain, `pisafe broker` passed its startup credential
+check and reported the Codex upstream, and a run created afterwards drove real
+Pi conversations through the relay. Inspection of that run confirmed the
+intended contract end to end:
+
+- `settings.json` carries `"transport": "sse"` merged with the settings Pi
+  itself wrote during the session (theme, default provider/model, thinking
+  level), so the pin neither blocks nor discards Pi's own state;
+- `models.json` exposes only the curated catalog under provider `pisafe` with
+  `baseUrl` `http://192.0.2.1:18080` and `api` `openai-codex-responses`, and no
+  per-model routing override;
+- its `apiKey` is the unsigned-JWT wrapper whose payload carries the
+  placeholder account id `pisafe` and whose signature segment is the run-scoped
+  capability, and Pi's Codex client accepted it;
+- the session record shows four assistant turns served entirely by provider
+  `pisafe`, across two catalog models (`gpt-5.6-terra` and `gpt-5.6-luna`), so
+  model selection works through the relay; and
+- the run holds no provider credential: Pi's `auth.json` is `{}`, no
+  OpenAI/ChatGPT environment variable exists in the container, and the real
+  access token and account id appear only on the broker's upstream request.
 
 Everything below was first verified against profile
 `sha256:6a9c31943325290e23272c7c95af4ae80df8c94718c3ed8ec5e1824efbfcc927`
@@ -558,10 +580,10 @@ sandboxed result.
   settings.
 - Selected untracked/ignored input archive handling is missing.
 - Submodule staging and journaled multi-repository apply are missing.
-- The relay and capability are live-verified against a loopback stub
-  upstream, but the ChatGPT login flow, Keychain persistence, token refresh,
-  and the real Codex handshake are covered only by unit tests against stubs;
-  none of it has run against the real provider yet.
+- Login, the Keychain round trip, and the real Codex handshake are
+  live-verified, but broker-side token refresh has only ever run against a
+  stub: the live session never crossed an access-token expiry. The first
+  long-lived broker will exercise it.
 - The OAuth flow and the embedded model catalog mirror the pinned Pi AI
   0.82.0 client; both must be re-checked whenever the Pi pin moves, and the
   subscription backend can change underneath them (inference then fails
@@ -587,15 +609,10 @@ sandboxed result.
 
 Continue Phase 1 without weakening the boundary:
 
-1. Live-verify the ChatGPT slice end to end with a real subscription:
-   `pisafe login chatgpt`, broker startup credential check, and a run whose
-   Pi answers through the Codex relay. This doubles as the first
-   real-upstream inference test. The guest helper changed (settings pin), so
-   the next `pisafe run` builds a new managed image; the e2e test command
-   above then needs its new immutable ID.
-2. Then add selected untracked inputs and submodule-aware journaled apply
-   before exposing `pisafe apply`.
-3. Add `diff`, hardened `cp`, and seven-day GC after the apply transaction is
+1. Add selected untracked inputs and submodule-aware journaled apply before
+   exposing `pisafe apply`. This is the last piece that keeps work done inside
+   a run from returning to the Mac checkout safely.
+2. Add `diff`, hardened `cp`, and seven-day GC after the apply transaction is
    durable.
 
 ## Useful references
