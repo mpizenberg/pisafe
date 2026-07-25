@@ -12,6 +12,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/runid"
@@ -34,6 +37,7 @@ type Snapshot struct {
 	SourceHead     string    `json:"source_head"`
 	WorkRef        string    `json:"work_ref"`
 	BaselineCommit string    `json:"baseline_commit,omitempty"`
+	Inputs         []string  `json:"inputs,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 }
 
@@ -49,6 +53,16 @@ type PreparedStage struct {
 	Snapshot   Snapshot
 	BundlePath string
 	PatchPath  string
+	InputsPath string
+}
+
+// PrepareRequest describes one staging operation. Selected inputs are the only
+// source content that is copied rather than derived from Git history.
+type PrepareRequest struct {
+	SourcePath string
+	PackageDir string
+	RunID      string
+	Inputs     InputSelection
 }
 
 type ExcludedInputs struct {
@@ -95,10 +109,12 @@ func ListExcludedInputs(ctx context.Context, sourcePath string) (ExcludedInputs,
 	}, nil
 }
 
-// Prepare creates the only two source artifacts that cross the VM boundary:
-// a Git bundle rooted at HEAD and a binary patch of the final tracked state.
-// packageDir must not already exist.
-func Prepare(ctx context.Context, sourcePath, packageDir, runID string) (prepared PreparedStage, err error) {
+// Prepare creates the source artifacts that cross the VM boundary: a Git
+// bundle rooted at HEAD, a binary patch of the final tracked state, and an
+// archive of any explicitly selected untracked inputs. PackageDir must not
+// already exist.
+func Prepare(ctx context.Context, request PrepareRequest) (prepared PreparedStage, err error) {
+	runID, packageDir := request.RunID, request.PackageDir
 	if err := runid.Validate(runID); err != nil {
 		return PreparedStage{}, err
 	}
@@ -109,7 +125,11 @@ func Prepare(ctx context.Context, sourcePath, packageDir, runID string) (prepare
 		return PreparedStage{}, fmt.Errorf("inspect stage package: %w", err)
 	}
 
-	root, err := RepositoryRoot(ctx, sourcePath)
+	root, err := RepositoryRoot(ctx, request.SourcePath)
+	if err != nil {
+		return PreparedStage{}, err
+	}
+	inputs, err := selectInputEntries(ctx, root, request.Inputs)
 	if err != nil {
 		return PreparedStage{}, err
 	}
@@ -158,11 +178,24 @@ func Prepare(ctx context.Context, sourcePath, packageDir, runID string) (prepare
 		return PreparedStage{}, fmt.Errorf("write tracked patch: %w", err)
 	}
 
+	inputsPath := ""
+	names := make([]string, 0, len(inputs))
+	if len(inputs) != 0 {
+		inputsPath = filepath.Join(packageDir, inputsArchiveName)
+		if err := writeInputsArchive(root, inputsPath, inputs); err != nil {
+			return PreparedStage{}, err
+		}
+		for _, entry := range inputs {
+			names = append(names, entry.path)
+		}
+	}
+
 	snapshot := Snapshot{
 		RunID:      runID,
 		SourceRoot: root,
 		SourceHead: head,
 		WorkRef:    "refs/heads/work/" + runID,
+		Inputs:     names,
 		CreatedAt:  time.Now().UTC(),
 	}
 	complete = true
@@ -170,6 +203,7 @@ func Prepare(ctx context.Context, sourcePath, packageDir, runID string) (prepare
 		Snapshot:   snapshot,
 		BundlePath: bundlePath,
 		PatchPath:  patchPath,
+		InputsPath: inputsPath,
 	}, nil
 }
 
@@ -228,11 +262,17 @@ func Materialize(ctx context.Context, prepared PreparedStage, workspace string) 
 		return Snapshot{}, fmt.Errorf("read tracked patch: %w", err)
 	}
 
-	baseline := ""
 	if len(patch) != 0 {
 		if err := gitRun(ctx, workspace, bytes.NewReader(patch), nil, "apply", "--index", "--binary", "-"); err != nil {
 			return Snapshot{}, fmt.Errorf("apply tracked baseline: %w", err)
 		}
+	}
+	if err := restoreInputs(ctx, prepared, workspace); err != nil {
+		return Snapshot{}, err
+	}
+
+	baseline := ""
+	if len(patch) != 0 || len(prepared.Snapshot.Inputs) != 0 {
 		if err := commit(ctx, workspace, baselineMessage); err != nil {
 			return Snapshot{}, fmt.Errorf("commit tracked baseline: %w", err)
 		}
@@ -251,7 +291,7 @@ func Materialize(ctx context.Context, prepared PreparedStage, workspace string) 
 // Stage is a local composition of Prepare and Materialize, primarily useful
 // in tests. The controller uses the two operations separately with an SSH
 // transfer between them.
-func Stage(ctx context.Context, sourcePath, workspace, runID string) (Snapshot, error) {
+func Stage(ctx context.Context, request PrepareRequest, workspace string) (Snapshot, error) {
 	packageDir, err := os.MkdirTemp(filepath.Dir(workspace), ".pisafe-stage-package-*")
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("reserve stage package path: %w", err)
@@ -261,7 +301,8 @@ func Stage(ctx context.Context, sourcePath, workspace, runID string) (Snapshot, 
 	}
 	defer os.RemoveAll(packageDir)
 
-	prepared, err := Prepare(ctx, sourcePath, packageDir, runID)
+	request.PackageDir = packageDir
+	prepared, err := Prepare(ctx, request)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -299,6 +340,51 @@ func FinalizeTracked(ctx context.Context, workspace string) (commitID string, un
 		return "", nil, fmt.Errorf("resolve final commit: %w", err)
 	}
 	return commitID, untracked, nil
+}
+
+// restoreInputs unpacks and stages the selected inputs so they join the
+// baseline commit. The snapshot, not the archive, decides what belongs in the
+// run: an archive naming anything else is refused.
+func restoreInputs(ctx context.Context, prepared PreparedStage, workspace string) error {
+	expected := prepared.Snapshot.Inputs
+	if len(expected) == 0 {
+		return nil
+	}
+	if prepared.InputsPath == "" {
+		return errors.New("staged snapshot lists inputs but no archive was transferred")
+	}
+	extracted, err := extractInputs(prepared.InputsPath, workspace)
+	if err != nil {
+		return err
+	}
+	if !sameNames(expected, extracted) {
+		return errors.New("input archive does not match the staged snapshot")
+	}
+	// Selected inputs are untracked, and may be ignored, so staging them needs
+	// an explicit override. The literal prefix keeps a file name that happens
+	// to look like pathspec magic from changing what is staged.
+	pathspecs := make([]string, 0, len(extracted))
+	for _, name := range extracted {
+		pathspecs = append(pathspecs, ":(literal)"+name)
+	}
+	if err := gitRun(
+		ctx,
+		workspace,
+		strings.NewReader(strings.Join(pathspecs, "\x00")),
+		nil,
+		"add", "--force", "--pathspec-from-file=-", "--pathspec-file-nul",
+	); err != nil {
+		return fmt.Errorf("stage selected inputs: %w", err)
+	}
+	return nil
+}
+
+func sameNames(first, second []string) bool {
+	left := append([]string(nil), first...)
+	right := append([]string(nil), second...)
+	sort.Strings(left)
+	sort.Strings(right)
+	return slices.Equal(left, right)
 }
 
 func rejectGitlinks(ctx context.Context, root string) error {

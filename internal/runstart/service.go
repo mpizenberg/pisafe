@@ -36,6 +36,7 @@ type Controller interface {
 type Result struct {
 	Manifest runstate.Manifest
 	Excluded gitstage.ExcludedInputs
+	Included []string
 	Image    runimage.Result
 }
 
@@ -48,7 +49,8 @@ type Service struct {
 	newRunID       func(string, time.Time) (string, error)
 	repositoryRoot func(context.Context, string) (string, error)
 	listExcluded   func(context.Context, string) (gitstage.ExcludedInputs, error)
-	prepare        func(context.Context, string, string, string) (gitstage.PreparedStage, error)
+	selectInputs   func(context.Context, string, gitstage.InputSelection) ([]string, error)
+	prepare        func(context.Context, gitstage.PrepareRequest) (gitstage.PreparedStage, error)
 }
 
 func New(
@@ -66,6 +68,7 @@ func New(
 		newRunID:       runid.New,
 		repositoryRoot: gitstage.RepositoryRoot,
 		listExcluded:   gitstage.ListExcludedInputs,
+		selectInputs:   gitstage.SelectInputs,
 		prepare:        gitstage.Prepare,
 	}
 }
@@ -74,6 +77,7 @@ func (service Service) Start(
 	ctx context.Context,
 	sourcePath string,
 	hostPrefixes []netip.Prefix,
+	inputs gitstage.InputSelection,
 ) (Result, error) {
 	if service.boundary == nil || service.installer == nil || service.controller == nil {
 		return Result{}, fmt.Errorf("run-start dependencies are required")
@@ -87,6 +91,16 @@ func (service Service) Start(
 	if err != nil {
 		return Result{}, err
 	}
+	excluded, err := service.listExcluded(ctx, root)
+	if err != nil {
+		return Result{}, err
+	}
+	// Reject an unselectable or credential-shaped input before the slow
+	// boundary and image work, not after it.
+	included, err := service.selectInputs(ctx, root, inputs)
+	if err != nil {
+		return Result{}, err
+	}
 	if err := service.boundary.Ensure(ctx, hostPrefixes); err != nil {
 		return Result{}, fmt.Errorf("prepare Lima boundary: %w", err)
 	}
@@ -94,18 +108,18 @@ func (service Service) Start(
 	if err != nil {
 		return Result{}, fmt.Errorf("install managed run image: %w", err)
 	}
-	excluded, err := service.listExcluded(ctx, root)
-	if err != nil {
-		return Result{}, err
-	}
 
 	temporary, err := os.MkdirTemp("", "pisafe-stage-*")
 	if err != nil {
 		return Result{}, fmt.Errorf("create temporary stage directory: %w", err)
 	}
 	defer os.RemoveAll(temporary)
-	packagePath := filepath.Join(temporary, "package")
-	prepared, err := service.prepare(ctx, root, packagePath, runID)
+	prepared, err := service.prepare(ctx, gitstage.PrepareRequest{
+		SourcePath: root,
+		PackageDir: filepath.Join(temporary, "package"),
+		RunID:      runID,
+		Inputs:     inputs,
+	})
 	if err != nil {
 		return Result{}, err
 	}
@@ -120,7 +134,33 @@ func (service Service) Start(
 	}
 	return Result{
 		Manifest: manifest,
-		Excluded: excluded,
+		Excluded: withoutIncluded(excluded, included),
+		Included: included,
 		Image:    image,
 	}, nil
+}
+
+// withoutIncluded keeps the excluded report honest: a selected input is no
+// longer excluded from the run.
+func withoutIncluded(excluded gitstage.ExcludedInputs, included []string) gitstage.ExcludedInputs {
+	if len(included) == 0 {
+		return excluded
+	}
+	selected := make(map[string]bool, len(included))
+	for _, name := range included {
+		selected[name] = true
+	}
+	remaining := func(names []string) []string {
+		kept := make([]string, 0, len(names))
+		for _, name := range names {
+			if !selected[name] {
+				kept = append(kept, name)
+			}
+		}
+		return kept
+	}
+	return gitstage.ExcludedInputs{
+		Untracked: remaining(excluded.Untracked),
+		Ignored:   remaining(excluded.Ignored),
+	}
 }

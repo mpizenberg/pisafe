@@ -2,6 +2,7 @@ package runstart
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"path/filepath"
 	"strings"
@@ -17,15 +18,18 @@ const testImageID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
 type fakeBoundary struct {
 	prefixes []netip.Prefix
+	called   bool
 }
 
 func (boundary *fakeBoundary) Ensure(_ context.Context, prefixes []netip.Prefix) error {
 	boundary.prefixes = append([]netip.Prefix(nil), prefixes...)
+	boundary.called = true
 	return nil
 }
 
 type fakeInstaller struct {
 	artifacts runimage.Artifacts
+	called    bool
 }
 
 func (installer *fakeInstaller) Ensure(
@@ -33,6 +37,7 @@ func (installer *fakeInstaller) Ensure(
 	artifacts runimage.Artifacts,
 ) (runimage.Result, error) {
 	installer.artifacts = artifacts
+	installer.called = true
 	return runimage.Result{ImageID: testImageID}, nil
 }
 
@@ -89,26 +94,29 @@ func TestStartComposesBoundaryImageStageAndController(t *testing.T) {
 	}
 	service.prepare = func(
 		_ context.Context,
-		root string,
-		packagePath string,
-		runID string,
+		request gitstage.PrepareRequest,
 	) (gitstage.PreparedStage, error) {
-		if root != "/Users/alice/My Project" {
-			t.Fatalf("root = %q", root)
+		if request.SourcePath != "/Users/alice/My Project" {
+			t.Fatalf("root = %q", request.SourcePath)
 		}
-		if filepath.Base(packagePath) != "package" {
-			t.Fatalf("package path = %q", packagePath)
+		if filepath.Base(request.PackageDir) != "package" {
+			t.Fatalf("package path = %q", request.PackageDir)
 		}
 		return gitstage.PreparedStage{
 			Snapshot: gitstage.Snapshot{
-				RunID:      runID,
-				SourceRoot: root,
+				RunID:      request.RunID,
+				SourceRoot: request.SourcePath,
 			},
 		}, nil
 	}
 	prefixes := []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")}
 
-	result, err := service.Start(context.Background(), ".", prefixes)
+	result, err := service.Start(
+		context.Background(),
+		".",
+		prefixes,
+		gitstage.InputSelection{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,5 +137,99 @@ func TestStartComposesBoundaryImageStageAndController(t *testing.T) {
 	if strings.Join(result.Excluded.Untracked, ",") != "local.txt" ||
 		strings.Join(result.Excluded.Ignored, ",") != "build/output" {
 		t.Fatalf("excluded = %#v", result.Excluded)
+	}
+}
+
+func TestStartReportsSelectedInputsAndDropsThemFromExclusions(t *testing.T) {
+	boundary := &fakeBoundary{}
+	installer := &fakeInstaller{}
+	controller := &fakeController{}
+	service := New(boundary, installer, controller, runimage.Artifacts{})
+	service.newRunID = func(project string, _ time.Time) (string, error) {
+		return project + "-run", nil
+	}
+	service.repositoryRoot = func(context.Context, string) (string, error) {
+		return "/Users/alice/project", nil
+	}
+	service.listExcluded = func(context.Context, string) (gitstage.ExcludedInputs, error) {
+		return gitstage.ExcludedInputs{
+			Untracked: []string{"notes.txt", "keep-out.txt"},
+			Ignored:   []string{"build/artifact.bin"},
+		}, nil
+	}
+	var selected gitstage.InputSelection
+	service.selectInputs = func(
+		_ context.Context,
+		_ string,
+		selection gitstage.InputSelection,
+	) ([]string, error) {
+		selected = selection
+		return []string{"build/artifact.bin", "notes.txt"}, nil
+	}
+	service.prepare = func(
+		_ context.Context,
+		request gitstage.PrepareRequest,
+	) (gitstage.PreparedStage, error) {
+		if len(request.Inputs.Include) != 1 {
+			t.Fatalf("prepare inputs = %#v", request.Inputs)
+		}
+		return gitstage.PreparedStage{
+			Snapshot: gitstage.Snapshot{RunID: request.RunID},
+		}, nil
+	}
+
+	result, err := service.Start(
+		context.Background(),
+		".",
+		nil,
+		gitstage.InputSelection{Include: []string{"notes.txt"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(selected.Include, ",") != "notes.txt" {
+		t.Fatalf("selection = %#v", selected)
+	}
+	if strings.Join(result.Included, ",") != "build/artifact.bin,notes.txt" {
+		t.Fatalf("included = %#v", result.Included)
+	}
+	if strings.Join(result.Excluded.Untracked, ",") != "keep-out.txt" ||
+		len(result.Excluded.Ignored) != 0 {
+		t.Fatalf("excluded = %#v", result.Excluded)
+	}
+}
+
+func TestStartRejectsBadSelectionBeforeTouchingTheBoundary(t *testing.T) {
+	boundary := &fakeBoundary{}
+	installer := &fakeInstaller{}
+	service := New(boundary, installer, &fakeController{}, runimage.Artifacts{})
+	service.newRunID = func(project string, _ time.Time) (string, error) {
+		return project + "-run", nil
+	}
+	service.repositoryRoot = func(context.Context, string) (string, error) {
+		return "/Users/alice/project", nil
+	}
+	service.listExcluded = func(context.Context, string) (gitstage.ExcludedInputs, error) {
+		return gitstage.ExcludedInputs{}, nil
+	}
+	service.selectInputs = func(
+		context.Context,
+		string,
+		gitstage.InputSelection,
+	) ([]string, error) {
+		return nil, errors.New("looks like a credential")
+	}
+
+	_, err := service.Start(
+		context.Background(),
+		".",
+		nil,
+		gitstage.InputSelection{Include: []string{".env"}},
+	)
+	if err == nil || !strings.Contains(err.Error(), "credential") {
+		t.Fatalf("err = %v", err)
+	}
+	if boundary.called || installer.called {
+		t.Fatal("a rejected selection still prepared the VM")
 	}
 }

@@ -206,6 +206,7 @@ func materialize(
 		Snapshot:   snapshot,
 		BundlePath: filepath.Join(stageDirectory, "source.bundle"),
 		PatchPath:  filepath.Join(stageDirectory, "tracked.patch"),
+		InputsPath: filepath.Join(stageDirectory, "inputs.tar"),
 	}, workspace)
 	if err != nil {
 		return err

@@ -24,10 +24,7 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 
 	switch args[0] {
 	case "run":
-		if len(args) != 1 {
-			return errUsage
-		}
-		return runCreate(ctx, out)
+		return runCreate(ctx, args[1:], out)
 	case "login":
 		if len(args) != 2 {
 			return fmt.Errorf("login requires a provider: pisafe login chatgpt")
@@ -85,7 +82,11 @@ func printHelp(out io.Writer) {
 	fmt.Fprintln(out, `pisafe isolates coding-agent runs from the original checkout.
 
 Usage:
-  pisafe run       Create an isolated run from the current Git repository
+  pisafe run [--include PATH]... [--include-unsafe PATH]...
+                   Create an isolated run from the current Git repository.
+                   Untracked and ignored files stay out unless --include names
+                   them; a credential-shaped path needs --include-unsafe,
+                   which voids the run's credential isolation.
   pisafe stop RUN  Stop a run while preserving its workspace
   pisafe resume RUN
                    Resume a stopped run

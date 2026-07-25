@@ -15,7 +15,7 @@ func TestStageCleanRepositoryIsIndependent(t *testing.T) {
 	source := newRepository(t)
 	workspace := filepath.Join(t.TempDir(), "workspace")
 
-	snapshot, err := Stage(ctx, source, workspace, "clean-run")
+	snapshot, err := Stage(ctx, PrepareRequest{SourcePath: source, RunID: "clean-run"}, workspace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestStageCapturesFinalTrackedBaseline(t *testing.T) {
 	mustWrite(t, filepath.Join(source, "untracked.txt"), "excluded\n")
 
 	workspace := filepath.Join(t.TempDir(), "workspace")
-	snapshot, err := Stage(ctx, source, workspace, "dirty-run")
+	snapshot, err := Stage(ctx, PrepareRequest{SourcePath: source, RunID: "dirty-run"}, workspace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,11 @@ func TestMaterializeDoesNotAccessSourceCheckout(t *testing.T) {
 	mustWrite(t, filepath.Join(source, "tracked.txt"), "prepared state\n")
 
 	packageDir := filepath.Join(t.TempDir(), "package")
-	prepared, err := Prepare(ctx, source, packageDir, "boundary-run")
+	prepared, err := Prepare(ctx, PrepareRequest{
+		SourcePath: source,
+		PackageDir: packageDir,
+		RunID:      "boundary-run",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +99,7 @@ func TestApplyCreatesBranchWithoutChangingCheckout(t *testing.T) {
 	statusBefore := runGit(t, source, "status", "--porcelain=v1", "--untracked-files=all")
 
 	workspace := filepath.Join(t.TempDir(), "workspace")
-	snapshot, err := Stage(ctx, source, workspace, "apply-run")
+	snapshot, err := Stage(ctx, PrepareRequest{SourcePath: source, RunID: "apply-run"}, workspace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +147,7 @@ func TestImportRejectsTamperedApplyBundle(t *testing.T) {
 	ctx := context.Background()
 	source := newRepository(t)
 	workspace := filepath.Join(t.TempDir(), "workspace")
-	snapshot, err := Stage(ctx, source, workspace, "tampered-run")
+	snapshot, err := Stage(ctx, PrepareRequest{SourcePath: source, RunID: "tampered-run"}, workspace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +191,11 @@ func TestStageRejectsSubmodulesUntilJournaledApplyExists(t *testing.T) {
 	)
 	runGit(t, source, "commit", "-qm", "add submodule")
 
-	_, err := Stage(ctx, source, filepath.Join(t.TempDir(), "workspace"), "submodule-run")
+	_, err := Stage(
+		ctx,
+		PrepareRequest{SourcePath: source, RunID: "submodule-run"},
+		filepath.Join(t.TempDir(), "workspace"),
+	)
 	if !errors.Is(err, ErrSubmodulesNotReady) {
 		t.Fatalf("Stage error = %v, want ErrSubmodulesNotReady", err)
 	}
@@ -201,7 +209,11 @@ func TestStageRejectsGitLFS(t *testing.T) {
 	runGit(t, source, "add", ".gitattributes", "asset.bin")
 	runGit(t, source, "commit", "-qm", "add LFS path")
 
-	_, err := Stage(ctx, source, filepath.Join(t.TempDir(), "workspace"), "lfs-run")
+	_, err := Stage(
+		ctx,
+		PrepareRequest{SourcePath: source, RunID: "lfs-run"},
+		filepath.Join(t.TempDir(), "workspace"),
+	)
 	if !errors.Is(err, ErrLFSNotSupported) {
 		t.Fatalf("Stage error = %v, want ErrLFSNotSupported", err)
 	}
@@ -211,7 +223,7 @@ func TestFinalizeReportsUnusualUntrackedNames(t *testing.T) {
 	ctx := context.Background()
 	source := newRepository(t)
 	workspace := filepath.Join(t.TempDir(), "workspace")
-	if _, err := Stage(ctx, source, workspace, "names-run"); err != nil {
+	if _, err := Stage(ctx, PrepareRequest{SourcePath: source, RunID: "names-run"}, workspace); err != nil {
 		t.Fatal(err)
 	}
 	name := "line\nbreak.txt"
@@ -251,7 +263,11 @@ func TestListExcludedInputsSeparatesUntrackedAndIgnored(t *testing.T) {
 }
 
 func TestStageRejectsUnsafeRunID(t *testing.T) {
-	_, err := Stage(context.Background(), t.TempDir(), filepath.Join(t.TempDir(), "workspace"), "../escape")
+	_, err := Stage(
+		context.Background(),
+		PrepareRequest{SourcePath: t.TempDir(), RunID: "../escape"},
+		filepath.Join(t.TempDir(), "workspace"),
+	)
 	if err == nil || !strings.Contains(err.Error(), "invalid run ID") {
 		t.Fatalf("Stage error = %v", err)
 	}

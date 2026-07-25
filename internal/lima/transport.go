@@ -164,14 +164,21 @@ func (transport Transport) CreateStage(
 	}
 	snapshotJSON = append(snapshotJSON, '\n')
 
-	artifacts := []struct {
+	type stageArtifact struct {
 		name string
 		path string
 		data []byte
-	}{
+	}
+	artifacts := []stageArtifact{
 		{name: "source.bundle", path: prepared.BundlePath},
 		{name: "tracked.patch", path: prepared.PatchPath},
 		{name: "snapshot.json", data: snapshotJSON},
+	}
+	if prepared.InputsPath != "" {
+		artifacts = append(artifacts, stageArtifact{
+			name: "inputs.tar",
+			path: prepared.InputsPath,
+		})
 	}
 	for _, artifact := range artifacts {
 		if err := transport.uploadArtifact(ctx, runID, artifact.name, artifact.path, artifact.data); err != nil {
@@ -265,7 +272,9 @@ func (transport Transport) uploadArtifact(
 	path string,
 	data []byte,
 ) error {
-	if name != "source.bundle" && name != "tracked.patch" && name != "snapshot.json" {
+	switch name {
+	case "source.bundle", "tracked.patch", "snapshot.json", "inputs.tar":
+	default:
 		return fmt.Errorf("unsupported stage artifact %q", name)
 	}
 

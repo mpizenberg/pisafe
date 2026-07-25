@@ -23,9 +23,39 @@ import (
 
 const guestHelperEnvironment = "PISAFE_GUEST_HELPER"
 
-func runCreate(ctx context.Context, out io.Writer) error {
+// parseInputSelection reads the repeatable input flags. Credential-shaped
+// paths need the separate unsafe flag, so approving one can never be a typo.
+func parseInputSelection(args []string) (gitstage.InputSelection, error) {
+	selection := gitstage.InputSelection{}
+	for index := 0; index < len(args); index++ {
+		var target *[]string
+		switch args[index] {
+		case "--include":
+			target = &selection.Include
+		case "--include-unsafe":
+			target = &selection.Unsafe
+		default:
+			return gitstage.InputSelection{}, fmt.Errorf(
+				"unknown run option %q; expected --include PATH or --include-unsafe PATH",
+				args[index],
+			)
+		}
+		index++
+		if index == len(args) {
+			return gitstage.InputSelection{}, fmt.Errorf("%s requires a path", args[index-1])
+		}
+		*target = append(*target, args[index])
+	}
+	return selection, nil
+}
+
+func runCreate(ctx context.Context, args []string, out io.Writer) error {
 	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
 		return fmt.Errorf("pisafe run requires macOS on ARM64")
+	}
+	inputs, err := parseInputSelection(args)
+	if err != nil {
+		return err
 	}
 	guestPath, err := packagedGuestPath()
 	if err != nil {
@@ -66,7 +96,7 @@ func runCreate(ctx context.Context, out io.Writer) error {
 	)
 
 	fmt.Fprintln(out, "Preparing isolated run...")
-	result, err := service.Start(ctx, ".", prefixes)
+	result, err := service.Start(ctx, ".", prefixes, inputs)
 	if err != nil {
 		return err
 	}
@@ -117,6 +147,10 @@ func printRunResult(out io.Writer, result runstart.Result, inferenceConfigured b
 	if result.Manifest.Snapshot.BaselineCommit != "" {
 		fmt.Fprintln(out, "Baseline:  tracked working-tree changes were flattened into one commit")
 	}
+	if len(result.Included) != 0 {
+		fmt.Fprintf(out, "Included:  %d selected input file(s)\n", len(result.Included))
+		printNames(out, namedList{names: result.Included})
+	}
 	if len(result.Excluded.Untracked) != 0 || len(result.Excluded.Ignored) != 0 {
 		fmt.Fprintf(
 			out,
@@ -124,7 +158,11 @@ func printRunResult(out io.Writer, result runstart.Result, inferenceConfigured b
 			len(result.Excluded.Untracked),
 			len(result.Excluded.Ignored),
 		)
-		printExcludedNames(out, result.Excluded)
+		printNames(
+			out,
+			namedList{label: "untracked", names: result.Excluded.Untracked},
+			namedList{label: "ignored", names: result.Excluded.Ignored},
+		)
 	}
 	fmt.Fprintln(out, "Zed:      Remote Projects > Connect New Server, then paste the SSH command")
 	fmt.Fprintf(out, "           After that: pisafe zed %s\n", manifest.RunID)
@@ -136,23 +174,31 @@ func printRunResult(out io.Writer, result runstart.Result, inferenceConfigured b
 	return nil
 }
 
-func printExcludedNames(out io.Writer, excluded gitstage.ExcludedInputs) {
+type namedList struct {
+	label string
+	names []string
+}
+
+// printNames lists file names under a run summary line, keeping the output
+// short enough to read whatever the repository holds.
+func printNames(out io.Writer, lists ...namedList) {
 	const maximumNames = 12
+	total := 0
+	for _, list := range lists {
+		total += len(list.names)
+	}
 	printed := 0
-	for _, category := range []struct {
-		label string
-		names []string
-	}{
-		{label: "untracked", names: excluded.Untracked},
-		{label: "ignored", names: excluded.Ignored},
-	} {
-		for _, name := range category.names {
+	for _, list := range lists {
+		prefix := "           "
+		if list.label != "" {
+			prefix += list.label + " "
+		}
+		for _, name := range list.names {
 			if printed == maximumNames {
-				remaining := len(excluded.Untracked) + len(excluded.Ignored) - printed
-				fmt.Fprintf(out, "           ... and %d more\n", remaining)
+				fmt.Fprintf(out, "           ... and %d more\n", total-printed)
 				return
 			}
-			fmt.Fprintf(out, "           %s %q\n", category.label, name)
+			fmt.Fprintf(out, "%s%q\n", prefix, name)
 			printed++
 		}
 	}

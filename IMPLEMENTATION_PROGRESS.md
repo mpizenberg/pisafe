@@ -49,6 +49,17 @@ quota-backed VM storage. Do not add a local-workspace fallback.
     environment and never accesses the recorded Mac source path.
 - Dirty tracked state is flattened into a clearly labelled baseline commit.
 - Untracked files remain excluded and are reported at finalization.
+- Untracked or ignored inputs enter a run only when `pisafe run --include PATH`
+  names them. Selection resolves paths against the repository, expands
+  directories, and refuses anything Git tracks, anything outside the
+  repository, symlinks pointing out of it, special files, and selections over
+  the file-count or byte limits. Credential-shaped names need
+  `--include-unsafe PATH`; the message states that including one lets
+  everything in the run read and exfiltrate it.
+- Selected inputs travel as a tar beside the bundle and patch, are re-validated
+  on extraction (no absolute, climbing, or `.git` paths, no non-regular
+  entries), must match the names recorded in the staged snapshot, and are
+  staged with literal pathspecs so they join the baseline commit.
 - Apply is split in the opposite direction:
   - `gitstage.PrepareApply` creates an incremental bundle in the isolated
     environment.
@@ -60,8 +71,9 @@ quota-backed VM storage. Do not add a local-workspace fallback.
   repositories.
 - External diff and text-conversion drivers are disabled during host capture.
 - NUL-delimited parsing preserves unusual Git filenames.
-- User-facing staging reports untracked and ignored inputs separately and
-  excludes all of them. Output is safely quoted and capped to remain readable.
+- User-facing staging reports untracked and ignored inputs separately,
+  excludes everything not explicitly selected, and lists what was included.
+  Output is safely quoted and capped to remain readable.
 
 ### Host-network discovery
 
@@ -347,8 +359,8 @@ pisafe        0.0%
 pisafe-guest  59.9%
 broker        96.2%
 chatgpt       70.1%
-cli           19.1%
-gitstage      68.8%
+cli           24.2%
+gitstage      76.0%
 hostnet       50.0%
 lima          68.0%
 runcontainer  66.7%
@@ -356,7 +368,7 @@ runctl        67.6%
 runid         92.3%
 runimage      74.6%
 runssh        68.0%
-runstart      70.0%
+runstart      79.5%
 runstate      71.8%
 ```
 
@@ -372,6 +384,16 @@ covers the full login exchange and state rejection against a stub token
 endpoint, proactive refresh with persistence of the rotated refresh token,
 Keychain round-trips through a fake `security` runner, and the embedded
 catalog's no-routing-override invariant.
+
+Input selection is covered end to end against real repositories: a run whose
+baseline commit carries a selected untracked file, an ignored build artifact,
+an executable, and a symlink, leaving the staged workspace clean and the
+source untouched; refusal of credential-shaped names with and without the
+unsafe flag, including a directory that contains one; refusal of tracked,
+missing, outside, escaping-symlink, special, and whole-repository selections;
+the per-file size limit; archive entries that climb, are absolute, name
+`.git`, or are devices; a snapshot/archive name mismatch; and the whole-word
+secret matcher.
 
 The generated YAML is checked by the installed Lima validator in the normal
 test suite.
@@ -578,7 +600,6 @@ sandboxed result.
   Fully automatic first-launch remains intentionally absent because Zed's CLI
   URL cannot carry `-F` and PiSafe does not silently edit global SSH or Zed
   settings.
-- Selected untracked/ignored input archive handling is missing.
 - Submodule staging and journaled multi-repository apply are missing.
 - Login, the Keychain round trip, and the real Codex handshake are
   live-verified, but broker-side token refresh has only ever run against a
@@ -609,9 +630,9 @@ sandboxed result.
 
 Continue Phase 1 without weakening the boundary:
 
-1. Add selected untracked inputs and submodule-aware journaled apply before
-   exposing `pisafe apply`. This is the last piece that keeps work done inside
-   a run from returning to the Mac checkout safely.
+1. Add submodule-aware staging and journaled multi-repository apply before
+   exposing `pisafe apply`. Selected untracked inputs are done; submodules
+   still fail closed, and apply still updates exactly one ref.
 2. Add `diff`, hardened `cp`, and seven-day GC after the apply transaction is
    durable.
 

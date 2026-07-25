@@ -18,7 +18,11 @@ import (
 func TestMaterializeCommand(t *testing.T) {
 	source := initGuestTestRepository(t)
 	packageDirectory := filepath.Join(t.TempDir(), "stage")
-	prepared, err := gitstage.Prepare(context.Background(), source, packageDirectory, "guest-test")
+	prepared, err := gitstage.Prepare(context.Background(), gitstage.PrepareRequest{
+		SourcePath: source,
+		PackageDir: packageDirectory,
+		RunID:      "guest-test",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

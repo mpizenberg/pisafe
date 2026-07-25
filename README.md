@@ -14,7 +14,9 @@ The implementation now contains:
 - a split Git staging core: the Mac produces a bundle and tracked-state patch,
   while materialization happens after transfer inside the isolated
   environment;
-- tracked dirty-state baseline capture;
+- tracked dirty-state baseline capture, plus explicitly selected untracked or
+  ignored inputs, which are validated, archived, and committed into that same
+  baseline while credential-shaped names require an unsafe override;
 - final tracked-state capture;
 - split apply preparation/import, with SHA-256 verification and a
   compare-and-swap update of a new `pisafe/<run>` branch; and
@@ -70,7 +72,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
   -o pisafe-guest-linux-arm64 ./cmd/pisafe-guest
 ./pisafe doctor
 ./pisafe list
-./pisafe run
+./pisafe run [--include PATH]... [--include-unsafe PATH]...
 ./pisafe stop RUN
 ./pisafe resume RUN
 ./pisafe discard RUN --confirm RUN

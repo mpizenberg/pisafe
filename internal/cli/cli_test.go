@@ -68,6 +68,7 @@ func TestPrintRunResultShowsExactConnectionAndExclusions(t *testing.T) {
 			Untracked: []string{"local.txt"},
 			Ignored:   []string{"build/one", "build/two"},
 		},
+		Included: []string{"fixtures/sample.json"},
 	}
 	if err := printRunResult(&output, result, false); err != nil {
 		t.Fatal(err)
@@ -79,6 +80,8 @@ func TestPrintRunResultShowsExactConnectionAndExclusions(t *testing.T) {
 		"ssh -F '/Users/alice/Library/Application Support/pisafe/ssh.config' pisafe-project-run",
 		"tracked working-tree changes were flattened",
 		"1 untracked, 2 ignored",
+		"Included:  1 selected input file(s)",
+		`"fixtures/sample.json"`,
 		"pisafe zed project-run",
 		"inference unavailable",
 	} {
@@ -148,6 +151,31 @@ func TestDiscardRequiresExactRepeatedRunID(t *testing.T) {
 		err := Run(context.Background(), args, &output)
 		if err == nil || !strings.Contains(err.Error(), "confirm") {
 			t.Fatalf("Run(%v) error = %v", args, err)
+		}
+	}
+}
+
+func TestParseInputSelectionSeparatesUnsafeApproval(t *testing.T) {
+	selection, err := parseInputSelection([]string{
+		"--include", "notes.txt",
+		"--include-unsafe", ".env",
+		"--include", "fixtures",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(selection.Include, ",") != "notes.txt,fixtures" ||
+		strings.Join(selection.Unsafe, ",") != ".env" {
+		t.Fatalf("selection = %#v", selection)
+	}
+
+	for name, args := range map[string][]string{
+		"unknown option": {"--all"},
+		"missing path":   {"--include"},
+		"bare path":      {"notes.txt"},
+	} {
+		if _, err := parseInputSelection(args); err == nil {
+			t.Errorf("%s was accepted", name)
 		}
 	}
 }

@@ -830,6 +830,28 @@ The first usable release should prove:
   revisited when upstream VZ restart behavior or the supported host toolchain
   changes; changing it requires VM recreation.
 
+- Selected untracked inputs are chosen with repeatable `--include PATH` and
+  `--include-unsafe PATH` flags rather than an interactive picker. This
+  matches the existing non-interactive confirmation style of
+  `discard --confirm` and keeps `pisafe run` scriptable; a credential-shaped
+  name is refused by `--include` and needs the separate unsafe flag, so
+  approving one can never be a slip of the finger. An interactive selector can
+  be added later without changing the staging contract.
+- Selected inputs cross the boundary as an uncompressed tar beside the bundle
+  and patch, not as a second Git bundle or a synthesized commit on the Mac.
+  Reason: these files are by definition outside Git, tar carries the
+  executable bit and symlinks the run needs, and it reuses the existing
+  size- and SHA-256-verified upload path. The staged snapshot, not the
+  archive, decides which names are legitimate; a mismatch fails staging.
+- Credential-shaped names are matched on whole words (plus a fixed name and
+  extension list), so `tokenizer.json` is not flagged while `api_token.json`
+  is. The alternative, substring matching, produced false positives that would
+  have trained the user to reach for the unsafe flag by habit.
+- The selection is validated before the boundary and image work rather than
+  inside `Prepare`, so a typo or a refused credential fails in seconds instead
+  of after an image build. `Prepare` re-resolves the selection and remains the
+  authority.
+
 ## Primary references
 
 - Pi security: <https://pi.dev/docs/latest/security>

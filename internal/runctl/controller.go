@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -285,6 +286,7 @@ func decodeMaterializedSnapshot(
 		materialized.RunID != hostSnapshot.RunID ||
 		materialized.SourceHead != hostSnapshot.SourceHead ||
 		materialized.WorkRef != hostSnapshot.WorkRef ||
+		!slices.Equal(materialized.Inputs, hostSnapshot.Inputs) ||
 		!materialized.CreatedAt.Equal(hostSnapshot.CreatedAt) {
 		return gitstage.Snapshot{}, errors.New("materialized snapshot does not match prepared run")
 	}

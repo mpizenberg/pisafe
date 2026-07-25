@@ -29,7 +29,11 @@ func TestLiveSSHStageAndContainerMaterialize(t *testing.T) {
 	runID := "live-stage-" + time.Now().UTC().Format("20060102-150405")
 	source := initLiveRepository(t)
 	packageDirectory := filepath.Join(t.TempDir(), "stage")
-	prepared, err := gitstage.Prepare(ctx, source, packageDirectory, runID)
+	prepared, err := gitstage.Prepare(ctx, gitstage.PrepareRequest{
+		SourcePath: source,
+		PackageDir: packageDirectory,
+		RunID:      runID,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
