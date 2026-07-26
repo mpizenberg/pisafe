@@ -99,6 +99,49 @@ func TestPrintRunResultShowsExactConnectionAndExclusions(t *testing.T) {
 	}
 }
 
+func TestPrintApplyResultShowsTheImportedBranchAndWhatStayedBehind(t *testing.T) {
+	var output bytes.Buffer
+	printApplyResult(
+		&output,
+		runstate.Manifest{RunID: "project-run"},
+		gitstage.ApplyResult{
+			Branch:      "pisafe/project-run",
+			Tip:         strings.Repeat("a", 40),
+			FinalCommit: strings.Repeat("b", 40),
+			Untracked:   []string{"scratch.md"},
+			Submodules: []gitstage.AppliedSubmodule{
+				{Path: "dependency", Branch: "pisafe/project-run", Tip: strings.Repeat("c", 40)},
+				{Path: "vendor/quiet"},
+			},
+		},
+	)
+	for _, expected := range []string{
+		"Imported:  pisafe/project-run",
+		"Tip:       " + strings.Repeat("a", 40),
+		"Submodule: dependency imported as pisafe/project-run",
+		"Submodule: vendor/quiet unchanged",
+		"uncommitted tracked changes became one labelled commit",
+		"Left:      1 untracked file(s) stayed in the run",
+		`"scratch.md"`,
+		"git log pisafe/project-run",
+		"pisafe discard project-run",
+	} {
+		if !strings.Contains(output.String(), expected) {
+			t.Errorf("output lacks %q:\n%s", expected, output.String())
+		}
+	}
+}
+
+func TestApplyRequiresExactlyOneRun(t *testing.T) {
+	var output bytes.Buffer
+	for _, args := range [][]string{{"apply"}, {"apply", "run-123", "run-124"}} {
+		if err := Run(context.Background(), args, &output); err == nil ||
+			!strings.Contains(err.Error(), "usage") {
+			t.Fatalf("Run(%v) error = %v", args, err)
+		}
+	}
+}
+
 func TestPackagedGuestPathUsesExplicitOverride(t *testing.T) {
 	expected := filepath.Join(t.TempDir(), "guest")
 	t.Setenv(guestHelperEnvironment, expected)

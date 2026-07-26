@@ -13,7 +13,7 @@ import (
 )
 
 var errUsage = errors.New(
-	"usage: pisafe <run|stop|resume|discard|list|zed|login|broker|doctor|help>",
+	"usage: pisafe <run|stop|resume|apply|discard|list|zed|login|broker|doctor|help>",
 )
 
 func Run(ctx context.Context, args []string, out io.Writer) error {
@@ -60,6 +60,11 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 			return errUsage
 		}
 		return runResume(ctx, args[1], out)
+	case "apply":
+		if len(args) != 2 {
+			return errUsage
+		}
+		return runApply(ctx, args[1], out)
 	case "discard":
 		if len(args) != 4 || args[2] != "--confirm" {
 			return fmt.Errorf(
@@ -90,6 +95,10 @@ Usage:
   pisafe stop RUN  Stop a run while preserving its workspace
   pisafe resume RUN
                    Resume a stopped run
+  pisafe apply RUN
+                   Import a run's commits as the local branch pisafe/RUN.
+                   The run is stopped first and cannot be resumed afterwards;
+                   your checkout, index, and current branch are not touched.
   pisafe discard RUN --confirm RUN
                    Permanently delete one exact run workspace
   pisafe zed RUN   Open a configured run in Zed

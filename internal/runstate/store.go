@@ -54,27 +54,31 @@ const (
 )
 
 type Manifest struct {
-	Version              int               `json:"version"`
-	RunID                string            `json:"run_id"`
-	Project              string            `json:"project"`
-	State                State             `json:"state"`
-	Snapshot             gitstage.Snapshot `json:"snapshot"`
-	Image                string            `json:"image,omitempty"`
-	Container            string            `json:"container,omitempty"`
-	Workspace            string            `json:"workspace,omitempty"`
-	SSH                  *SSHConnection    `json:"ssh,omitempty"`
-	InferenceCapability  string            `json:"inference_capability,omitempty"`
-	ActiveLimitSeconds   int64             `json:"active_limit_seconds"`
-	ActiveElapsedSeconds int64             `json:"active_elapsed_seconds"`
-	ActiveStartedAt      *time.Time        `json:"active_started_at,omitempty"`
-	ActiveDeadline       *time.Time        `json:"active_deadline,omitempty"`
-	CreatedAt            time.Time         `json:"created_at"`
-	UpdatedAt            time.Time         `json:"updated_at"`
-	StoppedAt            *time.Time        `json:"stopped_at,omitempty"`
-	ImportedAt           *time.Time        `json:"imported_at,omitempty"`
-	DiscardedAt          *time.Time        `json:"discarded_at,omitempty"`
-	ImportedBranch       string            `json:"imported_branch,omitempty"`
-	LastError            string            `json:"last_error,omitempty"`
+	Version             int               `json:"version"`
+	RunID               string            `json:"run_id"`
+	Project             string            `json:"project"`
+	State               State             `json:"state"`
+	Snapshot            gitstage.Snapshot `json:"snapshot"`
+	Image               string            `json:"image,omitempty"`
+	Container           string            `json:"container,omitempty"`
+	Workspace           string            `json:"workspace,omitempty"`
+	SSH                 *SSHConnection    `json:"ssh,omitempty"`
+	InferenceCapability string            `json:"inference_capability,omitempty"`
+	// Apply is the plan of an import that has been verified but whose refs
+	// may not all have moved yet. It exists only between BeginApply and
+	// CompleteApply, and is what makes an interrupted apply replayable.
+	Apply                *gitstage.PlannedApply `json:"apply,omitempty"`
+	ActiveLimitSeconds   int64                  `json:"active_limit_seconds"`
+	ActiveElapsedSeconds int64                  `json:"active_elapsed_seconds"`
+	ActiveStartedAt      *time.Time             `json:"active_started_at,omitempty"`
+	ActiveDeadline       *time.Time             `json:"active_deadline,omitempty"`
+	CreatedAt            time.Time              `json:"created_at"`
+	UpdatedAt            time.Time              `json:"updated_at"`
+	StoppedAt            *time.Time             `json:"stopped_at,omitempty"`
+	ImportedAt           *time.Time             `json:"imported_at,omitempty"`
+	DiscardedAt          *time.Time             `json:"discarded_at,omitempty"`
+	ImportedBranch       string                 `json:"imported_branch,omitempty"`
+	LastError            string                 `json:"last_error,omitempty"`
 }
 
 type SSHConnection struct {
@@ -286,6 +290,56 @@ func (store Store) Discard(runID string) (Manifest, error) {
 	manifest.LastError = ""
 	manifest.UpdatedAt = now
 	manifest.DiscardedAt = &now
+	return store.replace(manifest)
+}
+
+// BeginApply records a verified import plan before any user-visible ref moves.
+// Every object the plan names is already in the local repositories, so the
+// recorded journal is enough to finish or inspect an interrupted apply.
+func (store Store) BeginApply(runID string, planned gitstage.PlannedApply) (Manifest, error) {
+	manifest, err := store.Get(runID)
+	if err != nil {
+		return Manifest{}, err
+	}
+	if manifest.State != StateStopped {
+		return Manifest{}, fmt.Errorf("run %q is %s, not stopped", runID, manifest.State)
+	}
+	if manifest.Apply != nil {
+		return Manifest{}, fmt.Errorf("run %q already has an apply in progress", runID)
+	}
+	if err := validateApplyPlan(runID, planned); err != nil {
+		return Manifest{}, err
+	}
+	manifest.Apply = &planned
+	manifest.LastError = ""
+	manifest.UpdatedAt = store.now().UTC()
+	return store.replace(manifest)
+}
+
+// CompleteApply marks a run imported. Callers reach it only once every ref in
+// the journal holds the commit the journal recorded.
+func (store Store) CompleteApply(runID string) (Manifest, error) {
+	manifest, err := store.Get(runID)
+	if err != nil {
+		return Manifest{}, err
+	}
+	if manifest.State != StateStopped {
+		return Manifest{}, fmt.Errorf(
+			"invalid run transition %q → %q",
+			manifest.State,
+			StateImported,
+		)
+	}
+	if manifest.Apply == nil {
+		return Manifest{}, fmt.Errorf("run %q has no apply in progress", runID)
+	}
+	now := store.now().UTC()
+	manifest.State = StateImported
+	manifest.ImportedBranch = manifest.Apply.Result.Branch
+	manifest.ImportedAt = &now
+	manifest.Apply = nil
+	manifest.LastError = ""
+	manifest.UpdatedAt = now
 	return store.replace(manifest)
 }
 
@@ -506,6 +560,18 @@ func validateStoredManifest(manifest Manifest, expectedRunID string) error {
 	if manifest.State != StateActive && manifest.InferenceCapability != "" {
 		return fmt.Errorf("inactive run retains an inference capability")
 	}
+	if manifest.Apply != nil {
+		if manifest.State != StateStopped {
+			return fmt.Errorf("run state %q cannot hold an apply in progress", manifest.State)
+		}
+		if err := validateApplyPlan(manifest.RunID, *manifest.Apply); err != nil {
+			return fmt.Errorf("invalid stored apply plan: %w", err)
+		}
+	}
+	if manifest.State == StateImported &&
+		(manifest.ImportedBranch == "" || manifest.ImportedAt == nil) {
+		return fmt.Errorf("imported run does not record its branch")
+	}
 	switch manifest.State {
 	case StateCreating:
 		if manifest.SSH != nil ||
@@ -562,6 +628,34 @@ func RemainingSeconds(manifest Manifest, now time.Time) int64 {
 		return remaining
 	}
 	return seconds
+}
+
+// validateApplyPlan bounds what a stored journal can later ask Git to do. It
+// runs on the way in and on the way out, so a tampered manifest cannot move a
+// ref the run never earned.
+func validateApplyPlan(runID string, planned gitstage.PlannedApply) error {
+	branch := "pisafe/" + runID
+	if planned.Journal.RunID != runID || planned.Result.Branch != branch {
+		return fmt.Errorf("apply plan does not match run %q", runID)
+	}
+	if len(planned.Journal.Steps) == 0 {
+		return fmt.Errorf("apply plan has no steps")
+	}
+	for _, step := range planned.Journal.Steps {
+		if !filepath.IsAbs(step.Repository) {
+			return fmt.Errorf("apply step repository must be absolute")
+		}
+		if step.Ref != "refs/heads/"+branch {
+			return fmt.Errorf("apply step names an unexpected ref %q", step.Ref)
+		}
+		if step.TemporaryRef != "" && step.TemporaryRef != "refs/pisafe/incoming/"+runID {
+			return fmt.Errorf("apply step names an unexpected temporary ref %q", step.TemporaryRef)
+		}
+		if !gitObjectPattern.MatchString(step.Commit) {
+			return fmt.Errorf("apply step names an invalid commit")
+		}
+	}
+	return nil
 }
 
 func validateSSHConnection(runID string, connection SSHConnection) error {

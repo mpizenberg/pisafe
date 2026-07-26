@@ -878,6 +878,19 @@ The first usable release should prove:
 - Submodule refs are committed before the superproject ref. The reverse order
   would let an interruption leave a superproject branch whose gitlinks name
   commits that no ref keeps reachable.
+- `pisafe apply` stops an active run before capturing it, and an imported run
+  is terminal: it cannot be resumed, and applying it twice is refused. The
+  alternative, applying a live run, cannot reach the inactive `imported`
+  state, and would capture a workspace the agent is still writing to.
+- Apply uses the controller's current managed run image, not the image the
+  manifest records. The guest helper that captures a run must match the
+  controller that reads what it produced; the alternative pins each run to
+  the helper it was created with, which would strand runs created by an
+  earlier pisafe.
+- Adding the apply plan to the manifest did not bump its version. Every
+  manifest written before this change stays valid and is interpreted
+  correctly, and bumping would have orphaned live runs to protect against an
+  older binary that does not exist.
 - Apply captures a run in a throwaway `--network=none` container over the
   run's workspace, rather than exec-ing into the live run container. It then
   works whether or not the run is up, costs none of the eight-hour budget,

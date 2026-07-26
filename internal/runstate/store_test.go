@@ -313,6 +313,119 @@ func TestNewInferenceCapabilityIsValidAndUnique(t *testing.T) {
 	}
 }
 
+func TestStoreRecordsApplyPlanUntilEveryRefIsImported(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	stopped := stoppedTestRun(t, store, root, "run-apply")
+	planned := testApplyPlan("run-apply", root)
+
+	// An apply plan only exists once the run is stopped.
+	if _, err := store.CompleteApply("run-apply"); err == nil ||
+		!strings.Contains(err.Error(), "no apply in progress") {
+		t.Fatalf("premature completion error = %v", err)
+	}
+	recorded, err := store.BeginApply("run-apply", planned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recorded.State != StateStopped || recorded.Apply == nil {
+		t.Fatalf("recorded = %#v", recorded)
+	}
+	if _, err := store.BeginApply("run-apply", planned); err == nil ||
+		!strings.Contains(err.Error(), "already has an apply in progress") {
+		t.Fatalf("second plan error = %v", err)
+	}
+
+	// The recorded plan survives a fresh read, which is what makes an
+	// interrupted apply replayable.
+	reread, err := store.Get("run-apply")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reread.Apply == nil || len(reread.Apply.Journal.Steps) != 1 ||
+		reread.Apply.Journal.Steps[0].Commit != planned.Journal.Steps[0].Commit {
+		t.Fatalf("reread = %#v", reread.Apply)
+	}
+
+	imported, err := store.CompleteApply("run-apply")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if imported.State != StateImported ||
+		imported.ImportedBranch != "pisafe/run-apply" ||
+		imported.ImportedAt == nil ||
+		imported.Apply != nil {
+		t.Fatalf("imported = %#v", imported)
+	}
+	if _, err := store.Resume("run-apply", testCapability(), time.Time{}); err == nil {
+		t.Fatal("an imported run was resumed")
+	}
+	if stopped.State != StateStopped {
+		t.Fatalf("fixture state = %q", stopped.State)
+	}
+}
+
+func TestStoreRejectsApplyPlansItCannotReplaySafely(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	stoppedTestRun(t, store, root, "run-plan")
+
+	valid := testApplyPlan("run-plan", root)
+	for name, corrupt := range map[string]func(*gitstage.PlannedApply){
+		"other run":      func(plan *gitstage.PlannedApply) { plan.Journal.RunID = "other" },
+		"other branch":   func(plan *gitstage.PlannedApply) { plan.Result.Branch = "main" },
+		"no steps":       func(plan *gitstage.PlannedApply) { plan.Journal.Steps = nil },
+		"relative path":  func(plan *gitstage.PlannedApply) { plan.Journal.Steps[0].Repository = "project" },
+		"foreign ref":    func(plan *gitstage.PlannedApply) { plan.Journal.Steps[0].Ref = "refs/heads/main" },
+		"foreign temp":   func(plan *gitstage.PlannedApply) { plan.Journal.Steps[0].TemporaryRef = "refs/heads/main" },
+		"invalid commit": func(plan *gitstage.PlannedApply) { plan.Journal.Steps[0].Commit = "HEAD" },
+	} {
+		plan := valid
+		plan.Journal.Steps = append([]gitstage.ApplyStep(nil), valid.Journal.Steps...)
+		corrupt(&plan)
+		if _, err := store.BeginApply("run-plan", plan); err == nil {
+			t.Errorf("BeginApply accepted a plan with a %s", name)
+		}
+	}
+}
+
+func stoppedTestRun(t *testing.T, store Store, root, runID string) Manifest {
+	t.Helper()
+	if _, err := store.Create(testManifest(runID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(
+		runID,
+		testSSHConnection(root, runID),
+		"",
+		testCapability(),
+		time.Time{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	stopped, err := store.Stop(runID, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stopped
+}
+
+func testApplyPlan(runID, repository string) gitstage.PlannedApply {
+	tip := strings.Repeat("c", 40)
+	return gitstage.PlannedApply{
+		Journal: gitstage.ApplyJournal{
+			RunID: runID,
+			Steps: []gitstage.ApplyStep{{
+				Repository:   repository,
+				Ref:          "refs/heads/pisafe/" + runID,
+				Commit:       tip,
+				TemporaryRef: "refs/pisafe/incoming/" + runID,
+			}},
+		},
+		Result: gitstage.ApplyResult{Branch: "pisafe/" + runID, Tip: tip},
+	}
+}
+
 func testCapability() string {
 	return "pisafe-cap-" + strings.Repeat("ab", 32)
 }

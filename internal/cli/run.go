@@ -57,17 +57,9 @@ func runCreate(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	guestPath, err := packagedGuestPath()
+	artifacts, err := packagedRunArtifacts()
 	if err != nil {
 		return err
-	}
-	artifacts, err := runimage.LoadPackagedArtifacts(guestPath)
-	if err != nil {
-		return fmt.Errorf(
-			"load packaged Linux helper (build pisafe-guest-linux-arm64 beside pisafe or set %s): %w",
-			guestHelperEnvironment,
-			err,
-		)
 	}
 	provider, err := chatgpt.LoadProvider(ctx)
 	if err != nil {
@@ -110,6 +102,25 @@ func inferenceConfig(provider *broker.Provider) runctl.InferenceConfig {
 		return nil
 	}
 	return provider
+}
+
+// packagedRunArtifacts loads what the managed run image is built from. Both
+// creating a run and applying one need it, because the guest helper inside the
+// image must match the controller that drives it.
+func packagedRunArtifacts() (runimage.Artifacts, error) {
+	guestPath, err := packagedGuestPath()
+	if err != nil {
+		return runimage.Artifacts{}, err
+	}
+	artifacts, err := runimage.LoadPackagedArtifacts(guestPath)
+	if err != nil {
+		return runimage.Artifacts{}, fmt.Errorf(
+			"load packaged Linux helper (build pisafe-guest-linux-arm64 beside pisafe or set %s): %w",
+			guestHelperEnvironment,
+			err,
+		)
+	}
+	return artifacts, nil
 }
 
 func packagedGuestPath() (string, error) {

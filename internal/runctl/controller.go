@@ -25,6 +25,8 @@ type Backend interface {
 	VerifyStorage(context.Context, string) error
 	ImportStage(context.Context, string) error
 	Execute(context.Context, io.Reader, ...string) ([]byte, error)
+	FetchApplyArtifact(context.Context, string, gitstage.ApplyArtifact, string) error
+	RemoveApplyPackage(context.Context, string) error
 	RemoveRun(context.Context, string) error
 	RemoveStorage(context.Context, string) error
 	SSHGateway(context.Context) (runssh.Gateway, error)
@@ -37,6 +39,8 @@ type StateStore interface {
 	Stop(string, time.Time) (runstate.Manifest, error)
 	Resume(string, string, time.Time) (runstate.Manifest, error)
 	Discard(string) (runstate.Manifest, error)
+	BeginApply(string, gitstage.PlannedApply) (runstate.Manifest, error)
+	CompleteApply(string) (runstate.Manifest, error)
 	RecordError(string, error) (runstate.Manifest, error)
 }
 
@@ -262,25 +266,41 @@ func (controller Controller) configureInference(
 	return nil
 }
 
-func decodeMaterializedSnapshot(
-	output []byte,
-	hostSnapshot gitstage.Snapshot,
-) (gitstage.Snapshot, error) {
-	if len(output) > 1<<20 {
-		return gitstage.Snapshot{}, errors.New("materialized snapshot exceeds size limit")
+// guestResponseLimit bounds every JSON document a run hands back. It is far
+// above what any of them legitimately needs, and keeps a run from making the
+// controller allocate or the manifest grow without bound.
+const guestResponseLimit = 1 << 20
+
+// decodeGuestResponse reads one document produced inside a run. Unknown fields
+// and trailing data are refused, so a run cannot smuggle anything past what
+// the controller expects to receive.
+func decodeGuestResponse[Document any](output []byte, subject string) (Document, error) {
+	var document Document
+	if len(output) > guestResponseLimit {
+		return document, fmt.Errorf("%s exceeds size limit", subject)
 	}
-	decoder := json.NewDecoder(io.LimitReader(bytes.NewReader(output), 1<<20))
+	decoder := json.NewDecoder(bytes.NewReader(output))
 	decoder.DisallowUnknownFields()
-	var materialized gitstage.Snapshot
-	if err := decoder.Decode(&materialized); err != nil {
-		return gitstage.Snapshot{}, fmt.Errorf("decode materialized snapshot: %w", err)
+	if err := decoder.Decode(&document); err != nil {
+		return document, fmt.Errorf("decode %s: %w", subject, err)
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		if err == nil {
-			return gitstage.Snapshot{}, errors.New("materialized snapshot contains trailing data")
+			return document, fmt.Errorf("%s contains trailing data", subject)
 		}
-		return gitstage.Snapshot{}, fmt.Errorf("decode materialized snapshot trailer: %w", err)
+		return document, fmt.Errorf("decode %s trailer: %w", subject, err)
+	}
+	return document, nil
+}
+
+func decodeMaterializedSnapshot(
+	output []byte,
+	hostSnapshot gitstage.Snapshot,
+) (gitstage.Snapshot, error) {
+	materialized, err := decodeGuestResponse[gitstage.Snapshot](output, "materialized snapshot")
+	if err != nil {
+		return gitstage.Snapshot{}, err
 	}
 	if materialized.SourceRoot != "" ||
 		materialized.RunID != hostSnapshot.RunID ||

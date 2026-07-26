@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -9,9 +10,11 @@ import (
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/chatgpt"
+	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/hostnet"
 	"github.com/mpizenberg/pisafe/internal/lima"
 	"github.com/mpizenberg/pisafe/internal/runctl"
+	"github.com/mpizenberg/pisafe/internal/runimage"
 	"github.com/mpizenberg/pisafe/internal/runssh"
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
@@ -55,6 +58,69 @@ func runResume(ctx context.Context, runID string, out io.Writer) error {
 		manifest.SSH.Alias,
 	)
 	return nil
+}
+
+func runApply(ctx context.Context, runID string, out io.Writer) error {
+	controller, err := prepareLifecycle(ctx)
+	if err != nil {
+		return err
+	}
+	artifacts, err := packagedRunArtifacts()
+	if err != nil {
+		return err
+	}
+	image, err := runimage.NewInstaller(lima.NewTransport()).Ensure(ctx, artifacts)
+	if err != nil {
+		return fmt.Errorf("install managed run image: %w", err)
+	}
+	manifest, result, err := controller.Apply(ctx, runID, image.ImageID)
+	if err != nil {
+		if errors.Is(err, gitstage.ErrApplyNeedsReconciliation) {
+			return fmt.Errorf(
+				"%w\nThe recorded plan is kept: rerun pisafe apply %s once the ref is resolved",
+				err,
+				runID,
+			)
+		}
+		return err
+	}
+	printApplyResult(out, manifest, result)
+	return nil
+}
+
+func printApplyResult(out io.Writer, manifest runstate.Manifest, result gitstage.ApplyResult) {
+	fmt.Fprintf(out, "Imported:  %s\nTip:       %s\n", result.Branch, result.Tip)
+	for _, submodule := range result.Submodules {
+		if submodule.Branch == "" {
+			fmt.Fprintf(out, "Submodule: %s unchanged\n", submodule.Path)
+			continue
+		}
+		fmt.Fprintf(
+			out,
+			"Submodule: %s imported as %s (%s)\n",
+			submodule.Path,
+			submodule.Branch,
+			submodule.Tip,
+		)
+	}
+	if result.FinalCommit != "" {
+		fmt.Fprintln(out, "Final:     uncommitted tracked changes became one labelled commit")
+	}
+	if len(result.Untracked) != 0 {
+		fmt.Fprintf(
+			out,
+			"Left:      %d untracked file(s) stayed in the run\n",
+			len(result.Untracked),
+		)
+		printNames(out, namedList{names: result.Untracked})
+	}
+	fmt.Fprintf(
+		out,
+		"Next:      git log %s\n           %s keeps its workspace until pisafe discard %s\n",
+		result.Branch,
+		manifest.RunID,
+		manifest.RunID,
+	)
 }
 
 func runDiscard(ctx context.Context, runID string, out io.Writer) error {

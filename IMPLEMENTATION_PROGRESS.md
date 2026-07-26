@@ -80,6 +80,21 @@ quota-backed VM storage. Do not add a local-workspace fallback.
   meanwhile. Rollback deletes only refs that still hold what apply wrote.
 - The result reports which commit the imported branch expects in each
   submodule and which branch keeps it reachable.
+- `pisafe apply RUN` drives that across the boundary. It stops an active run,
+  captures it with `pisafe-guest prepare-apply` in a throwaway
+  `--network=none` container mounted only on the run's workspace, streams each
+  bundle back through Lima control SSH bounded and SHA-256 verified, imports
+  every object set into temporary refs, records the plan in the run manifest,
+  and only then moves refs. A prepared apply carries hashes and fixed artifact
+  names, never a filesystem path.
+- A recorded plan is always finished rather than redone: apply on a run that
+  already has one replays the journal without touching the run at all. A
+  contested ref leaves the plan recorded so the user can reconcile and rerun.
+  The run becomes `imported` only once every ref holds its recorded commit,
+  and an imported run cannot be resumed or applied again.
+- Apply runs the controller's current managed run image rather than the image
+  the manifest records, so the guest helper always matches the controller
+  reading what it produced.
 - Initialized submodules are staged with the superproject: each one
   contributes its own bundle and tracked-state patch, is reconstructed in the
   run, absorbs its git directory, and is registered from `.gitmodules`. Its
@@ -426,6 +441,15 @@ getting no branch, journal replay as a no-op, a contested ref stopping for
 reconciliation instead of being overwritten, and rollback removing only the
 refs apply created.
 
+The user-facing apply path is covered end to end against real repositories
+with a fake VM boundary: a stopped run captured, fetched, imported, and marked
+imported while the source checkout stays untouched; a second apply refused; a
+recorded plan finished without touching the run at all; and a contested ref
+leaving the run stopped with its plan intact. The manifest's own tests cover
+recording, rereading, and completing a plan, refusal of a second plan, and
+refusal of plans naming another run, another ref, a relative repository, or an
+invalid commit.
+
 The generated YAML is checked by the installed Lima validator in the normal
 test suite.
 
@@ -625,17 +649,25 @@ sandboxed result.
 
 ## Known gaps
 
-- No user-facing `connect`, `diff`, `apply`, `cp`, or `gc` implementation
-  exists.
+- No user-facing `connect`, `diff`, `cp`, or `gc` implementation exists.
 - `pisafe zed` launches a connection that was explicitly saved once in Zed.
   Fully automatic first-launch remains intentionally absent because Zed's CLI
   URL cannot carry `-F` and PiSafe does not silently edit global SSH or Zed
   settings.
-- Apply is complete as a library but is not wired to a command: nothing yet
-  streams the apply bundles out of a run, persists the journal in the run
-  manifest, or exposes `pisafe apply`. Until the journal is persisted, an
-  apply interrupted between ref updates can be replayed only within the same
-  process.
+- `pisafe apply` has never run against the VM. The whole path is covered by
+  tests with a fake boundary, but the throwaway apply container, the
+  `podman unshare` fetch out of run storage, and the guest helper's
+  `prepare-apply` have not been exercised on real run storage.
+- Runs created before `prepare-apply` existed cannot be applied by their own
+  image, which is why apply uses the controller's current run image. That
+  image must still exist in the VM; a pruned image fails apply, as it fails
+  resume.
+- The dirty-baseline prompt the design describes — keep the baseline commit
+  and everything after it, or replay only the later commits onto the captured
+  HEAD — is not implemented. Apply always imports the whole run history,
+  baseline commit included.
+- A run's apply response is bounded at 1 MiB, so a run that leaves roughly
+  twenty thousand untracked files fails apply instead of reporting them.
 - Login, the Keychain round trip, and the real Codex handshake are
   live-verified, but broker-side token refresh has only ever run against a
   stub: the live session never crossed an access-token expiry. The first
@@ -665,11 +697,11 @@ sandboxed result.
 
 Continue Phase 1 without weakening the boundary:
 
-1. Expose `pisafe apply`: stream the apply bundles out of the run, persist the
-   journal in the run manifest before the first ref moves, replay or roll it
-   back on restart, and mark the run imported only when every ref matches.
-2. Add `diff`, hardened `cp`, and seven-day GC after the apply transaction is
-   durable.
+1. Live-verify `pisafe apply` end to end: create a run, let it produce
+   commits, apply it, and confirm the branch, the submodule refs, and an
+   untouched checkout. This is the first exercise of the apply container and
+   the `podman unshare` fetch.
+2. Add `diff`, hardened `cp`, and seven-day GC.
 
 ## Useful references
 

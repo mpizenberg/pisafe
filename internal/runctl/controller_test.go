@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,6 +31,10 @@ type fakeBackend struct {
 	failAt      string
 	failAfterAt string
 	container   *containerInspection
+	// applyWorkspace and applyPackage stand in for the run's storage: the
+	// capture runs against a real workspace and leaves real bundles behind.
+	applyWorkspace string
+	applyPackage   string
 }
 
 func (backend *fakeBackend) CreateStage(
@@ -80,7 +85,7 @@ func (backend *fakeBackend) RemoveStorage(_ context.Context, _ string) error {
 }
 
 func (backend *fakeBackend) Execute(
-	_ context.Context,
+	ctx context.Context,
 	stdin io.Reader,
 	args ...string,
 ) ([]byte, error) {
@@ -110,6 +115,26 @@ func (backend *fakeBackend) Execute(
 	if strings.Contains(strings.Join(args, " "), "pisafe-guest configure-ssh") {
 		return []byte("ssh-ed25519 host-key\n"), nil
 	}
+	if strings.Contains(strings.Join(args, " "), "pisafe-guest prepare-apply") {
+		var snapshot gitstage.Snapshot
+		if err := json.Unmarshal([]byte(input), &snapshot); err != nil {
+			return nil, err
+		}
+		if snapshot.SourceRoot != "" {
+			return nil, errors.New("apply request disclosed the Mac path")
+		}
+		prepared, err := gitstage.PrepareApply(
+			ctx,
+			snapshot,
+			backend.applyWorkspace,
+			backend.applyPackage,
+		)
+		if err != nil {
+			return nil, err
+		}
+		output, err := json.Marshal(prepared)
+		return append(output, '\n'), err
+	}
 	if strings.Contains(strings.Join(args, " "), "pisafe-guest materialize") {
 		materialized := testPrepared().Snapshot
 		materialized.SourceRoot = ""
@@ -135,6 +160,33 @@ func (backend *fakeBackend) Execute(
 		return nil, errors.New("execute failed after remote success")
 	}
 	return nil, nil
+}
+
+// FetchApplyArtifact copies from the directory the fake run wrote, standing in
+// for the streamed and verified transfer out of the VM.
+func (backend *fakeBackend) FetchApplyArtifact(
+	_ context.Context,
+	_ string,
+	artifact gitstage.ApplyArtifact,
+	destination string,
+) error {
+	backend.calls = append(backend.calls, backendCall{
+		kind: "fetch-apply",
+		args: []string{artifact.Name},
+	})
+	content, err := os.ReadFile(filepath.Join(backend.applyPackage, artifact.Name))
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(destination, content, 0o600)
+}
+
+func (backend *fakeBackend) RemoveApplyPackage(_ context.Context, _ string) error {
+	backend.calls = append(backend.calls, backendCall{kind: "remove-apply"})
+	if backend.failAt == "remove-apply" {
+		return errors.New("remove apply package failed")
+	}
+	return os.RemoveAll(backend.applyPackage)
 }
 
 func (backend *fakeBackend) RemoveRun(_ context.Context, _ string) error {

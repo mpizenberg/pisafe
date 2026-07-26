@@ -7,10 +7,10 @@ The implementation now contains:
 
 - a dependency-free Go controller;
 - `pisafe run` for creating an isolated run from the current repository,
-  `pisafe stop`/`resume` for preserving and reopening it, exact-confirmation
-  `pisafe discard`, `pisafe list` for durable records, `pisafe zed` for
-  reopening a connection explicitly saved in Zed, and `pisafe doctor` for
-  prerequisites;
+  `pisafe stop`/`resume` for preserving and reopening it, `pisafe apply` for
+  importing its commits, exact-confirmation `pisafe discard`, `pisafe list`
+  for durable records, `pisafe zed` for reopening a connection explicitly
+  saved in Zed, and `pisafe doctor` for prerequisites;
 - a split Git staging core: the Mac produces a bundle and tracked-state patch
   for the superproject and for each initialized submodule, while
   materialization happens after transfer inside the isolated environment;
@@ -20,7 +20,8 @@ The implementation now contains:
 - final tracked-state capture;
 - split apply preparation/import, with SHA-256 verification and a journaled,
   idempotent compare-and-swap creation of a new `pisafe/<run>` branch in the
-  superproject and in each changed submodule; and
+  superproject and in each changed submodule, the plan recorded in the run
+  manifest before the first ref moves; and
 - tests proving workspace deletion and apply do not modify the source checkout.
 
 The Lima backend now also generates and manages a dedicated plain-mode Fedora
@@ -59,6 +60,9 @@ OpenSSH command to paste once into Zed's Remote Projects dialog; it does not
 silently edit global SSH or Zed settings. Each run has a live-validated
 10 GiB fixed-capacity persistent filesystem and eight cumulative active hours
 enforced by Podman. Stop/resume and confirmed discard are live-validated.
+`pisafe apply RUN` stops the run, captures it in a throwaway network-less
+container, streams the verified bundles back, and creates `pisafe/RUN` in the
+superproject and each changed submodule without touching the checkout.
 `pisafe broker` relays inference from the Mac into runs over a reverse SSH
 forward to `192.0.2.1:18080`, the firewall's single static exception; runs
 hold only a revocable per-run capability, never a provider credential.
@@ -76,6 +80,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
 ./pisafe run [--include PATH]... [--include-unsafe PATH]...
 ./pisafe stop RUN
 ./pisafe resume RUN
+./pisafe apply RUN
 ./pisafe discard RUN --confirm RUN
 ./pisafe login chatgpt
 ./pisafe broker
