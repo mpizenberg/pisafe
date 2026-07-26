@@ -14,6 +14,9 @@ The implementation now contains:
 - a split Git staging core: the Mac produces a bundle and tracked-state patch
   for the superproject and for each initialized submodule, while
   materialization happens after transfer inside the isolated environment;
+- the Git identity the user commits with in the source repository, resolved on
+  the Mac and installed in the run so an agent's commits are attributed to
+  them; a repository with none refuses to start a run;
 - tracked dirty-state baseline capture, plus explicitly selected untracked or
   ignored inputs, which are validated, archived, and committed into that same
   baseline while credential-shaped names require an unsafe override;

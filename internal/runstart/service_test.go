@@ -16,6 +16,8 @@ import (
 
 const testImageID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+var testIdentity = gitstage.Identity{Name: "Alice", Email: "alice@example.invalid"}
+
 type fakeBoundary struct {
 	prefixes []netip.Prefix
 	called   bool
@@ -45,6 +47,7 @@ type fakeController struct {
 	prepared gitstage.PreparedStage
 	project  string
 	imageID  string
+	identity gitstage.Identity
 }
 
 func (controller *fakeController) StartPrepared(
@@ -52,10 +55,12 @@ func (controller *fakeController) StartPrepared(
 	prepared gitstage.PreparedStage,
 	project string,
 	imageID string,
+	identity gitstage.Identity,
 ) (runstate.Manifest, error) {
 	controller.prepared = prepared
 	controller.project = project
 	controller.imageID = imageID
+	controller.identity = identity
 	return runstate.Manifest{
 		RunID:     prepared.Snapshot.RunID,
 		Project:   project,
@@ -85,6 +90,9 @@ func TestStartComposesBoundaryImageStageAndController(t *testing.T) {
 	}
 	service.repositoryRoot = func(context.Context, string) (string, error) {
 		return "/Users/alice/My Project", nil
+	}
+	service.resolveIdentity = func(context.Context, string) (gitstage.Identity, error) {
+		return testIdentity, nil
 	}
 	service.listExcluded = func(context.Context, string) (gitstage.ExcludedInputs, error) {
 		return gitstage.ExcludedInputs{
@@ -138,6 +146,29 @@ func TestStartComposesBoundaryImageStageAndController(t *testing.T) {
 		strings.Join(result.Excluded.Ignored, ",") != "build/output" {
 		t.Fatalf("excluded = %#v", result.Excluded)
 	}
+	if controller.identity != testIdentity {
+		t.Fatalf("identity = %#v", controller.identity)
+	}
+}
+
+func TestStartRefusesAnUnattributableRunBeforeTouchingTheBoundary(t *testing.T) {
+	boundary := &fakeBoundary{}
+	installer := &fakeInstaller{}
+	service := New(boundary, installer, &fakeController{}, runimage.Artifacts{})
+	service.repositoryRoot = func(context.Context, string) (string, error) {
+		return "/Users/alice/project", nil
+	}
+	service.resolveIdentity = func(context.Context, string) (gitstage.Identity, error) {
+		return gitstage.Identity{}, gitstage.ErrNoIdentity
+	}
+
+	_, err := service.Start(context.Background(), ".", nil, gitstage.InputSelection{})
+	if !errors.Is(err, gitstage.ErrNoIdentity) {
+		t.Fatalf("err = %v", err)
+	}
+	if boundary.called || installer.called {
+		t.Fatal("a run nobody could commit in still prepared the VM")
+	}
 }
 
 func TestStartReportsSelectedInputsAndDropsThemFromExclusions(t *testing.T) {
@@ -150,6 +181,9 @@ func TestStartReportsSelectedInputsAndDropsThemFromExclusions(t *testing.T) {
 	}
 	service.repositoryRoot = func(context.Context, string) (string, error) {
 		return "/Users/alice/project", nil
+	}
+	service.resolveIdentity = func(context.Context, string) (gitstage.Identity, error) {
+		return testIdentity, nil
 	}
 	service.listExcluded = func(context.Context, string) (gitstage.ExcludedInputs, error) {
 		return gitstage.ExcludedInputs{
@@ -208,6 +242,9 @@ func TestStartRejectsBadSelectionBeforeTouchingTheBoundary(t *testing.T) {
 	}
 	service.repositoryRoot = func(context.Context, string) (string, error) {
 		return "/Users/alice/project", nil
+	}
+	service.resolveIdentity = func(context.Context, string) (gitstage.Identity, error) {
+		return testIdentity, nil
 	}
 	service.listExcluded = func(context.Context, string) (gitstage.ExcludedInputs, error) {
 		return gitstage.ExcludedInputs{}, nil

@@ -20,6 +20,8 @@ import (
 
 const testImage = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+var testIdentity = gitstage.Identity{Name: "Test User", Email: "test@example.invalid"}
+
 type backendCall struct {
 	kind  string
 	args  []string
@@ -249,6 +251,7 @@ func TestStartPreparedActivatesOnlyAfterMaterialization(t *testing.T) {
 		testPrepared(),
 		"project",
 		testImage,
+		testIdentity,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -267,11 +270,18 @@ func TestStartPreparedActivatesOnlyAfterMaterialization(t *testing.T) {
 		"pisafe-guest materialize",
 		"rm -rf /work/stage",
 		"remove-stage",
+		"pisafe-guest configure-identity",
 		"pisafe-guest configure-inference",
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Errorf("calls lack %q:\n%s", expected, joined)
 		}
+	}
+	if stdin := stdinFor(backend.calls, "configure-identity"); !strings.Contains(
+		stdin,
+		testIdentity.Email,
+	) {
+		t.Fatalf("run did not receive the user's Git identity: %q", stdin)
 	}
 	if manifest.SSH == nil ||
 		manifest.SSH.Alias != "pisafe-run-123" {
@@ -305,6 +315,7 @@ func TestStartPreparedRollsBackAndRecordsFailure(t *testing.T) {
 		testPrepared(),
 		"project",
 		testImage,
+		testIdentity,
 	)
 	if err == nil || !strings.Contains(err.Error(), "materialize staged repository") {
 		t.Fatalf("error = %v", err)
@@ -342,6 +353,7 @@ func TestStartPreparedCleansStorageAfterAmbiguousCreateFailure(t *testing.T) {
 		testPrepared(),
 		"project",
 		testImage,
+		testIdentity,
 	); err == nil {
 		t.Fatal("StartPrepared unexpectedly succeeded")
 	}

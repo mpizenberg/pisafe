@@ -906,6 +906,17 @@ The first usable release should prove:
   filesystem forever and contradicted apply's own closing guidance. One
   exported predicate now states the rule, because the controller reclaims
   storage before the store records the transition and the two must agree.
+- A run commits as the identity Git would use in the source repository,
+  resolved on the Mac and installed once into the run's own global
+  configuration. The alternatives were a neutral `pisafe` author, which
+  misattributes the user's work and makes imported commits awkward to fix
+  afterwards, and leaving the run unconfigured, which is what made every agent
+  commit fail. This copies a name and an address into the run, but every
+  commit in the bundle already carries them, so it exposes nothing the run
+  could not already read.
+- A repository with no configured identity refuses to start a run instead of
+  falling back to a placeholder. A silent fallback would be discovered only in
+  the imported history, when rewriting it is expensive.
 
 ## Primary references
 

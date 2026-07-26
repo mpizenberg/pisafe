@@ -297,6 +297,42 @@ func TestConfigureInferenceInstallsAndReplacesModelsConfig(t *testing.T) {
 	}
 }
 
+func TestConfigureIdentityGivesTheRunAnAuthor(t *testing.T) {
+	home := t.TempDir()
+	identity := `{"name":"Ada Lovelace","email":"ada@example.invalid"}`
+	if err := configureIdentity(
+		context.Background(),
+		home,
+		strings.NewReader(identity),
+	); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(home, ".gitconfig")
+	if got := guestGit(
+		t,
+		home,
+		"config", "--file", configPath, "--get", "user.email",
+	); got != "ada@example.invalid" {
+		t.Fatalf("user.email = %q", got)
+	}
+
+	for name, document := range map[string]string{
+		"unknown field": `{"name":"Ada","email":"ada@example.invalid","home":"/etc"}`,
+		"trailing data": `{"name":"Ada","email":"ada@example.invalid"}{}`,
+		"empty email":   `{"name":"Ada","email":""}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := configureIdentity(
+				context.Background(),
+				t.TempDir(),
+				strings.NewReader(document),
+			); err == nil {
+				t.Fatal("run accepted an unusable identity")
+			}
+		})
+	}
+}
+
 func TestConfigureInferencePinsSSETransportPreservingSettings(t *testing.T) {
 	home := t.TempDir()
 	models := `{"providers":{}}`

@@ -177,6 +177,16 @@ func (spec Spec) MaterializeArgs(projectDirectory string) ([]string, error) {
 // stdin into the run home. It runs after activation and resume so a fresh
 // capability always replaces the previous one.
 func (spec Spec) ConfigureInferenceArgs() ([]string, error) {
+	return spec.configureArgs("configure-inference")
+}
+
+// ConfigureIdentityArgs installs the Git identity piped through stdin into the
+// run home. It runs once at creation, because the run home keeps it.
+func (spec Spec) ConfigureIdentityArgs() ([]string, error) {
+	return spec.configureArgs("configure-identity")
+}
+
+func (spec Spec) configureArgs(command string) ([]string, error) {
 	if err := spec.Validate(); err != nil {
 		return nil, err
 	}
@@ -185,7 +195,7 @@ func (spec Spec) ConfigureInferenceArgs() ([]string, error) {
 		"--interactive",
 		"--user", containerUser,
 		spec.ContainerName(),
-		"pisafe-guest", "configure-inference",
+		"pisafe-guest", command,
 	}, nil
 }
 

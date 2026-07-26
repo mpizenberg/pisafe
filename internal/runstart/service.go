@@ -30,6 +30,7 @@ type Controller interface {
 		gitstage.PreparedStage,
 		string,
 		string,
+		gitstage.Identity,
 	) (runstate.Manifest, error)
 }
 
@@ -41,16 +42,17 @@ type Result struct {
 }
 
 type Service struct {
-	boundary       Boundary
-	installer      ImageInstaller
-	controller     Controller
-	artifacts      runimage.Artifacts
-	now            func() time.Time
-	newRunID       func(string, time.Time) (string, error)
-	repositoryRoot func(context.Context, string) (string, error)
-	listExcluded   func(context.Context, string) (gitstage.ExcludedInputs, error)
-	selectInputs   func(context.Context, string, gitstage.InputSelection) ([]string, error)
-	prepare        func(context.Context, gitstage.PrepareRequest) (gitstage.PreparedStage, error)
+	boundary        Boundary
+	installer       ImageInstaller
+	controller      Controller
+	artifacts       runimage.Artifacts
+	now             func() time.Time
+	newRunID        func(string, time.Time) (string, error)
+	repositoryRoot  func(context.Context, string) (string, error)
+	resolveIdentity func(context.Context, string) (gitstage.Identity, error)
+	listExcluded    func(context.Context, string) (gitstage.ExcludedInputs, error)
+	selectInputs    func(context.Context, string, gitstage.InputSelection) ([]string, error)
+	prepare         func(context.Context, gitstage.PrepareRequest) (gitstage.PreparedStage, error)
 }
 
 func New(
@@ -60,16 +62,17 @@ func New(
 	artifacts runimage.Artifacts,
 ) Service {
 	return Service{
-		boundary:       boundary,
-		installer:      installer,
-		controller:     controller,
-		artifacts:      artifacts,
-		now:            time.Now,
-		newRunID:       runid.New,
-		repositoryRoot: gitstage.RepositoryRoot,
-		listExcluded:   gitstage.ListExcludedInputs,
-		selectInputs:   gitstage.SelectInputs,
-		prepare:        gitstage.Prepare,
+		boundary:        boundary,
+		installer:       installer,
+		controller:      controller,
+		artifacts:       artifacts,
+		now:             time.Now,
+		newRunID:        runid.New,
+		repositoryRoot:  gitstage.RepositoryRoot,
+		resolveIdentity: gitstage.ResolveIdentity,
+		listExcluded:    gitstage.ListExcludedInputs,
+		selectInputs:    gitstage.SelectInputs,
+		prepare:         gitstage.Prepare,
 	}
 }
 
@@ -83,6 +86,12 @@ func (service Service) Start(
 		return Result{}, fmt.Errorf("run-start dependencies are required")
 	}
 	root, err := service.repositoryRoot(ctx, sourcePath)
+	if err != nil {
+		return Result{}, err
+	}
+	// A run an agent cannot commit in is useless, so a missing identity stops
+	// the run here rather than at the agent's first commit.
+	identity, err := service.resolveIdentity(ctx, root)
 	if err != nil {
 		return Result{}, err
 	}
@@ -128,6 +137,7 @@ func (service Service) Start(
 		prepared,
 		project,
 		image.ImageID,
+		identity,
 	)
 	if err != nil {
 		return Result{}, err

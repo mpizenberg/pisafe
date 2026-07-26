@@ -80,9 +80,13 @@ func (controller Controller) StartPrepared(
 	prepared gitstage.PreparedStage,
 	projectDirectory string,
 	imageID string,
+	identity gitstage.Identity,
 ) (_ runstate.Manifest, returnErr error) {
 	spec := runcontainer.DefaultSpec(prepared.Snapshot.RunID, imageID)
 	if err := spec.Validate(); err != nil {
+		return runstate.Manifest{}, err
+	}
+	if err := identity.Validate(); err != nil {
 		return runstate.Manifest{}, err
 	}
 	if _, err := spec.MaterializeArgs(projectDirectory); err != nil {
@@ -220,6 +224,9 @@ func (controller Controller) StartPrepared(
 	}
 	remoteAllocated = false
 
+	if err := controller.configureIdentity(ctx, spec, identity); err != nil {
+		return runstate.Manifest{}, err
+	}
 	capability, err := runstate.NewInferenceCapability()
 	if err != nil {
 		return runstate.Manifest{}, err
@@ -239,6 +246,28 @@ func (controller Controller) StartPrepared(
 		return runstate.Manifest{}, fmt.Errorf("activate run manifest: %w", err)
 	}
 	return manifest, nil
+}
+
+// configureIdentity gives the run the author its commits are attributed to.
+// It runs only at creation, because the identity lives in the run's persistent
+// home and an agent may deliberately change it there.
+func (controller Controller) configureIdentity(
+	ctx context.Context,
+	spec runcontainer.Spec,
+	identity gitstage.Identity,
+) error {
+	content, err := json.Marshal(identity)
+	if err != nil {
+		return fmt.Errorf("encode run Git identity: %w", err)
+	}
+	args, err := spec.ConfigureIdentityArgs()
+	if err != nil {
+		return err
+	}
+	if _, err := controller.podman(ctx, bytes.NewReader(content), args...); err != nil {
+		return fmt.Errorf("install run Git identity: %w", err)
+	}
+	return nil
 }
 
 // configureInference writes the run's models.json when a provider is

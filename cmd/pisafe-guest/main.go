@@ -21,9 +21,10 @@ import (
 )
 
 const (
-	sshHome               = "/home/node"
+	runHome               = "/home/node"
 	sshPublicKeySize      = 4096
 	modelsConfigSizeLimit = int64(1 << 20)
+	documentSizeLimit     = int64(1 << 20)
 )
 
 func main() {
@@ -52,17 +53,22 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 		if len(args) != 1 {
 			return usageError()
 		}
-		return configureSSH(ctx, sshHome, in, out, generateHostKey)
+		return configureSSH(ctx, runHome, in, out, generateHostKey)
 	case "configure-inference":
 		if len(args) != 1 {
 			return usageError()
 		}
-		return configureInference(sshHome, in)
+		return configureInference(runHome, in)
+	case "configure-identity":
+		if len(args) != 1 {
+			return usageError()
+		}
+		return configureIdentity(ctx, runHome, in)
 	case "serve-ssh":
 		if len(args) != 1 {
 			return usageError()
 		}
-		return serveSSH(sshHome)
+		return serveSSH(runHome)
 	case "proxy-ssh":
 		if len(args) != 1 {
 			return usageError()
@@ -77,7 +83,23 @@ func usageError() error {
 	return errors.New(
 		"usage: pisafe-guest <materialize <stage-directory> <workspace>" +
 			"|prepare-apply <workspace> <package-directory>" +
-			"|configure-ssh|configure-inference|serve-ssh|proxy-ssh>",
+			"|configure-ssh|configure-inference|configure-identity" +
+			"|serve-ssh|proxy-ssh>",
+	)
+}
+
+// configureIdentity records the user's Git identity in the run's global Git
+// configuration, so an agent commits as the person whose work it is instead of
+// failing with an unknown author.
+func configureIdentity(ctx context.Context, home string, in io.Reader) error {
+	identity, err := decodeControllerDocument[gitstage.Identity](in, "Git identity")
+	if err != nil {
+		return err
+	}
+	return gitstage.InstallIdentity(
+		ctx,
+		filepath.Join(filepath.Clean(home), ".gitconfig"),
+		identity,
 	)
 }
 
@@ -251,18 +273,9 @@ func prepareApply(
 // decodeSnapshot reads the run description the controller sends across the
 // boundary. A snapshot that names a Mac path is refused rather than used.
 func decodeSnapshot(in io.Reader) (gitstage.Snapshot, error) {
-	decoder := json.NewDecoder(io.LimitReader(in, 1<<20))
-	decoder.DisallowUnknownFields()
-	var snapshot gitstage.Snapshot
-	if err := decoder.Decode(&snapshot); err != nil {
-		return gitstage.Snapshot{}, fmt.Errorf("decode stage snapshot: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return gitstage.Snapshot{}, errors.New("stage snapshot contains trailing data")
-		}
-		return gitstage.Snapshot{}, fmt.Errorf("decode stage snapshot trailer: %w", err)
+	snapshot, err := decodeControllerDocument[gitstage.Snapshot](in, "stage snapshot")
+	if err != nil {
+		return gitstage.Snapshot{}, err
 	}
 	if snapshot.SourceRoot != "" {
 		return gitstage.Snapshot{}, errors.New(
@@ -270,6 +283,26 @@ func decodeSnapshot(in io.Reader) (gitstage.Snapshot, error) {
 		)
 	}
 	return snapshot, nil
+}
+
+// decodeControllerDocument reads one bounded JSON document piped in from the
+// Mac controller, refusing unknown fields and trailing data so the run acts
+// only on what this helper's version understands.
+func decodeControllerDocument[Document any](in io.Reader, subject string) (Document, error) {
+	var document Document
+	decoder := json.NewDecoder(io.LimitReader(in, documentSizeLimit))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&document); err != nil {
+		return document, fmt.Errorf("decode %s: %w", subject, err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return document, fmt.Errorf("%s contains trailing data", subject)
+		}
+		return document, fmt.Errorf("decode %s trailer: %w", subject, err)
+	}
+	return document, nil
 }
 
 func configureSSH(

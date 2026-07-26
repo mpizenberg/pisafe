@@ -102,6 +102,13 @@ quota-backed VM storage. Do not add a local-workspace fallback.
 - Discard reclaims a run from every state that still owns resources, including
   `imported`. An imported run keeps its workspace, its 10 GiB filesystem, and
   its audit record of where it was imported until it is discarded.
+- A run commits as its user. `pisafe run` resolves the identity Git would use
+  in the source repository, so repository-local and conditional configuration
+  wins exactly as it does outside a run, and installs it once in the run's own
+  global Git configuration. A repository with no `user.name`/`user.email`
+  refuses to start a run and says how to set one, because that run's commits
+  would fail. Only pisafe's own baseline and final commits keep the fixed
+  `pisafe` author.
 - Initialized submodules are staged with the superproject: each one
   contributes its own bundle and tracked-state patch, is reconstructed in the
   run, absorbs its git directory, and is registered from `.gitmodules`. Its
@@ -399,20 +406,20 @@ Current package coverage at this milestone:
 
 ```text
 pisafe        0.0%
-pisafe-guest  60.0%
+pisafe-guest  63.3%
 broker        96.2%
 chatgpt       70.1%
-cli           24.2%
-gitstage      78.0%
+cli           25.8%
+gitstage      78.6%
 hostnet       50.0%
-lima          68.9%
-runcontainer  66.7%
-runctl        67.2%
+lima          68.0%
+runcontainer  66.0%
+runctl        67.1%
 runid         92.3%
 runimage      74.6%
 runssh        68.0%
-runstart      79.5%
-runstate      71.8%
+runstart      80.9%
+runstate      74.0%
 ```
 
 The broker contract is covered directly: capability auth against durable
@@ -447,6 +454,14 @@ gitlink resolving to exactly the imported commit, an unchanged submodule
 getting no branch, journal replay as a no-op, a contested ref stopping for
 reconciliation instead of being overwritten, and rollback removing only the
 refs apply created.
+
+The run's Git identity is covered from both sides: resolution prefers
+repository configuration over the global one and refuses an unconfigured Mac;
+an installed identity is proven by making a commit with it and reading back the
+author; empty, oversized, and newline-bearing values are refused before
+anything is written; the guest command refuses unknown fields and trailing
+data; and run creation stops before the boundary and image work when no
+identity exists.
 
 The user-facing apply path is covered end to end against real repositories
 with a fake VM boundary: a stopped run captured, fetched, imported, and marked
@@ -554,7 +569,7 @@ Run that end-to-end test with:
 
 ```sh
 PISAFE_LIVE_LIMA=1 \
-PISAFE_LIVE_RUN_IMAGE=sha256:cfd452f96a7948fbf964d6870dad57dc81da3b82393d731bf701736c0092243a \
+PISAFE_LIVE_RUN_IMAGE=sha256:d105734aeac542cc0857e27e673349e993be923e1d49fc9e9006723db0804a9d \
 go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
 ```
 
@@ -566,13 +581,24 @@ profile
 It contains cached base/test images plus the current managed run image:
 
 ```text
-recipe digest: sha256:a87855c94a06e000c9bc20d5c85b1d21319db44c138e115f1af1c5335199ff99
-image ID:      sha256:8ac646830791cca9c1bea15031ef90c539ae8ae301fbfb299e647748cdf04e03
+recipe digest: sha256:1a28b413ac1c63d23a21c6373d0c8e5a5843a38095b328938cd12310e2c7fba5
+image ID:      sha256:d105734aeac542cc0857e27e673349e993be923e1d49fc9e9006723db0804a9d
 ```
 
-The recipe digest last moved when the guest helper gained `prepare-apply`;
-the first apply rebuilt the image and every later run and apply reused it,
-which live-checks content-addressed reuse.
+The recipe digest last moved when the guest helper gained
+`configure-identity`. Each time it moves, the next run rebuilds the image and
+every later run and apply reuses it, which live-checks content-addressed
+reuse.
+
+The run Git identity is live-verified end to end. A scratch repository whose
+repository-local identity differed from the Mac's global one produced a run
+whose `~/.gitconfig` held the repository-local identity; an agent commit made
+over SSH with no hand configuration succeeded and was authored by it, while
+pisafe's own baseline and final-capture commits stayed authored by `pisafe`,
+so mechanical commits remain distinguishable in the imported history. The
+imported `pisafe/<run>` branch carried that split unchanged and the source
+checkout was untouched. A repository with no identity refused to start a run
+before any boundary or image work, naming the two commands that fix it.
 
 That VM entered `VirtualMachineStateError` unattended overnight, almost
 certainly when the host slept, while `limactl list` still reported `Running`
@@ -709,11 +735,6 @@ sandboxed result.
   Fully automatic first-launch remains intentionally absent because Zed's CLI
   URL cannot carry `-F` and PiSafe does not silently edit global SSH or Zed
   settings.
-- A run configures no Git identity, so an agent committing inside it fails
-  with `Author identity unknown` until someone sets one by hand. Only the
-  guest helper's own baseline and final commits work, because they supply an
-  identity explicitly. Seeding the run from the Mac's `user.name`/`user.email`
-  would fix it but copies personal data into the run, so the choice is open.
 - Runs created before `prepare-apply` existed cannot be applied by their own
   image, which is why apply uses the controller's current run image. That
   image must still exist in the VM; a pruned image fails apply, as it fails
@@ -758,9 +779,7 @@ sandboxed result.
 
 Continue Phase 1 without weakening the boundary:
 
-1. Decide how a run gets a Git identity, so an agent can commit without
-   hand-configuring one.
-2. Add `diff`, hardened `cp`, and seven-day GC.
+1. Add `diff`, hardened `cp`, and seven-day GC.
 
 ## Useful references
 
