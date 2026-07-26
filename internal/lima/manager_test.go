@@ -37,6 +37,15 @@ func (runner *fakeRunner) Run(_ context.Context, stdin io.Reader, args ...string
 	return output, nil
 }
 
+func (runner *fakeRunner) Stream(ctx context.Context, stdout io.Writer, args ...string) error {
+	output, err := runner.Run(ctx, nil, args...)
+	if err != nil {
+		return err
+	}
+	_, err = stdout.Write(output)
+	return err
+}
+
 func TestManagerCreateValidatesBeforeCreating(t *testing.T) {
 	runner := &fakeRunner{outputs: [][]byte{
 		nil,
@@ -255,4 +264,13 @@ func (runner *errorRunner) Run(
 		runner.errors = runner.errors[1:]
 	}
 	return output, err
+}
+
+func (runner *errorRunner) Stream(ctx context.Context, stdout io.Writer, args ...string) error {
+	output, err := runner.Run(ctx, nil, args...)
+	if err != nil {
+		return err
+	}
+	_, err = stdout.Write(output)
+	return err
 }

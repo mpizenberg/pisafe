@@ -74,11 +74,34 @@ rm -rf -- "$run_root"
 	-C "$run_root" -cf - stage |
 	podman unshare tar --numeric-owner -C "$workspace" -xf -
 `
+
+	fetchApplyScript = `set -eu
+workspace="/var/lib/pisafe/runs/$1/workspace"
+test -d "$workspace"
+exec podman unshare cat "$workspace/apply/$2"
+`
+
+	removeApplyScript = `set -eu
+workspace="/var/lib/pisafe/runs/$1/workspace"
+test -d "$workspace"
+podman unshare rm -rf -- "$workspace/apply"
+`
 )
+
+// maxApplyArtifactBytes stops a run from filling the Mac's disk through the
+// apply path. Run storage is smaller than this, so no bundle a run can
+// legitimately produce reaches it.
+const maxApplyArtifactBytes = int64(8 << 30)
 
 // submoduleArtifactPattern bounds the stage file names a submodule may
 // contribute, so an artifact name can never become a path.
 var submoduleArtifactPattern = regexp.MustCompile(`^submodule-[0-9]{1,4}\.(bundle|patch)$`)
+
+// applyArtifactPattern bounds the file names an apply package may hand back,
+// so the run cannot steer the fetch outside its own package directory.
+var applyArtifactPattern = regexp.MustCompile(`^apply(-submodule-[0-9]{1,4})?\.bundle$`)
+
+var sha256Pattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 // Transport executes commands and streams artifacts through Lima's control
 // SSH connection. It does not use a host mount, guest agent, or Podman socket.
@@ -283,6 +306,90 @@ func (transport Transport) ImportStage(
 	return nil
 }
 
+// FetchApplyArtifact streams one bundle out of the run's private storage into
+// destination, which must not already exist. The transfer is kept only if the
+// received bytes hash to what the run declared.
+func (transport Transport) FetchApplyArtifact(
+	ctx context.Context,
+	runID string,
+	artifact gitstage.ApplyArtifact,
+	destination string,
+) error {
+	if err := runid.Validate(runID); err != nil {
+		return err
+	}
+	if !applyArtifactPattern.MatchString(artifact.Name) {
+		return fmt.Errorf("unsupported apply artifact %q", artifact.Name)
+	}
+	if !sha256Pattern.MatchString(artifact.SHA256) {
+		return fmt.Errorf("apply artifact %q was announced without a hash", artifact.Name)
+	}
+	file, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create apply artifact: %w", err)
+	}
+	complete := false
+	defer func() {
+		file.Close()
+		if !complete {
+			os.Remove(destination)
+		}
+	}()
+
+	digest := sha256.New()
+	bounded := &boundedWriter{
+		writer:    io.MultiWriter(file, digest),
+		remaining: maxApplyArtifactBytes,
+	}
+	if err := transport.streamScript(
+		ctx,
+		bounded,
+		fetchApplyScript,
+		runID,
+		artifact.Name,
+	); err != nil {
+		return fmt.Errorf("fetch %s: %w", artifact.Name, err)
+	}
+	if hex.EncodeToString(digest.Sum(nil)) != artifact.SHA256 {
+		return fmt.Errorf("apply artifact %q changed in transfer", artifact.Name)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync apply artifact: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close apply artifact: %w", err)
+	}
+	complete = true
+	return nil
+}
+
+// RemoveApplyPackage deletes the bundles a run produced. The run rebuilds them
+// from its workspace whenever apply runs again.
+func (transport Transport) RemoveApplyPackage(ctx context.Context, runID string) error {
+	if err := runid.Validate(runID); err != nil {
+		return err
+	}
+	if _, err := transport.shellScript(ctx, nil, removeApplyScript, runID); err != nil {
+		return fmt.Errorf("remove apply package: %w", err)
+	}
+	return nil
+}
+
+// boundedWriter fails a transfer that outgrows its limit instead of letting a
+// run fill the Mac's disk.
+type boundedWriter struct {
+	writer    io.Writer
+	remaining int64
+}
+
+func (bounded *boundedWriter) Write(data []byte) (int, error) {
+	if int64(len(data)) > bounded.remaining {
+		return 0, fmt.Errorf("artifact exceeds %d bytes", maxApplyArtifactBytes)
+	}
+	bounded.remaining -= int64(len(data))
+	return bounded.writer.Write(data)
+}
+
 func (transport Transport) uploadArtifact(
 	ctx context.Context,
 	runID string,
@@ -358,4 +465,18 @@ func (transport Transport) shellScript(
 	command := []string{"sh", "-ceu", script, "pisafe-remote"}
 	command = append(command, args...)
 	return transport.Execute(ctx, stdin, command...)
+}
+
+func (transport Transport) streamScript(
+	ctx context.Context,
+	stdout io.Writer,
+	script string,
+	args ...string,
+) error {
+	command := []string{
+		"shell", transport.instance,
+		"sh", "-ceu", script, "pisafe-remote",
+	}
+	command = append(command, args...)
+	return transport.runner.Stream(ctx, stdout, command...)
 }

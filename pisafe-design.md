@@ -878,6 +878,10 @@ The first usable release should prove:
 - Submodule refs are committed before the superproject ref. The reverse order
   would let an interruption leave a superproject branch whose gitlinks name
   commits that no ref keeps reachable.
+- Apply captures a run in a throwaway `--network=none` container over the
+  run's workspace, rather than exec-ing into the live run container. It then
+  works whether or not the run is up, costs none of the eight-hour budget,
+  and needs no network or home mount.
 - A prepared apply carries hashes and fixed artifact names, never filesystem
   paths. The alternative, reporting the paths the run wrote, would let a
   compromised run name a file on the Mac; instead both sides derive the same

@@ -23,6 +23,9 @@ const (
 
 type Runner interface {
 	Run(ctx context.Context, stdin io.Reader, args ...string) ([]byte, error)
+	// Stream writes a command's standard output to the caller as it arrives,
+	// so an artifact leaving the VM is never held in memory as a whole.
+	Stream(ctx context.Context, stdout io.Writer, args ...string) error
 }
 
 type Manager struct {
@@ -256,20 +259,33 @@ type execRunner struct {
 }
 
 func (runner execRunner) Run(ctx context.Context, stdin io.Reader, args ...string) ([]byte, error) {
+	var stdout bytes.Buffer
 	command := exec.CommandContext(ctx, runner.binary, args...)
 	command.Stdin = stdin
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
 	command.Stdout = &stdout
+	if err := runner.wait(command, args); err != nil {
+		return nil, err
+	}
+	return stdout.Bytes(), nil
+}
+
+func (runner execRunner) Stream(ctx context.Context, stdout io.Writer, args ...string) error {
+	command := exec.CommandContext(ctx, runner.binary, args...)
+	command.Stdout = stdout
+	return runner.wait(command, args)
+}
+
+func (runner execRunner) wait(command *exec.Cmd, args []string) error {
+	var stderr bytes.Buffer
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
 		detail := strings.TrimSpace(stderr.String())
 		if detail == "" {
 			detail = err.Error()
 		}
-		return nil, fmt.Errorf("%s %s: %s", runner.binary, strings.Join(args, " "), detail)
+		return fmt.Errorf("%s %s: %s", runner.binary, strings.Join(args, " "), detail)
 	}
-	return stdout.Bytes(), nil
+	return nil
 }
 
 func WriteConfig(path string, config []byte) error {

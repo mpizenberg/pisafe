@@ -93,6 +93,44 @@ func TestStorageAndMaterializeArgsAreRunScoped(t *testing.T) {
 	}
 }
 
+func TestPrepareApplyArgsRunWithoutNetworkOrRunHome(t *testing.T) {
+	spec := DefaultSpec("run-123", testImageID)
+	args, err := spec.PrepareApplyArgs("project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, expected := range []string{
+		"--rm",
+		"--interactive",
+		"--network=none",
+		"--user 1000:1000",
+		"--read-only",
+		"--cap-drop=all",
+		"--security-opt=no-new-privileges",
+		"type=bind,src=/var/lib/pisafe/runs/run-123/workspace,dst=/work,nodev,nosuid",
+		testImageID,
+		"pisafe-guest prepare-apply /work/project /work/apply",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Errorf("apply args lack %q:\n%s", expected, joined)
+		}
+	}
+	for _, forbidden := range []string{
+		spec.HomePath(),
+		spec.ContainerName(),
+		"--timeout",
+		"--detach",
+	} {
+		if strings.Contains(joined, forbidden) {
+			t.Errorf("apply args unexpectedly contain %q:\n%s", forbidden, joined)
+		}
+	}
+	if _, err := spec.PrepareApplyArgs("../project"); err == nil {
+		t.Fatal("unsafe project directory was accepted")
+	}
+}
+
 func TestSpecRejectsMutableImageAndUnsafeNames(t *testing.T) {
 	for _, spec := range []Spec{
 		DefaultSpec("../escape", testImageID),

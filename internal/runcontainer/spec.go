@@ -17,6 +17,10 @@ const (
 	DefaultTemporary  = int64(1024 * 1024 * 1024)
 	DefaultPersistent = int64(10 * 1024 * 1024 * 1024)
 	DefaultWallClock  = int64(8 * 60 * 60)
+	// applyPackage is where a run leaves the bundles apply fetches. It sits in
+	// the run's own workspace, the only writable place both the run and the
+	// VM-side transport can reach.
+	applyPackage      = "apply"
 	containerUser     = "1000:1000"
 	containerWorkRoot = "/work"
 	containerHome     = "/home/node"
@@ -182,6 +186,45 @@ func (spec Spec) ConfigureInferenceArgs() ([]string, error) {
 		"--user", containerUser,
 		spec.ContainerName(),
 		"pisafe-guest", "configure-inference",
+	}, nil
+}
+
+// PrepareApplyArgs captures a run's result in a throwaway container over the
+// run's persistent workspace. Apply needs no network, no home, and no part of
+// the run's wall-clock budget, so it gets none of them, and it works whether
+// or not the run container exists.
+func (spec Spec) PrepareApplyArgs(projectDirectory string) ([]string, error) {
+	if err := spec.Validate(); err != nil {
+		return nil, err
+	}
+	if err := runid.Validate(projectDirectory); err != nil {
+		return nil, fmt.Errorf("invalid project directory: %w", err)
+	}
+	memory := strconv.FormatInt(spec.MemoryBytes, 10)
+	return []string{
+		"run",
+		"--rm",
+		"--interactive",
+		"--pull=never",
+		"--label", "io.pisafe.run=" + spec.RunID,
+		"--label", "io.pisafe.kind=apply",
+		"--user", containerUser,
+		"--read-only",
+		"--cap-drop=all",
+		"--security-opt=no-new-privileges",
+		"--network=none",
+		"--memory", memory,
+		"--memory-swap", memory,
+		"--pids-limit", strconv.Itoa(spec.PIDs),
+		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=" + strconv.FormatInt(spec.TmpBytes, 10),
+		"--mount", "type=bind,src=" + spec.WorkspacePath() + ",dst=" + containerWorkRoot + ",nodev,nosuid",
+		"--workdir", containerWorkRoot,
+		"--env", "HOME=/tmp",
+		"--env", "GIT_TERMINAL_PROMPT=0",
+		spec.ImageID,
+		"pisafe-guest", "prepare-apply",
+		containerWorkRoot + "/" + projectDirectory,
+		containerWorkRoot + "/" + applyPackage,
 	}, nil
 }
 

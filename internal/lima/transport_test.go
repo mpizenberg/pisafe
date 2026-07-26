@@ -1,9 +1,11 @@
 package lima
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -251,6 +253,83 @@ func TestTransportStreamsSubmoduleAndInputArtifacts(t *testing.T) {
 	}
 	if !strings.Contains(uploaded["snapshot.json"], `"path":"dependency"`) {
 		t.Errorf("snapshot lacks the submodule: %s", uploaded["snapshot.json"])
+	}
+}
+
+func TestFetchApplyArtifactKeepsOnlyAVerifiedTransfer(t *testing.T) {
+	content := []byte("apply bundle\x00content")
+	digest := sha256.Sum256(content)
+	artifact := gitstage.ApplyArtifact{
+		Name:   "apply-submodule-0.bundle",
+		SHA256: hex.EncodeToString(digest[:]),
+	}
+	runner := &fakeRunner{outputs: [][]byte{content}}
+	transport := Transport{instance: InstanceName, runner: runner}
+	destination := filepath.Join(t.TempDir(), artifact.Name)
+
+	if err := transport.FetchApplyArtifact(
+		context.Background(),
+		"safe-run",
+		artifact,
+		destination,
+	); err != nil {
+		t.Fatal(err)
+	}
+	received, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(received, content) {
+		t.Fatalf("fetched %q", received)
+	}
+	assertArgsPrefix(t, runner.calls[0], "shell", "pisafe", "sh", "-ceu")
+	fetchArgs := runner.calls[0].args
+	if got, want := fetchArgs[len(fetchArgs)-2:], []string{
+		"safe-run", artifact.Name,
+	}; strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("fetch args = %#v, want %#v", got, want)
+	}
+	if strings.Contains(strings.Join(fetchArgs, " "), destination) {
+		t.Fatalf("VM was told the Mac path: %v", fetchArgs)
+	}
+
+	// A transfer that does not hash to what the run declared leaves nothing
+	// behind for the import to read.
+	corrupted := filepath.Join(t.TempDir(), artifact.Name)
+	transport.runner = &fakeRunner{outputs: [][]byte{[]byte("tampered")}}
+	err = transport.FetchApplyArtifact(context.Background(), "safe-run", artifact, corrupted)
+	if err == nil || !strings.Contains(err.Error(), "changed in transfer") {
+		t.Fatalf("error = %v", err)
+	}
+	if _, err := os.Stat(corrupted); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("corrupted artifact was kept: %v", err)
+	}
+}
+
+func TestFetchApplyArtifactRejectsNamesOutsideTheApplyContract(t *testing.T) {
+	runner := &fakeRunner{}
+	transport := Transport{instance: InstanceName, runner: runner}
+	hash := strings.Repeat("a", 64)
+	for _, artifact := range []gitstage.ApplyArtifact{
+		{Name: "../escape", SHA256: hash},
+		{Name: "apply.bundle.bak", SHA256: hash},
+		{Name: "apply-submodule-.bundle", SHA256: hash},
+		{Name: "source.bundle", SHA256: hash},
+		{Name: "apply.bundle", SHA256: "not-a-hash"},
+		{Name: "apply.bundle"},
+	} {
+		err := transport.FetchApplyArtifact(
+			context.Background(),
+			"safe-run",
+			artifact,
+			filepath.Join(t.TempDir(), "out"),
+		)
+		if err == nil {
+			t.Errorf("FetchApplyArtifact(%#v) unexpectedly succeeded", artifact)
+		}
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("rejected artifacts still reached the VM: %#v", runner.calls)
 	}
 }
 

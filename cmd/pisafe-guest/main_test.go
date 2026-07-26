@@ -93,6 +93,94 @@ func TestMaterializeRejectsHostPathInSnapshot(t *testing.T) {
 	}
 }
 
+func TestPrepareApplyCommandReportsBundlesWithoutPaths(t *testing.T) {
+	source := initGuestTestRepository(t)
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	snapshot, err := gitstage.Stage(
+		context.Background(),
+		gitstage.PrepareRequest{SourcePath: source, RunID: "apply-guest"},
+		workspace,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(workspace, "tracked.txt"), []byte("agent result\n"), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.SourceRoot = ""
+	snapshotJSON, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A leftover package from an interrupted attempt must not block a retry.
+	packageDirectory := filepath.Join(workspace, "apply")
+	if err := os.Mkdir(packageDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(packageDirectory, "apply.bundle"), []byte("stale"), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if err := run(
+		context.Background(),
+		[]string{"prepare-apply", workspace, packageDirectory},
+		bytes.NewReader(snapshotJSON),
+		&output,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), packageDirectory) {
+		t.Fatalf("prepared apply disclosed a path: %s", output.String())
+	}
+	var prepared gitstage.PreparedApply
+	decoder := json.NewDecoder(bytes.NewReader(output.Bytes()))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&prepared); err != nil {
+		t.Fatal(err)
+	}
+	if prepared.RunID != "apply-guest" || prepared.FinalCommit == "" {
+		t.Fatalf("prepared = %#v", prepared)
+	}
+	artifacts := prepared.Artifacts()
+	if len(artifacts) != 1 || artifacts[0].Name != "apply.bundle" {
+		t.Fatalf("artifacts = %#v", artifacts)
+	}
+	content, err := os.ReadFile(filepath.Join(packageDirectory, artifacts[0].Name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(content, []byte("stale")) {
+		t.Fatal("stale bundle survived")
+	}
+}
+
+func TestPrepareApplyRejectsHostPathInSnapshot(t *testing.T) {
+	snapshot, err := json.Marshal(gitstage.Snapshot{
+		RunID:      "unsafe",
+		SourceRoot: "/Users/alice/project",
+		SourceHead: strings.Repeat("a", 40),
+		WorkRef:    "refs/heads/work/unsafe",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = run(
+		context.Background(),
+		[]string{"prepare-apply", t.TempDir(), filepath.Join(t.TempDir(), "apply")},
+		bytes.NewReader(snapshot),
+		&bytes.Buffer{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "host source path") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestConfigureSSHCreatesRestrictedRunFiles(t *testing.T) {
 	home := t.TempDir()
 	publicKey := guestPublicKey(t)

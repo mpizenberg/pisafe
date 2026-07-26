@@ -43,6 +43,11 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 			return usageError()
 		}
 		return materialize(ctx, args[1], args[2], out)
+	case "prepare-apply":
+		if len(args) != 3 {
+			return usageError()
+		}
+		return prepareApply(ctx, args[1], args[2], in, out)
 	case "configure-ssh":
 		if len(args) != 1 {
 			return usageError()
@@ -71,6 +76,7 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 func usageError() error {
 	return errors.New(
 		"usage: pisafe-guest <materialize <stage-directory> <workspace>" +
+			"|prepare-apply <workspace> <package-directory>" +
 			"|configure-ssh|configure-inference|serve-ssh|proxy-ssh>",
 	)
 }
@@ -185,21 +191,9 @@ func materialize(
 		return fmt.Errorf("open stage snapshot: %w", err)
 	}
 	defer snapshotFile.Close()
-	decoder := json.NewDecoder(io.LimitReader(snapshotFile, 1<<20))
-	decoder.DisallowUnknownFields()
-	var snapshot gitstage.Snapshot
-	if err := decoder.Decode(&snapshot); err != nil {
-		return fmt.Errorf("decode stage snapshot: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("stage snapshot contains trailing data")
-		}
-		return fmt.Errorf("decode stage snapshot trailer: %w", err)
-	}
-	if snapshot.SourceRoot != "" {
-		return errors.New("stage snapshot unexpectedly contains a host source path")
+	snapshot, err := decodeSnapshot(snapshotFile)
+	if err != nil {
+		return err
 	}
 
 	submodules := make([]gitstage.PreparedSubmodule, 0, len(snapshot.Submodules))
@@ -222,6 +216,60 @@ func materialize(
 	}
 	encoder := json.NewEncoder(out)
 	return encoder.Encode(materialized)
+}
+
+// prepareApply captures whatever the agent left in the run and writes the
+// bundles the controller then fetches. A previous attempt's package is
+// superseded, so a failed apply can simply be retried.
+func prepareApply(
+	ctx context.Context,
+	workspacePath string,
+	packagePath string,
+	in io.Reader,
+	out io.Writer,
+) error {
+	snapshot, err := decodeSnapshot(in)
+	if err != nil {
+		return err
+	}
+	packageDirectory := filepath.Clean(packagePath)
+	if err := os.RemoveAll(packageDirectory); err != nil {
+		return fmt.Errorf("clear apply package: %w", err)
+	}
+	prepared, err := gitstage.PrepareApply(
+		ctx,
+		snapshot,
+		filepath.Clean(workspacePath),
+		packageDirectory,
+	)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(out).Encode(prepared)
+}
+
+// decodeSnapshot reads the run description the controller sends across the
+// boundary. A snapshot that names a Mac path is refused rather than used.
+func decodeSnapshot(in io.Reader) (gitstage.Snapshot, error) {
+	decoder := json.NewDecoder(io.LimitReader(in, 1<<20))
+	decoder.DisallowUnknownFields()
+	var snapshot gitstage.Snapshot
+	if err := decoder.Decode(&snapshot); err != nil {
+		return gitstage.Snapshot{}, fmt.Errorf("decode stage snapshot: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return gitstage.Snapshot{}, errors.New("stage snapshot contains trailing data")
+		}
+		return gitstage.Snapshot{}, fmt.Errorf("decode stage snapshot trailer: %w", err)
+	}
+	if snapshot.SourceRoot != "" {
+		return gitstage.Snapshot{}, errors.New(
+			"stage snapshot unexpectedly contains a host source path",
+		)
+	}
+	return snapshot, nil
 }
 
 func configureSSH(
