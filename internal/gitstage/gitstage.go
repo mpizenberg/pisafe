@@ -42,21 +42,21 @@ type Snapshot struct {
 }
 
 type ApplyResult struct {
-	Branch       string
-	Tip          string
-	FinalCommit  string
-	Untracked    []string
-	BundleSHA256 string
-	Submodules   []AppliedSubmodule
+	Branch       string             `json:"branch"`
+	Tip          string             `json:"tip"`
+	FinalCommit  string             `json:"final_commit,omitempty"`
+	Untracked    []string           `json:"untracked,omitempty"`
+	BundleSHA256 string             `json:"bundle_sha256,omitempty"`
+	Submodules   []AppliedSubmodule `json:"submodules,omitempty"`
 }
 
 // AppliedSubmodule reports which commit the imported superproject branch
 // expects in one submodule, and the branch that keeps it reachable. Branch is
 // empty when the submodule did not change.
 type AppliedSubmodule struct {
-	Path   string
-	Branch string
-	Tip    string
+	Path   string `json:"path"`
+	Branch string `json:"branch,omitempty"`
+	Tip    string `json:"tip"`
 }
 
 type PreparedStage struct {

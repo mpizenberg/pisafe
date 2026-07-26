@@ -153,11 +153,16 @@ func TestImportRejectsTamperedApplyBundle(t *testing.T) {
 	}
 	mustWrite(t, filepath.Join(workspace, "tracked.txt"), "agent result\n")
 
-	prepared, err := PrepareApply(ctx, snapshot, workspace, t.TempDir())
+	packageDir := t.TempDir()
+	prepared, err := PrepareApply(ctx, snapshot, workspace, packageDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	file, err := os.OpenFile(prepared.BundlePath, os.O_APPEND|os.O_WRONLY, 0)
+	file, err := os.OpenFile(
+		filepath.Join(packageDir, applyBundleName),
+		os.O_APPEND|os.O_WRONLY,
+		0,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +174,7 @@ func TestImportRejectsTamperedApplyBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = ImportApply(ctx, snapshot, prepared)
+	_, err = ImportApply(ctx, snapshot, prepared, packageDir)
 	if err == nil || !strings.Contains(err.Error(), "hash mismatch") {
 		t.Fatalf("ImportApply error = %v, want hash mismatch", err)
 	}

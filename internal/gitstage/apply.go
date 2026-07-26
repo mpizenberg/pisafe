@@ -15,25 +15,55 @@ import (
 	"github.com/mpizenberg/pisafe/internal/runid"
 )
 
+// PreparedApply describes what one run produced. It crosses the boundary out
+// of the run, so it names no filesystem path: every bundle is addressed by the
+// artifact names formed here and verified against the hashes it carries.
 type PreparedApply struct {
-	RunID        string
-	Tip          string
-	FinalCommit  string
-	Untracked    []string
-	BundlePath   string
-	BundleSHA256 string
-	Submodules   []PreparedApplySubmodule
+	RunID        string                   `json:"run_id"`
+	Tip          string                   `json:"tip"`
+	FinalCommit  string                   `json:"final_commit,omitempty"`
+	Untracked    []string                 `json:"untracked,omitempty"`
+	BundleSHA256 string                   `json:"bundle_sha256,omitempty"`
+	Submodules   []PreparedApplySubmodule `json:"submodules,omitempty"`
 }
 
 // PreparedApplySubmodule carries one submodule's new history. Base is the
 // commit the Mac already has, which is where the incremental bundle starts.
 type PreparedApplySubmodule struct {
-	Path         string
-	Base         string
-	Tip          string
-	FinalCommit  string
-	BundlePath   string
-	BundleSHA256 string
+	Path         string `json:"path"`
+	Base         string `json:"base"`
+	Tip          string `json:"tip"`
+	FinalCommit  string `json:"final_commit,omitempty"`
+	BundleSHA256 string `json:"bundle_sha256,omitempty"`
+}
+
+// ApplyArtifact names one bundle the run must hand back and the hash it must
+// still have on arrival.
+type ApplyArtifact struct {
+	Name   string
+	SHA256 string
+}
+
+// Artifacts lists the bundles that belong to a prepared apply, in the order
+// they are imported.
+func (prepared PreparedApply) Artifacts() []ApplyArtifact {
+	artifacts := make([]ApplyArtifact, 0, len(prepared.Submodules)+1)
+	for index, submodule := range prepared.Submodules {
+		if submodule.BundleSHA256 == "" {
+			continue
+		}
+		artifacts = append(artifacts, ApplyArtifact{
+			Name:   applySubmoduleBundleName(index),
+			SHA256: submodule.BundleSHA256,
+		})
+	}
+	if prepared.BundleSHA256 != "" {
+		artifacts = append(artifacts, ApplyArtifact{
+			Name:   applyBundleName,
+			SHA256: prepared.BundleSHA256,
+		})
+	}
+	return artifacts
 }
 
 // ApplyJournal is the durable record of one in-flight apply. Every object it
@@ -57,15 +87,17 @@ type ApplyStep struct {
 // PlannedApply pairs the journal to execute with what the user will be told
 // once it succeeds.
 type PlannedApply struct {
-	Journal ApplyJournal
-	Result  ApplyResult
+	Journal ApplyJournal `json:"journal"`
+	Result  ApplyResult  `json:"result"`
 }
 
 var ErrApplyNeedsReconciliation = errors.New(
 	"a ref changed outside pisafe; apply stopped for manual reconciliation",
 )
 
-func applyBundleName(index int) string {
+const applyBundleName = "apply.bundle"
+
+func applySubmoduleBundleName(index int) string {
 	return "apply-submodule-" + strconv.Itoa(index) + ".bundle"
 }
 
@@ -87,6 +119,9 @@ func PrepareApply(
 	}
 	if packageDir == "" {
 		return PreparedApply{}, fmt.Errorf("apply package directory is required")
+	}
+	if err := os.MkdirAll(packageDir, 0o700); err != nil {
+		return PreparedApply{}, fmt.Errorf("create apply package: %w", err)
 	}
 
 	submodules, untracked, err := prepareApplySubmodules(ctx, snapshot, workspace, packageDir)
@@ -123,18 +158,16 @@ func PrepareApply(
 	if tip == snapshot.SourceHead {
 		return prepared, nil
 	}
-	bundlePath := filepath.Join(packageDir, "apply.bundle")
 	hash, err := createIncrementalBundle(
 		ctx,
 		workspace,
-		bundlePath,
+		filepath.Join(packageDir, applyBundleName),
 		snapshot.WorkRef,
 		snapshot.SourceHead,
 	)
 	if err != nil {
 		return PreparedApply{}, err
 	}
-	prepared.BundlePath = bundlePath
 	prepared.BundleSHA256 = hash
 	return prepared, nil
 }
@@ -186,11 +219,10 @@ func prepareApplySubmodules(
 			FinalCommit: finalCommit,
 		}
 		if tip != submodule.Head {
-			entry.BundlePath = filepath.Join(packageDir, applyBundleName(index))
 			hash, err := createIncrementalBundle(
 				ctx,
 				target,
-				entry.BundlePath,
+				filepath.Join(packageDir, applySubmoduleBundleName(index)),
 				"HEAD",
 				submodule.Head,
 			)
@@ -232,11 +264,13 @@ func createIncrementalBundle(
 
 // ImportApply runs on the Mac. It verifies and imports every object set into
 // temporary refs before anything user-visible changes, and returns the journal
-// that CommitApply then executes.
+// that CommitApply then executes. The transferred bundles are read from
+// packageDir under the names the run was told to use.
 func ImportApply(
 	ctx context.Context,
 	snapshot Snapshot,
 	prepared PreparedApply,
+	packageDir string,
 ) (PlannedApply, error) {
 	if runid.Validate(snapshot.RunID) != nil || prepared.RunID != snapshot.RunID {
 		return PlannedApply{}, fmt.Errorf("apply package does not match run")
@@ -292,7 +326,7 @@ func ImportApply(
 			temporaryRef,
 			targetRef,
 			"HEAD",
-			submodule.BundlePath,
+			filepath.Join(packageDir, applySubmoduleBundleName(index)),
 			submodule.BundleSHA256,
 			submodule.Tip,
 		); err != nil {
@@ -315,13 +349,13 @@ func ImportApply(
 			temporaryRef,
 			targetRef,
 			snapshot.WorkRef,
-			prepared.BundlePath,
+			filepath.Join(packageDir, applyBundleName),
 			prepared.BundleSHA256,
 			prepared.Tip,
 		); err != nil {
 			return PlannedApply{}, err
 		}
-	} else if prepared.BundlePath != "" {
+	} else if prepared.BundleSHA256 != "" {
 		return PlannedApply{}, fmt.Errorf("unchanged apply unexpectedly contains a bundle")
 	} else if err := requireAbsentRef(ctx, sourceRoot, targetRef); err != nil {
 		return PlannedApply{}, err
@@ -343,7 +377,7 @@ func importBundle(
 	ctx context.Context,
 	repository, temporaryRef, targetRef, bundleRef, bundlePath, expectedHash, expectedTip string,
 ) error {
-	if bundlePath == "" {
+	if expectedHash == "" {
 		return fmt.Errorf("changed apply has no bundle")
 	}
 	if err := requireAbsentRef(ctx, repository, targetRef); err != nil {
@@ -488,7 +522,7 @@ func Apply(ctx context.Context, snapshot Snapshot, workspace string) (ApplyResul
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	planned, err := ImportApply(ctx, snapshot, prepared)
+	planned, err := ImportApply(ctx, snapshot, prepared, packageDir)
 	if err != nil {
 		return ApplyResult{}, err
 	}

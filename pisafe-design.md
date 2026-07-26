@@ -878,6 +878,11 @@ The first usable release should prove:
 - Submodule refs are committed before the superproject ref. The reverse order
   would let an interruption leave a superproject branch whose gitlinks name
   commits that no ref keeps reachable.
+- A prepared apply carries hashes and fixed artifact names, never filesystem
+  paths. The alternative, reporting the paths the run wrote, would let a
+  compromised run name a file on the Mac; instead both sides derive the same
+  names from the same helper, and the Mac reads only from the package
+  directory it chose.
 
 ## Primary references
 

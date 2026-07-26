@@ -201,32 +201,78 @@ func TestImportApplyRefusesAPackageThatDisagreesWithTheRun(t *testing.T) {
 	_, workspace, snapshot := stageWithSubmodule(t, "disagreeing-run")
 	mustWrite(t, filepath.Join(workspace, "tracked.txt"), "work\n")
 
-	prepared, err := PrepareApply(ctx, snapshot, workspace, t.TempDir())
+	packageDir := t.TempDir()
+	prepared, err := PrepareApply(ctx, snapshot, workspace, packageDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	dropped := prepared
 	dropped.Submodules = nil
-	if _, err := ImportApply(ctx, snapshot, dropped); err == nil ||
+	if _, err := ImportApply(ctx, snapshot, dropped, packageDir); err == nil ||
 		!strings.Contains(err.Error(), "staged submodules") {
 		t.Fatalf("dropped submodule err = %v", err)
 	}
 
 	renamed := prepared
 	renamed.Submodules = []PreparedApplySubmodule{{Path: "elsewhere"}}
-	if _, err := ImportApply(ctx, snapshot, renamed); err == nil ||
+	if _, err := ImportApply(ctx, snapshot, renamed, packageDir); err == nil ||
 		!strings.Contains(err.Error(), "staged submodules") {
 		t.Fatalf("renamed submodule err = %v", err)
 	}
 }
 
-func planApply(t *testing.T, snapshot Snapshot, workspace string) PlannedApply {
-	t.Helper()
-	prepared, err := PrepareApply(context.Background(), snapshot, workspace, t.TempDir())
+func TestPreparedApplyNamesOnlyTheBundlesItProduced(t *testing.T) {
+	_, workspace, snapshot := stageWithSubmodule(t, "artifact-run")
+	submoduleWorkspace := filepath.Join(workspace, "dependency")
+	mustWrite(t, filepath.Join(submoduleWorkspace, "tracked.txt"), "submodule work\n")
+	runGit(t, submoduleWorkspace, "add", "tracked.txt")
+	runGit(t, submoduleWorkspace, "commit", "-qm", "submodule change")
+
+	packageDir := t.TempDir()
+	prepared, err := PrepareApply(context.Background(), snapshot, workspace, packageDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	planned, err := ImportApply(context.Background(), snapshot, prepared)
+	artifacts := prepared.Artifacts()
+	if len(artifacts) != 2 ||
+		artifacts[0].Name != "apply-submodule-0.bundle" ||
+		artifacts[1].Name != "apply.bundle" {
+		t.Fatalf("artifacts = %#v", artifacts)
+	}
+	for _, artifact := range artifacts {
+		hash, err := fileSHA256(filepath.Join(packageDir, artifact.Name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hash != artifact.SHA256 {
+			t.Fatalf("%s hash = %s, want %s", artifact.Name, hash, artifact.SHA256)
+		}
+	}
+
+	// An unchanged repository contributes no bundle to fetch.
+	_, quietWorkspace, quietSnapshot := stageWithSubmodule(t, "quiet-artifact-run")
+	quiet, err := PrepareApply(
+		context.Background(),
+		quietSnapshot,
+		quietWorkspace,
+		t.TempDir(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(quiet.Artifacts()) != 0 {
+		t.Fatalf("unchanged artifacts = %#v", quiet.Artifacts())
+	}
+}
+
+func planApply(t *testing.T, snapshot Snapshot, workspace string) PlannedApply {
+	t.Helper()
+	packageDir := t.TempDir()
+	prepared, err := PrepareApply(context.Background(), snapshot, workspace, packageDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned, err := ImportApply(context.Background(), snapshot, prepared, packageDir)
 	if err != nil {
 		t.Fatal(err)
 	}
