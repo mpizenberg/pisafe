@@ -102,6 +102,11 @@ func (controller Controller) importRun(
 	manifest runstate.Manifest,
 	imageID string,
 ) (gitstage.PlannedApply, error) {
+	// A run's storage is mounted per VM boot, not per run, so a VM that
+	// restarted between the run and its apply presents an empty run root.
+	if err := controller.backend.VerifyStorage(ctx, manifest.RunID); err != nil {
+		return gitstage.PlannedApply{}, err
+	}
 	spec := runcontainer.DefaultSpec(manifest.RunID, imageID)
 	spec.WallSeconds = manifest.ActiveLimitSeconds
 	args, err := spec.PrepareApplyArgs(manifest.Project)

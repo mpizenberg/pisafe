@@ -900,6 +900,12 @@ The first usable release should prove:
   compromised run name a file on the Mac; instead both sides derive the same
   names from the same helper, and the Mac reads only from the package
   directory it chose.
+- Discard is reachable from every state that still owns resources, including
+  `imported`, rather than only from `creating` and `stopped`. Treating
+  `imported` as fully terminal stranded each imported run's 10 GiB
+  filesystem forever and contradicted apply's own closing guidance. One
+  exported predicate now states the rule, because the controller reclaims
+  storage before the store records the transition and the two must agree.
 
 ## Primary references
 

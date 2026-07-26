@@ -62,7 +62,10 @@ silently edit global SSH or Zed settings. Each run has a live-validated
 enforced by Podman. Stop/resume and confirmed discard are live-validated.
 `pisafe apply RUN` stops the run, captures it in a throwaway network-less
 container, streams the verified bundles back, and creates `pisafe/RUN` in the
-superproject and each changed submodule without touching the checkout.
+superproject and each changed submodule without touching the checkout. It is
+live-validated against a run whose commits, submodule commit, uncommitted
+changes, and untracked leftovers all landed exactly where the design says.
+An imported run keeps its workspace until `pisafe discard` reclaims it.
 `pisafe broker` relays inference from the Mac into runs over a reverse SSH
 forward to `192.0.2.1:18080`, the firewall's single static exception; runs
 hold only a revocable per-run capability, never a provider credential.

@@ -53,6 +53,17 @@ const (
 	StateExpired   State = "expired"
 )
 
+// Discardable reports whether a run still owns resources discard reclaims.
+// Every state but active does: an active run is stopped first so its elapsed
+// time is accounted, and a discarded one owns nothing.
+func Discardable(state State) bool {
+	switch state {
+	case StateCreating, StateStopped, StateImported, StateExpired:
+		return true
+	}
+	return false
+}
+
 type Manifest struct {
 	Version             int               `json:"version"`
 	RunID               string            `json:"run_id"`
@@ -275,7 +286,7 @@ func (store Store) Discard(runID string) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, err
 	}
-	if manifest.State != StateCreating && manifest.State != StateStopped {
+	if !Discardable(manifest.State) {
 		return Manifest{}, fmt.Errorf(
 			"invalid run transition %q → %q",
 			manifest.State,

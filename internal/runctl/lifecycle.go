@@ -183,7 +183,7 @@ func (controller Controller) Discard(
 			return runstate.Manifest{}, err
 		}
 	}
-	if manifest.State != runstate.StateCreating && manifest.State != runstate.StateStopped {
+	if !runstate.Discardable(manifest.State) {
 		return runstate.Manifest{}, fmt.Errorf(
 			"run %q is %s and cannot be discarded",
 			runID,

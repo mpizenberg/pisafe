@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-07-25
+Last updated: 2026-07-26
 
 This file is the durable handoff for continuing `pisafe` from a fresh session.
 The design authority remains [`pisafe-design.md`](pisafe-design.md); this file
@@ -95,6 +95,13 @@ quota-backed VM storage. Do not add a local-workspace fallback.
 - Apply runs the controller's current managed run image rather than the image
   the manifest records, so the guest helper always matches the controller
   reading what it produced.
+- Apply verifies the run's storage before capturing it. A run's fixed-capacity
+  filesystem is mounted per VM boot, not per run, so a VM that restarted
+  between the run and its apply presents an empty run root until the
+  fixed-policy helper remounts it.
+- Discard reclaims a run from every state that still owns resources, including
+  `imported`. An imported run keeps its workspace, its 10 GiB filesystem, and
+  its audit record of where it was imported until it is discarded.
 - Initialized submodules are staged with the superproject: each one
   contributes its own bundle and tracked-state patch, is reconstructed in the
   run, absorbs its git directory, and is registered from `.gitmodules`. Its
@@ -517,6 +524,32 @@ Verified against a real ARM64 VM:
   while removing the container, persistent filesystem, remote stage, and
   client key.
 
+`pisafe apply` is now live-verified end to end against the real VM. A scratch
+repository with an initialized submodule, one dirty tracked file, and one
+untracked file became a run; inside the run, commits were made in both the
+submodule and the superproject, one tracked change was left uncommitted, and
+one untracked file was left behind. Applying that active run stopped it,
+rebuilt the managed image for the current recipe, captured the workspace in
+the throwaway network-less container, streamed both bundles back through
+`podman unshare`, and created `pisafe/<run>` in the superproject and in the
+submodule. Verified afterwards:
+
+- the imported superproject history carries the baseline commit, the commit
+  made in the run, and a final commit holding the uncommitted change;
+- the gitlink on the imported branch is exactly the submodule commit made in
+  the run, and the submodule's own `pisafe/<run>` branch holds it;
+- the untracked file was reported as left behind and is absent from the
+  imported tree;
+- the source checkout is unchanged: same HEAD, same branch, same dirty
+  `app.txt`, same submodule checkout, same file contents;
+- a second apply is refused with `already imported as pisafe/<run>`; and
+- discarding the imported run removed its container, loop mount, and backing
+  filesystem image, leaving the audit record naming the imported branch.
+
+Two runs made before `prepare-apply` existed were also applied with the
+current image, confirming that path: both captured cleanly and reported no
+change, which their workspaces independently confirmed.
+
 Run that end-to-end test with:
 
 ```sh
@@ -530,11 +563,33 @@ go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
 A persistent Lima instance named `pisafe` was left running with security
 profile
 `sha256:35c2cd370359201ce6861c91bc7fb25d8ada1497cf1db2d29c0017eea7e1f459`.
-It contains cached base/test images plus the current managed run image
-`sha256:cfd452f96a7948fbf964d6870dad57dc81da3b82393d731bf701736c0092243a`.
-The recipe digest last moved when the guest helper began pinning Pi's
-transport; two consecutive runs built it once and reused it, which live-checks
-content-addressed reuse.
+It contains cached base/test images plus the current managed run image:
+
+```text
+recipe digest: sha256:a87855c94a06e000c9bc20d5c85b1d21319db44c138e115f1af1c5335199ff99
+image ID:      sha256:8ac646830791cca9c1bea15031ef90c539ae8ae301fbfb299e647748cdf04e03
+```
+
+The recipe digest last moved when the guest helper gained `prepare-apply`;
+the first apply rebuilt the image and every later run and apply reused it,
+which live-checks content-addressed reuse.
+
+That VM entered `VirtualMachineStateError` unattended overnight, almost
+certainly when the host slept, while `limactl list` still reported `Running`
+because the host agent survived. `limactl stop --force` followed by
+`limactl start` recovered it with the disk and both runs intact, and SSH
+returned immediately over a vsock forwarder rather than a forwarded port.
+The stopped-VM SSH failure recorded below did not reproduce.
+
+Recovering that VM exposed two defects, both fixed and covered by tests:
+
+1. A run's storage is mounted per VM boot. Apply did not verify storage
+   before capturing, so after the restart it launched its container over an
+   empty run root and failed with `statfs .../workspace: no such file or
+   directory`. Stop and resume already verified; apply now does too.
+2. An imported run could not be discarded, so its 10 GiB filesystem was
+   unreclaimable and apply's own closing guidance named a command that
+   refused. Discard now covers every state that still owns resources.
 
 The broker-relay slice is fully live-verified against this VM. The first
 live run of the relay tests failed: sshd bound `192.0.2.1:18080` correctly,
@@ -654,10 +709,11 @@ sandboxed result.
   Fully automatic first-launch remains intentionally absent because Zed's CLI
   URL cannot carry `-F` and PiSafe does not silently edit global SSH or Zed
   settings.
-- `pisafe apply` has never run against the VM. The whole path is covered by
-  tests with a fake boundary, but the throwaway apply container, the
-  `podman unshare` fetch out of run storage, and the guest helper's
-  `prepare-apply` have not been exercised on real run storage.
+- A run configures no Git identity, so an agent committing inside it fails
+  with `Author identity unknown` until someone sets one by hand. Only the
+  guest helper's own baseline and final commits work, because they supply an
+  identity explicitly. Seeding the run from the Mac's `user.name`/`user.email`
+  would fix it but copies personal data into the run, so the choice is open.
 - Runs created before `prepare-apply` existed cannot be applied by their own
   image, which is why apply uses the controller's current run image. That
   image must still exist in the VM; a pruned image fails apply, as it fails
@@ -686,10 +742,15 @@ sandboxed result.
 - Security-profile drift is detected and fails closed, but automated
   replacement/reconciliation is intentionally absent because deleting a VM is
   destructive and must be an explicit lifecycle operation.
-- Run stop/resume is live-verified while the dedicated VM remains running.
-  On this host, a cleanly stopped Lima 2.2.0 VZ VM boots but does not regain
-  SSH over either default user-mode networking or `vzNAT`; automatic
-  stopped-VM recovery is therefore not yet reliable.
+- Stopped-VM recovery previously failed on this host: a cleanly stopped Lima
+  2.2.0 VZ VM booted without regaining SSH over either default user-mode
+  networking or `vzNAT`. A force-stop and start after the crash above did
+  regain SSH, over a vsock forwarder, with runs intact. One success is not yet
+  a reliable recovery path, but the failure is no longer reproducible.
+- A VM that crashes leaves `limactl list` reporting `Running` while the VZ
+  machine is in `error`; the real state is only visible in `ha.stderr.log`.
+  Nothing in pisafe detects this, so the first command to touch the VM fails
+  with an opaque SSH reset.
 - Pi's top-level tarball is integrity-pinned, but a reproducible published
   image/digest workflow is still needed to freeze transitive npm resolution.
 
@@ -697,10 +758,8 @@ sandboxed result.
 
 Continue Phase 1 without weakening the boundary:
 
-1. Live-verify `pisafe apply` end to end: create a run, let it produce
-   commits, apply it, and confirm the branch, the submodule refs, and an
-   untouched checkout. This is the first exercise of the apply container and
-   the `podman unshare` fetch.
+1. Decide how a run gets a Git identity, so an agent can commit without
+   hand-configuring one.
 2. Add `diff`, hardened `cp`, and seven-day GC.
 
 ## Useful references

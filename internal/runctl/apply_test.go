@@ -67,6 +67,59 @@ func TestApplyImportsAStoppedRunAndMarksItImported(t *testing.T) {
 	}
 }
 
+// An imported run still holds the fixed-capacity filesystem it ran on, so
+// discard remains the way to reclaim it, exactly as apply's own guidance says.
+func TestImportedRunStillReclaimsItsStorage(t *testing.T) {
+	ctx := context.Background()
+	_, workspace, snapshot := applyFixture(t, "reclaimed-run")
+	writeFile(t, filepath.Join(workspace, "tracked.txt"), "agent result\n")
+
+	backend := &fakeBackend{
+		applyWorkspace: workspace,
+		applyPackage:   filepath.Join(t.TempDir(), "package"),
+	}
+	store := runstate.NewStore(t.TempDir())
+	controller := New(backend, store, &fakeSSHStore{}, testInference{})
+	stoppedRun(t, store, snapshot)
+
+	if _, _, err := controller.Apply(ctx, snapshot.RunID, testImage); err != nil {
+		t.Fatal(err)
+	}
+	discarded, err := controller.Discard(ctx, snapshot.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if discarded.State != runstate.StateDiscarded {
+		t.Fatalf("state = %q", discarded.State)
+	}
+	// The audit record keeps saying where the run went.
+	if discarded.ImportedBranch != "pisafe/reclaimed-run" {
+		t.Fatalf("discarded run forgot its imported branch: %#v", discarded)
+	}
+	if joined := callsString(backend.calls); !strings.Contains(joined, "remove-storage") {
+		t.Fatalf("discard did not reclaim run storage:\n%s", joined)
+	}
+}
+
+func TestApplyMountsRunStorageBeforeCapturingIt(t *testing.T) {
+	ctx := context.Background()
+	_, workspace, snapshot := applyFixture(t, "unmounted-run")
+	writeFile(t, filepath.Join(workspace, "tracked.txt"), "agent result\n")
+
+	backend := &fakeBackend{failAt: "verify-storage"}
+	store := runstate.NewStore(t.TempDir())
+	controller := New(backend, store, &fakeSSHStore{}, testInference{})
+	stoppedRun(t, store, snapshot)
+
+	if _, _, err := controller.Apply(ctx, snapshot.RunID, testImage); err == nil ||
+		!strings.Contains(err.Error(), "verify storage") {
+		t.Fatalf("error = %v", err)
+	}
+	if joined := callsString(backend.calls); strings.Contains(joined, "podman") {
+		t.Fatalf("apply captured a run whose storage was not mounted:\n%s", joined)
+	}
+}
+
 func TestApplyFinishesARecordedPlanWithoutRecapturingTheRun(t *testing.T) {
 	ctx := context.Background()
 	source, workspace, snapshot := applyFixture(t, "interrupted-run")
