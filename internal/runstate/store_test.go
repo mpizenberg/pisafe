@@ -107,7 +107,10 @@ func TestStoreRejectsDuplicateAndCorruptManifest(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.List(); err == nil || !strings.Contains(err.Error(), "identity mismatch") {
+	// The listing stops, so it has to name the record that stopped it.
+	_, err := store.List()
+	if err == nil || !strings.Contains(err.Error(), "identity mismatch") ||
+		!strings.Contains(err.Error(), `"bad"`) {
 		t.Fatalf("error = %v", err)
 	}
 }

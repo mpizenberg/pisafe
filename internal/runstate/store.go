@@ -178,7 +178,8 @@ func (store Store) List() ([]Manifest, error) {
 		runID := entry.Name()[:len(entry.Name())-len(".json")]
 		manifest, err := store.Get(runID)
 		if err != nil {
-			return nil, err
+			// One unreadable record stops the listing, so it has to say which.
+			return nil, fmt.Errorf("run %q: %w", runID, err)
 		}
 		manifests = append(manifests, manifest)
 	}
