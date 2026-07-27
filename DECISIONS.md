@@ -38,6 +38,19 @@ history holds them. New entries are appended in full.
   initiation once and lets conntrack own replies. Deny-set changes now stop new
   connections rather than tearing down established ones, which is acceptable
   because start/resume already fail closed on network change.
+- The run's `sshd_config` restates the container's declared environment through
+  `SetEnv` rather than leaving sessions to inherit it. sshd builds each session
+  environment from scratch, which was confirmed live: the container carries
+  `NODE_VERSION=24.18.0` while an SSH session sees it unset. Without this, no
+  terminal session — `connect` or Zed — ran under the environment the container
+  contract states, so `GIT_TERMINAL_PROMPT=0` in particular was absent wherever
+  a human could act on a prompt.
+- `pisafe connect` replaces its own process with `ssh` instead of supervising it
+  as a child. The terminal belongs to the run for the rest of the session, so a
+  parent would only relay signals, window resizes, and the exit status. The cost
+  is that `connect` can print nothing afterwards.
+- `connect` refuses a stopped run and names `pisafe resume` instead of resuming
+  it. Resuming spends the run's wall-clock budget, which stays an explicit act.
 - Lima's default VZ user-mode network remains in the generated profile. Native
   `vzNAT` was tested but exhibited the same stopped-VM SSH recovery failure and
   made its Mac-side interface appear only after the immutable host-network

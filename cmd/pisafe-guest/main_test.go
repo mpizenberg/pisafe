@@ -348,6 +348,10 @@ func TestConfigureSSHCreatesRestrictedRunFiles(t *testing.T) {
 		"AllowUsers node",
 		"AllowAgentForwarding no",
 		"AllowTcpForwarding no",
+		// sshd builds a session environment from scratch, so the container's
+		// own environment reaches a terminal only if the daemon restates it.
+		"SetEnv GIT_TERMINAL_PROMPT=0 PI_CODING_AGENT_DIR=" +
+			filepath.Join(home, ".pi", "agent") + " PI_SKIP_VERSION_CHECK=1",
 	} {
 		if !strings.Contains(string(config), expected) {
 			t.Errorf("sshd config lacks %q:\n%s", expected, config)

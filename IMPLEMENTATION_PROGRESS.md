@@ -10,13 +10,13 @@ implemented, what has been verified against a real VM, and what comes next.
 ## Current milestone
 
 Phase 1 is in progress. Every command the design enumerates for it exists:
-`run`, `list`, `stop`, `resume`, `diff`, `cp`, `apply`, `discard`, `gc`, `zed`,
-`login`, `broker`, `doctor`. Built in nine slices: the controller and Git
-isolation core; the Lima VM backend and firewall; SSH transport, run records,
-run image and container contract; per-run SSH credentials; user-facing run
-creation; stop/resume/discard and quota-backed storage; the reverse inference
-relay; ChatGPT subscription login; and getting work back out (`diff`, `cp`,
-`gc`).
+`run`, `list`, `connect`, `stop`, `resume`, `diff`, `cp`, `apply`, `discard`,
+`gc`, `zed`, `login`, `broker`, `doctor`. Built in ten slices: the controller
+and Git isolation core; the Lima VM backend and firewall; SSH transport, run
+records, run image and container contract; per-run SSH credentials; user-facing
+run creation; stop/resume/discard and quota-backed storage; the reverse
+inference relay; ChatGPT subscription login; getting work back out (`diff`,
+`cp`, `gc`); and terminal access without an editor (`connect`).
 
 `pisafe run` uses the tested mountless path and materializes inside private
 quota-backed VM storage. **Do not add a local-workspace fallback.**
@@ -198,6 +198,9 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   1000 as the container's main process, listening only on container-local
   `127.0.0.1:2222`, public-key only, with password, keyboard-interactive, root,
   agent, X11, tunnel, user-RC, and TCP forwarding disabled. No port is published.
+  `sshd` builds each session's environment from scratch, so its config restates
+  what the container declares — `GIT_TERMINAL_PROMPT=0`, `PI_CODING_AGENT_DIR`,
+  `PI_SKIP_VERSION_CHECK` — through `SetEnv`.
 - The per-run OpenSSH config uses a `ProxyCommand` executing
   `podman exec --interactive <run-container> pisafe-guest proxy-ssh`, which
   relays binary stdio only to container loopback. The client private key never
@@ -269,6 +272,12 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   and verifies the VM, installs or reuses the image, starts the run, and prints
   the run, workspace, branch, exact `ssh -F` command, excluded inputs, and
   whether the broker will serve inference.
+- `pisafe connect RUN [--shell]` attaches the terminal to a run: it starts Pi in
+  the run's workspace, or a login shell with `--shell`, over the same per-run
+  SSH config Zed uses. It replaces its own process with `ssh`, so signals,
+  window resizes, and the exit status are the session's. Only an active run
+  within its budget is reachable; a stopped one is refused naming
+  `pisafe resume`. `zed` shares that check.
 - `pisafe stop` removes only the container and accounts elapsed active seconds
   conservatively; `pisafe resume` verifies VM boundary, storage identity, image,
   container identity, and mount sources before recreating with the remaining
@@ -290,10 +299,10 @@ Package coverage at this milestone:
 
 ```text
 pisafe        0.0%    runcontainer  72.6%
-pisafe-guest  64.1%   runcopy       80.3%
+pisafe-guest  64.4%   runcopy       80.3%
 broker        96.2%   runctl        70.1%
 chatgpt       70.1%   runid         92.3%
-cli           36.1%   runimage      76.8%
+cli           39.3%   runimage      76.8%
 gitstage      78.8%   runssh        68.0%
 hostnet       50.0%   runstart      80.9%
 lima          67.0%   runstate      74.4%
@@ -350,6 +359,10 @@ with a fake VM boundary:
   covers the label filter, Podman's bare hex ID, an unlabelled image surviving,
   the current recipe recognized without a lookup, a missing recipe digest
   refused, and an in-use image reported without stopping the sweep.
+- **connect**: the exact SSH argument vector for Pi and for a shell, with a
+  workspace path that needs quoting for the remote shell; option parsing;
+  and every inactive run refused before anything launches, whether asked
+  through `connect` or `zed`, with a stopped one told to resume.
 - **Git identity**: repository config preferred over global, an unconfigured Mac
   refused, an installed identity proven by reading back a commit's author,
   empty/oversized/newline values refused, unknown guest fields refused, and run
@@ -362,7 +375,7 @@ with a fake VM boundary:
 ```sh
 PISAFE_LIVE_LIMA=1 go test -v ./internal/lima
 PISAFE_LIVE_LIMA=1 go test -v ./internal/runimage
-PISAFE_LIVE_LIMA=1 PISAFE_LIVE_RUN_IMAGE=sha256:69a90d7f6902dc3f694cca9c98383e5e4d03f8575efdbf98814ff09362e2643c \
+PISAFE_LIVE_LIMA=1 PISAFE_LIVE_RUN_IMAGE=sha256:9f35706d10ca0bdab7d398d225b5a4e6968dbbc5c3d81dc005a42193e1741904 \
   go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
 ```
 
@@ -419,6 +432,16 @@ Verified against a real ARM64 VM:
   whole-workspace requests were refused Mac-side; a directory holding a symlink
   to `/etc/passwd` was refused naming `"linked/escape"`. The run stayed active
   and unchanged.
+- **connect**: `pisafe connect --shell` landed in `/work/connect-demo` as UID
+  1000, on the run's own branch, with `pi` resolving to `/usr/local/bin/pi` and
+  `pi --version` reporting 0.82.0; `pisafe connect` with no flag ran `pi`
+  itself. The session carried `GIT_TERMINAL_PROMPT=0`,
+  `PI_CODING_AGENT_DIR=/home/node/.pi/agent`, `PI_SKIP_VERSION_CHECK=1`,
+  `HOME=/home/node`, and `SHELL=/bin/bash`. That `SetEnv` is what supplies them
+  was shown directly: the same container reports `NODE_VERSION=24.18.0` while
+  the SSH session sees it unset. Stopping the run made `connect` refuse it
+  naming `pisafe resume`, and after resume the same session worked in the
+  recreated container.
 - **Git identity**: a repository whose local identity differed from the global
   one produced a run whose `~/.gitconfig` held the local one; an agent commit
   over SSH with no hand configuration was authored by it while pisafe's own
@@ -462,8 +485,8 @@ A persistent Lima instance named `pisafe` was left running with security profile
 holding cached base/test images plus the current managed run image:
 
 ```text
-recipe digest: sha256:069ff698f6cf1b44fab97636b702a9a93a90c3373527d2d656b4393574dba7b1
-image ID:      sha256:69a90d7f6902dc3f694cca9c98383e5e4d03f8575efdbf98814ff09362e2643c
+recipe digest: sha256:4c9af575787dd6f329704dc2f720628038c76442300f9e08c38d3fc62e3002d1
+image ID:      sha256:9f35706d10ca0bdab7d398d225b5a4e6968dbbc5c3d81dc005a42193e1741904
 ```
 
 Each time the recipe moves, the next run rebuilds and every later run reuses it,
@@ -523,7 +546,9 @@ These explain why parts of the code look the way they do:
 
 ## Known gaps
 
-- No user-facing `connect` implementation exists.
+- `pisafe connect` hands over the terminal and reports nothing afterwards, so a
+  session that ends because the run hit its wall-clock limit looks the same as
+  one the user quit.
 - The dirty-baseline prompt the design describes — keep the baseline commit and
   everything after it, or replay only the later commits onto the captured HEAD —
   is not implemented; apply always imports the whole run history.
@@ -577,9 +602,8 @@ Every Phase 1 command is implemented and live-verified except the record removal
 noted above. What remains is named in the design but outside that list, so the
 next slice is a choice rather than a queue:
 
-1. `pisafe connect <run>`: resume Pi or open a shell in a run.
-2. The dirty-baseline prompt for apply.
-3. A reproducible published image/digest workflow, freezing transitive npm
+1. The dirty-baseline prompt for apply.
+2. A reproducible published image/digest workflow, freezing transitive npm
    resolution inside the run image.
 
 Do not weaken the boundary for any of them.

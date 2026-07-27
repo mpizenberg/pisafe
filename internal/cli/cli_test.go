@@ -3,10 +3,13 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/runcopy"
@@ -166,7 +169,8 @@ func TestShellQuote(t *testing.T) {
 	}
 }
 
-func TestZedRejectsInactiveRunBeforeLaunching(t *testing.T) {
+// Nothing may reach a run that is not currently running, whichever route asks.
+func TestInactiveRunIsRefusedBeforeAnythingLaunches(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("PISAFE_STATE_DIR", root)
 	store := runstate.NewStore(root)
@@ -181,10 +185,114 @@ func TestZedRejectsInactiveRunBeforeLaunching(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	var output bytes.Buffer
-	err := Run(context.Background(), []string{"zed", "inactive-run"}, &output)
-	if err == nil || !strings.Contains(err.Error(), "not active") {
+	for _, args := range [][]string{
+		{"zed", "inactive-run"},
+		{"connect", "inactive-run"},
+		{"connect", "inactive-run", "--shell"},
+	} {
+		err := Run(context.Background(), args, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "not active") {
+			t.Errorf("Run(%v) error = %v", args, err)
+		}
+	}
+	if err := Run(context.Background(), []string{"connect", "missing-run"}, io.Discard); err == nil {
+		t.Error("connect to an unknown run succeeded")
+	}
+}
+
+// A stopped run is the one inactive state the user can act on, so its refusal
+// names the command that fixes it.
+func TestConnectPointsAStoppedRunAtResume(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("PISAFE_STATE_DIR", root)
+	store := runstate.NewStore(root)
+	if _, err := store.Create(runstate.Manifest{
+		RunID:              "stopped-run",
+		Project:            "project",
+		ActiveLimitSeconds: 8 * 60 * 60,
+		Snapshot:           gitstage.Snapshot{RunID: "stopped-run", WorkRef: "refs/heads/work/stopped-run"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(
+		"stopped-run",
+		runstate.SSHConnection{
+			Alias:          "pisafe-stopped-run",
+			IdentityFile:   "/state/id_ed25519",
+			KnownHostsFile: "/state/known_hosts",
+			ConfigFile:     "/state/ssh.config",
+			HostKeyFingerprint: "SHA256:" + base64.RawStdEncoding.EncodeToString(
+				bytes.Repeat([]byte{7}, 32),
+			),
+		},
+		strings.Repeat("a", 40),
+		"pisafe-cap-"+strings.Repeat("b", 64),
+		time.Now(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Stop("stopped-run", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	err := Run(context.Background(), []string{"connect", "stopped-run"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "pisafe resume stopped-run") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestParseConnectRequest(t *testing.T) {
+	request, err := parseConnectRequest([]string{"run-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.runID != "run-123" || request.shell {
+		t.Fatalf("request = %#v", request)
+	}
+
+	shell, err := parseConnectRequest([]string{"--shell", "run-123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shell.runID != "run-123" || !shell.shell {
+		t.Fatalf("request = %#v", shell)
+	}
+
+	for name, args := range map[string][]string{
+		"no run":         {},
+		"only an option": {"--shell"},
+		"two runs":       {"run-123", "run-124"},
+		"unknown option": {"run-123", "--root"},
+	} {
+		if _, err := parseConnectRequest(args); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+}
+
+// The remote command is executed by a shell inside the run, so the workspace
+// path must reach it as one word whatever the project is called.
+func TestConnectArgvStartsPiOrAShellInTheWorkspace(t *testing.T) {
+	manifest := runstate.Manifest{
+		Workspace: "/work/my project",
+		SSH: &runstate.SSHConnection{
+			Alias:      "pisafe-run-123",
+			ConfigFile: "/Users/alice/Library/Application Support/pisafe/ssh.config",
+		},
+	}
+	agent := connectArgv(manifest, false)
+	expected := []string{
+		"ssh",
+		"-F", "/Users/alice/Library/Application Support/pisafe/ssh.config",
+		"-t",
+		"pisafe-run-123",
+		`cd '/work/my project' && exec pi`,
+	}
+	if !slices.Equal(agent, expected) {
+		t.Fatalf("argv = %#v, want %#v", agent, expected)
+	}
+	shell := connectArgv(manifest, true)
+	if shell[len(shell)-1] != `cd '/work/my project' && exec "$SHELL" -l` {
+		t.Fatalf("shell command = %q", shell[len(shell)-1])
 	}
 }
 

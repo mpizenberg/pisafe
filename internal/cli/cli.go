@@ -13,7 +13,7 @@ import (
 )
 
 var errUsage = errors.New(
-	"usage: pisafe <run|stop|resume|diff|cp|apply|discard|gc|list|zed|login|broker|doctor|help>",
+	"usage: pisafe <run|connect|stop|resume|diff|cp|apply|discard|gc|list|zed|login|broker|doctor|help>",
 )
 
 func Run(ctx context.Context, args []string, out io.Writer) error {
@@ -25,6 +25,8 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 	switch args[0] {
 	case "run":
 		return runCreate(ctx, args[1:], out)
+	case "connect":
+		return runConnect(args[1:])
 	case "login":
 		if len(args) != 2 {
 			return fmt.Errorf("login requires a provider: pisafe login chatgpt")
@@ -101,6 +103,9 @@ Usage:
                    Untracked and ignored files stay out unless --include names
                    them; a credential-shaped path needs --include-unsafe,
                    which voids the run's credential isolation.
+  pisafe connect RUN [--shell]
+                   Attach this terminal to a run and start Pi, or with
+                   --shell open a shell in the same container.
   pisafe stop RUN  Stop a run while preserving its workspace
   pisafe resume RUN
                    Resume a stopped run
@@ -175,27 +180,47 @@ func runList(out io.Writer) error {
 	return nil
 }
 
-func runZed(ctx context.Context, runID string) error {
+// activeRun returns a run an editor or terminal can reach right now. Every
+// route into a running container needs the same three facts: the run is
+// active, its wall-clock budget is not spent, and it has an SSH endpoint.
+func activeRun(runID string) (runstate.Manifest, error) {
 	root, err := runstate.DefaultRoot()
 	if err != nil {
-		return err
+		return runstate.Manifest{}, err
 	}
 	manifest, err := runstate.NewStore(root).Get(runID)
 	if err != nil {
-		return err
+		return runstate.Manifest{}, err
 	}
 	if manifest.State != runstate.StateActive {
-		return fmt.Errorf("run %q is %s, not active", runID, manifest.State)
+		hint := ""
+		if manifest.State == runstate.StateStopped {
+			hint = "; resume it with pisafe resume " + runID
+		}
+		return runstate.Manifest{}, fmt.Errorf(
+			"run %q is %s, not active%s",
+			runID,
+			manifest.State,
+			hint,
+		)
 	}
 	if runstate.RemainingSeconds(manifest, time.Now()) == 0 {
-		return fmt.Errorf(
+		return runstate.Manifest{}, fmt.Errorf(
 			"run %q reached its wall-clock limit; use pisafe stop %s to reconcile it",
 			runID,
 			runID,
 		)
 	}
 	if manifest.SSH == nil {
-		return fmt.Errorf("run %q has no SSH connection", runID)
+		return runstate.Manifest{}, fmt.Errorf("run %q has no SSH connection", runID)
+	}
+	return manifest, nil
+}
+
+func runZed(ctx context.Context, runID string) error {
+	manifest, err := activeRun(runID)
+	if err != nil {
+		return err
 	}
 	zed, err := exec.LookPath("zed")
 	if err != nil {

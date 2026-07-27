@@ -46,6 +46,7 @@ pisafe broker                # foreground; runs have no inference without it
 ```sh
 pisafe run [--include PATH]... [--include-unsafe PATH]...
 pisafe list
+pisafe connect RUN [--shell]
 pisafe zed RUN
 pisafe stop RUN
 pisafe resume RUN
@@ -63,6 +64,10 @@ changes, as a baseline commit. Untracked and ignored files stay behind unless
 `--include-unsafe`, because everything in the run can read and exfiltrate it.
 The command prints a one-time `ssh -F` line to paste into Zed's Remote
 Projects dialog — pisafe never edits your global SSH or Zed settings.
+
+`connect` attaches your terminal to a run and starts Pi in its workspace, or
+opens a shell there with `--shell`. It needs no editor, and it reaches the same
+container, files, and network policy the Zed terminal does.
 
 `diff` reports a run's commits, changed paths with line counts, and untracked
 leftovers, without stopping it and without printing file content. `cp` takes a

@@ -351,7 +351,8 @@ func configureSSH(
 		return fmt.Errorf("validate SSH public key: %w", err)
 	}
 
-	directory := filepath.Join(filepath.Clean(home), ".ssh")
+	home = filepath.Clean(home)
+	directory := filepath.Join(home, ".ssh")
 	if err := os.Mkdir(directory, 0o700); err != nil {
 		return fmt.Errorf("create SSH directory: %w", err)
 	}
@@ -377,7 +378,7 @@ func configureSSH(
 	if err := writeNewFile(authorized, []byte(authorizedKey), 0o600); err != nil {
 		return fmt.Errorf("write SSH authorized key: %w", err)
 	}
-	config := sshdConfig(directory)
+	config := sshdConfig(home)
 	if err := writeNewFile(
 		filepath.Join(directory, "sshd_config"),
 		[]byte(config),
@@ -472,12 +473,20 @@ func relaySSH(connection net.Conn, in io.Reader, out io.Writer) error {
 	}
 }
 
-func sshdConfig(directory string) string {
+// sshdConfig renders the run's daemon configuration. sshd builds each session's
+// environment from scratch rather than from its own, so the variables the
+// container declares are restated here; otherwise a terminal session would run
+// under a different environment than the container contract states.
+func sshdConfig(home string) string {
+	directory := filepath.Join(home, ".ssh")
 	return "Port 2222\n" +
 		"ListenAddress 127.0.0.1\n" +
 		"HostKey " + filepath.Join(directory, "ssh_host_ed25519_key") + "\n" +
 		"AuthorizedKeysFile " + filepath.Join(directory, "authorized_keys") + "\n" +
 		"PidFile /run/sshd.pid\n" +
+		"SetEnv GIT_TERMINAL_PROMPT=0" +
+		" PI_CODING_AGENT_DIR=" + filepath.Join(home, ".pi", "agent") +
+		" PI_SKIP_VERSION_CHECK=1\n" +
 		"PasswordAuthentication no\n" +
 		"KbdInteractiveAuthentication no\n" +
 		"PermitEmptyPasswords no\n" +
