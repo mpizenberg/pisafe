@@ -12,10 +12,11 @@ a static VM firewall, and no provider or GitHub credential ever enters a run —
 inference is relayed from a Mac-side broker through a revocable per-run
 capability.
 
-The isolation model is specified in [`pisafe-design.md`](pisafe-design.md).
-Implementation status, verification, and known gaps are in
-[`IMPLEMENTATION_PROGRESS.md`](IMPLEMENTATION_PROGRESS.md). Phase 1 is in
-progress: every command below exists and works.
+The isolation model is specified in [`pisafe-design.md`](pisafe-design.md),
+with the reasoning behind individual choices in
+[`DECISIONS.md`](DECISIONS.md). Implementation status, verification, and known
+gaps are in [`IMPLEMENTATION_PROGRESS.md`](IMPLEMENTATION_PROGRESS.md). Phase 1
+is in progress: every command below exists and works.
 
 ## Requirements
 

@@ -2,9 +2,10 @@
 
 Last updated: 2026-07-27
 
-The durable handoff for continuing `pisafe` from a fresh session. The design
-authority is [`pisafe-design.md`](pisafe-design.md); this file records what is
+The durable handoff for continuing `pisafe` from a fresh session: what is
 implemented, what has been verified against a real VM, and what comes next.
+[`pisafe-design.md`](pisafe-design.md) is the authority on what must hold, and
+[`DECISIONS.md`](DECISIONS.md) records why the implementation looks as it does.
 
 ## Current milestone
 
