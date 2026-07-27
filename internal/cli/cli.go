@@ -13,7 +13,7 @@ import (
 )
 
 var errUsage = errors.New(
-	"usage: pisafe <run|stop|resume|diff|apply|discard|list|zed|login|broker|doctor|help>",
+	"usage: pisafe <run|stop|resume|diff|cp|apply|discard|list|zed|login|broker|doctor|help>",
 )
 
 func Run(ctx context.Context, args []string, out io.Writer) error {
@@ -65,6 +65,8 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 			return errUsage
 		}
 		return runDiff(ctx, args[1], out)
+	case "cp":
+		return runCopy(ctx, args[1:], out)
 	case "apply":
 		if len(args) != 2 {
 			return errUsage
@@ -103,6 +105,10 @@ Usage:
   pisafe diff RUN  Report what a run changed since it started, without
                    stopping it. Commit subjects and file names come from the
                    run, so they are shown quoted, never as file content.
+  pisafe cp RUN:PATH [DEST] [--force]
+                   Copy one file or directory out of a run. Only regular
+                   files and directories are copied; an existing DEST is
+                   replaced only with --force.
   pisafe apply RUN
                    Import a run's commits as the local branch pisafe/RUN.
                    The run is stopped first and cannot be resumed afterwards;

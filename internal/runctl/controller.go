@@ -25,6 +25,7 @@ type Backend interface {
 	VerifyStorage(context.Context, string) error
 	ImportStage(context.Context, string) error
 	Execute(context.Context, io.Reader, ...string) ([]byte, error)
+	StreamExecute(context.Context, io.Writer, ...string) error
 	FetchApplyArtifact(context.Context, string, gitstage.ApplyArtifact, string) error
 	RemoveApplyPackage(context.Context, string) error
 	RemoveRun(context.Context, string) error

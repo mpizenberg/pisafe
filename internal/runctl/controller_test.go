@@ -8,12 +8,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/runcontainer"
+	"github.com/mpizenberg/pisafe/internal/runcopy"
 	"github.com/mpizenberg/pisafe/internal/runssh"
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
@@ -84,6 +86,28 @@ func (backend *fakeBackend) RemoveStorage(_ context.Context, _ string) error {
 		return errors.New("remove storage failed")
 	}
 	return nil
+}
+
+// StreamExecute stands in for the run's export container: it archives the same
+// workspace the other fakes read, so the controller sees a real tar arrive.
+func (backend *fakeBackend) StreamExecute(
+	_ context.Context,
+	stdout io.Writer,
+	args ...string,
+) error {
+	backend.calls = append(backend.calls, backendCall{
+		kind: "stream",
+		args: append([]string(nil), args...),
+	})
+	joined := strings.Join(args, " ")
+	if backend.failAt != "" && strings.Contains(joined, backend.failAt) {
+		return errors.New("stream failed")
+	}
+	index := slices.Index(args, "export")
+	if index < 0 || index+2 >= len(args) {
+		return errors.New("unexpected stream command: " + joined)
+	}
+	return runcopy.Archive(backend.applyWorkspace, args[index+2], stdout)
 }
 
 func (backend *fakeBackend) Execute(

@@ -17,6 +17,7 @@ import (
 	"syscall"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/runcopy"
 	"github.com/mpizenberg/pisafe/internal/runssh"
 )
 
@@ -54,6 +55,11 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 			return usageError()
 		}
 		return diffRun(ctx, args[1], in, out)
+	case "export":
+		if len(args) != 3 {
+			return usageError()
+		}
+		return runcopy.Archive(args[1], args[2], out)
 	case "configure-ssh":
 		if len(args) != 1 {
 			return usageError()
@@ -89,6 +95,7 @@ func usageError() error {
 		"usage: pisafe-guest <materialize <stage-directory> <workspace>" +
 			"|prepare-apply <workspace> <package-directory>" +
 			"|diff <workspace>" +
+			"|export <workspace> <path>" +
 			"|configure-ssh|configure-inference|configure-identity" +
 			"|serve-ssh|proxy-ssh>",
 	)

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -139,6 +141,57 @@ func TestDiffCommandReportsChangesAndLeavesTheWorkspaceAlone(t *testing.T) {
 	// Reporting a run must not commit, stage, or otherwise disturb it.
 	if status := guestGit(t, workspace, "status", "--porcelain=v1"); status != "M tracked.txt" {
 		t.Fatalf("diff altered the workspace: %q", status)
+	}
+}
+
+func TestExportCommandArchivesOnlyTheRequestedPath(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "dist"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for path, content := range map[string]string{
+		"dist/index.html": "<html>\n",
+		"secret.txt":      "not requested\n",
+	} {
+		if err := os.WriteFile(
+			filepath.Join(workspace, filepath.FromSlash(path)), []byte(content), 0o600,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var output bytes.Buffer
+	if err := run(
+		context.Background(),
+		[]string{"export", workspace, "dist"},
+		nil,
+		&output,
+	); err != nil {
+		t.Fatal(err)
+	}
+	names := []string{}
+	archive := tar.NewReader(bytes.NewReader(output.Bytes()))
+	for {
+		header, err := archive.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, header.Name)
+	}
+	if strings.Join(names, ",") != "dist/,dist/index.html" {
+		t.Fatalf("archived %v", names)
+	}
+
+	if err := run(
+		context.Background(),
+		[]string{"export", workspace, "../escape"},
+		nil,
+		&bytes.Buffer{},
+	); err == nil {
+		t.Fatal("an escaping path was archived")
 	}
 }
 

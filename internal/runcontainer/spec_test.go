@@ -154,6 +154,33 @@ func TestDiffArgsMountTheWorkspaceReadOnly(t *testing.T) {
 	}
 }
 
+func TestExportArgsStreamOneRequestedPathReadOnly(t *testing.T) {
+	spec := DefaultSpec("run-123", testImageID)
+	args, err := spec.ExportArgs("project", "./dist/../dist")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, expected := range []string{
+		"--network=none",
+		"type=bind,src=/var/lib/pisafe/runs/run-123/workspace,dst=/work,nodev,nosuid,ro",
+		"pisafe-guest export /work/project dist",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Errorf("export args lack %q:\n%s", expected, joined)
+		}
+	}
+	for name, requested := range map[string]string{
+		"absolute":        "/etc/passwd",
+		"climbing":        "../../etc/passwd",
+		"whole workspace": ".",
+	} {
+		if _, err := spec.ExportArgs("project", requested); err == nil {
+			t.Errorf("%s path was accepted", name)
+		}
+	}
+}
+
 func TestSpecRejectsMutableImageAndUnsafeNames(t *testing.T) {
 	for _, spec := range []Spec{
 		DefaultSpec("../escape", testImageID),

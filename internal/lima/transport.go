@@ -161,6 +161,23 @@ func (transport Transport) Execute(
 	return output, nil
 }
 
+// StreamExecute runs one argv-style command in the dedicated VM, writing its
+// standard output as it arrives so an artifact leaving a run is never held in
+// memory as a whole.
+func (transport Transport) StreamExecute(
+	ctx context.Context,
+	stdout io.Writer,
+	args ...string,
+) error {
+	command := make([]string, 0, len(args)+2)
+	command = append(command, "shell", transport.instance)
+	command = append(command, args...)
+	if err := transport.runner.Stream(ctx, stdout, command...); err != nil {
+		return fmt.Errorf("stream from Lima VM: %w", err)
+	}
+	return nil
+}
+
 // CreateStage allocates a new, private VM-side run directory and streams the
 // Git bundle, tracked patch, and a sanitized snapshot into it. Each upload is
 // size- and SHA-256-verified before an atomic rename.

@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 
+	"github.com/mpizenberg/pisafe/internal/runcopy"
 	"github.com/mpizenberg/pisafe/internal/runid"
 )
 
@@ -223,6 +224,26 @@ func (spec Spec) DiffArgs(projectDirectory string) ([]string, error) {
 		return nil, err
 	}
 	return append(args, "pisafe-guest", "diff", containerWorkRoot+"/"+projectDirectory), nil
+}
+
+// ExportArgs streams one path of the run's workspace out as a tar on standard
+// output. The workspace is read-only for the same reason diff's is: taking a
+// copy must not change what was copied.
+func (spec Spec) ExportArgs(projectDirectory, requestPath string) ([]string, error) {
+	requested, err := runcopy.SafePath(requestPath)
+	if err != nil {
+		return nil, err
+	}
+	args, err := spec.inspectionArgs("copy", projectDirectory, ",ro")
+	if err != nil {
+		return nil, err
+	}
+	return append(
+		args,
+		"pisafe-guest", "export",
+		containerWorkRoot+"/"+projectDirectory,
+		requested,
+	), nil
 }
 
 // inspectionArgs builds a throwaway container over the run's persistent

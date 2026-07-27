@@ -275,15 +275,17 @@ func (runner execRunner) Stream(ctx context.Context, stdout io.Writer, args ...s
 	return runner.wait(command, args)
 }
 
+// wait reports what the command said went wrong. The full argument list is
+// included only when the command said nothing at all, because a container
+// command is dozens of arguments long and would bury its own error message.
 func (runner execRunner) wait(command *exec.Cmd, args []string) error {
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
-		detail := strings.TrimSpace(stderr.String())
-		if detail == "" {
-			detail = err.Error()
+		if detail := strings.TrimSpace(stderr.String()); detail != "" {
+			return fmt.Errorf("%s %s: %s", runner.binary, args[0], detail)
 		}
-		return fmt.Errorf("%s %s: %s", runner.binary, strings.Join(args, " "), detail)
+		return fmt.Errorf("%s %s: %v", runner.binary, strings.Join(args, " "), err)
 	}
 	return nil
 }

@@ -934,6 +934,23 @@ The first usable release should prove:
   container, would have required the run to exist and could have contended
   with the agent's own Git commands.
 
+- `pisafe cp` copies only regular files and directories. A symlink stops the
+  copy naming its path, rather than being recreated when it stays inside the
+  copied tree: a link resolves against a filesystem the run never saw, and a
+  copy out is a leaf operation with no later step that would catch a wrong
+  target. This is stricter than it needs to be, so a directory holding one
+  link cannot be copied whole; naming a narrower path is the way around it.
+- `cp` streams the archive out of the run's stdout instead of writing it into
+  the run and fetching it as apply does. Nothing is written inside the run, so
+  the workspace stays read-only, an active run is undisturbed, and no
+  gigabyte-scale temporary file lands in run storage. The cost is that the
+  transfer carries no separate hash: SSH already protects it in flight, and the
+  run is the authority on the content either way.
+- An existing destination is replaced only with `--force`, rather than by
+  answering an interactive prompt. The CLI has no stdin channel and a prompt
+  would break every non-terminal use; `discard`'s explicit confirmation is the
+  precedent.
+
 ## Primary references
 
 - Pi security: <https://pi.dev/docs/latest/security>

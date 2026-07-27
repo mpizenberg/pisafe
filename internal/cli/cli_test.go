@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/runcopy"
 	"github.com/mpizenberg/pisafe/internal/runstart"
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
@@ -237,6 +238,63 @@ func TestPrintRunDiffQuotesRunContentAndReportsTruncation(t *testing.T) {
 	}
 	if strings.Contains(rendered, "\x1b") {
 		t.Fatalf("diff output carried an escape sequence:\n%q", rendered)
+	}
+}
+
+func TestParseCopyRequestSeparatesRunPathAndDestination(t *testing.T) {
+	request, err := parseCopyRequest([]string{"run-123:dist/index.html"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.runID != "run-123" || request.path != "dist/index.html" ||
+		request.destination != "index.html" || request.force {
+		t.Fatalf("request = %#v", request)
+	}
+
+	forced, err := parseCopyRequest([]string{"run-123:dist", "--force", "out"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forced.destination != "out" || !forced.force {
+		t.Fatalf("request = %#v", forced)
+	}
+
+	for name, args := range map[string][]string{
+		"no path":        {"run-123"},
+		"absolute path":  {"run-123:/etc/passwd"},
+		"climbing path":  {"run-123:../../secrets"},
+		"whole run":      {"run-123:."},
+		"no run":         {":dist"},
+		"unknown option": {"run-123:dist", "--all"},
+		"too many":       {"run-123:dist", "out", "extra"},
+		"nothing":        {},
+	} {
+		if _, err := parseCopyRequest(args); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+}
+
+func TestPrintCopyResultQuotesNamesChosenInsideTheRun(t *testing.T) {
+	var output bytes.Buffer
+	printCopyResult(
+		&output,
+		copyRequest{runID: "run-123", path: "dist", destination: "out"},
+		[]runcopy.Entry{
+			{Path: "dist", Directory: true},
+			{Path: "dist/index.html", Size: 2048},
+			{Path: "dist/weird\nname", Size: 1},
+		},
+	)
+	rendered := output.String()
+	for _, expected := range []string{
+		`2.0 KiB "dist/index.html"`,
+		`"dist/weird\nname"`,
+		`2 file(s), 2.0 KiB to "out"`,
+	} {
+		if !strings.Contains(rendered, expected) {
+			t.Errorf("copy output lacks %q:\n%s", expected, rendered)
+		}
 	}
 }
 

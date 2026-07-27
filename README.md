@@ -8,7 +8,8 @@ The implementation now contains:
 - a dependency-free Go controller;
 - `pisafe run` for creating an isolated run from the current repository,
   `pisafe stop`/`resume` for preserving and reopening it, `pisafe diff` for
-  reporting what it changed without stopping it, `pisafe apply` for
+  reporting what it changed without stopping it, `pisafe cp` for taking a
+  file or directory back out of it, `pisafe apply` for
   importing its commits, exact-confirmation `pisafe discard`, `pisafe list`
   for durable records, `pisafe zed` for reopening a connection explicitly
   saved in Zed, and `pisafe doctor` for prerequisites;
@@ -75,6 +76,13 @@ and untracked leftovers from a throwaway container holding the workspace
 read-only, so it works on an active, stopped, or imported run without
 disturbing it. It reports names and counts, never file content: everything it
 names was written inside the run, so it is quoted rather than rendered.
+`pisafe cp RUN:PATH [DEST]` takes one file or directory back out through the
+same read-only container. Only regular files and directories are copied; a
+symlink or special file stops the copy naming its path, the Mac re-validates
+every archive entry and writes through a directory handle that no entry can
+escape, and the copy lands beside the destination and is moved into place only
+once it has all arrived. An existing destination is replaced only with
+`--force`, and is removed rather than written through.
 `pisafe broker` relays inference from the Mac into runs over a reverse SSH
 forward to `192.0.2.1:18080`, the firewall's single static exception; runs
 hold only a revocable per-run capability, never a provider credential.
@@ -93,6 +101,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
 ./pisafe stop RUN
 ./pisafe resume RUN
 ./pisafe diff RUN
+./pisafe cp RUN:PATH [DEST] [--force]
 ./pisafe apply RUN
 ./pisafe discard RUN --confirm RUN
 ./pisafe login chatgpt

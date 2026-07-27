@@ -111,6 +111,23 @@ quota-backed VM storage. Do not add a local-workspace fallback.
   an active, stopped, or imported run without altering or blocking it. It
   reports names and counts, never file content, and the controller quotes every
   name and commit subject because a run wrote them.
+- `pisafe cp RUN:PATH [DEST] [--force]` copies one file or directory out of a
+  run. The archive streams from a throwaway `--network=none` container holding
+  the workspace read-only, so nothing is written inside the run and an active
+  run is undisturbed.
+- Both ends are hardened. The run refuses an absolute, climbing, or
+  whole-workspace request and archives only regular files and directories,
+  naming any symlink or special file that stops the copy. The Mac re-validates
+  every entry, refuses anything outside the single path it asked for, and
+  writes through an `os.Root` directory handle, so no entry can escape however
+  the archive is shaped. Copies are bounded at 4096 entries, 1 GiB total, and
+  256 MiB per file.
+- Everything lands in a staging directory beside the destination and is moved
+  into place only once the whole copy has arrived, so a refused copy leaves the
+  destination exactly as it was. An existing destination is replaced only with
+  `--force`, and is then removed rather than written through, so a destination
+  symlink cannot redirect the copy. An impossible destination is refused before
+  the run is asked to produce anything.
 - Discard reclaims a run from every state that still owns resources, including
   `imported`. An imported run keeps its workspace, its 10 GiB filesystem, and
   its audit record of where it was imported until it is discarded.
@@ -418,15 +435,16 @@ Current package coverage at this milestone:
 
 ```text
 pisafe        0.0%
-pisafe-guest  64.0%
+pisafe-guest  64.1%
 broker        96.2%
 chatgpt       70.1%
-cli           30.0%
+cli           35.3%
 gitstage      78.8%
 hostnet       50.0%
-lima          68.0%
-runcontainer  70.9%
-runctl        67.7%
+lima          67.0%
+runcontainer  72.6%
+runcopy       80.3%
+runctl        69.0%
 runid         92.3%
 runimage      74.6%
 runssh        68.0%
@@ -477,6 +495,18 @@ byte-for-byte unchanged; the controller refuses a run with no workspace left,
 verifies storage before reading, and leaves an active run active; the container
 arguments mount the workspace read-only; and the rendered output quotes every
 run-authored name and subject, dropping no escape sequence into the terminal.
+
+Copying out is covered from both sides: a directory round-trips with its
+executable bit and without reaching outside the requested path; a single file
+copies to a named destination; a symlink stops the copy on the run side; and
+on the Mac side climbing, absolute, outside-the-request, symlink, hard-link,
+device, and named-pipe entries are all refused, as is a prefix that merely
+looks like the requested one. An occupied destination is refused before the
+run starts and left byte-for-byte intact, `--force` then replaces it, a
+destination symlink is replaced rather than followed, an oversized file leaves
+no destination behind, a failed run leaves nothing behind, and the container
+arguments mount the workspace read-only. The CLI's own parsing and rendering
+are covered, including quoting names a run chose.
 
 The run's Git identity is covered from both sides: resolution prefers
 repository configuration over the global one and refuses an unconfigured Mac;
@@ -592,7 +622,7 @@ Run that end-to-end test with:
 
 ```sh
 PISAFE_LIVE_LIMA=1 \
-PISAFE_LIVE_RUN_IMAGE=sha256:e015c7ab31c2abce6ae04587ec5f705e9fd562102bb390b571b7f392a99b637a \
+PISAFE_LIVE_RUN_IMAGE=sha256:6186c69b2a36e4cf0713a5e350e96da1141d33dfda771c3e3eb8b8365bfc0c4b \
 go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
 ```
 
@@ -604,15 +634,15 @@ profile
 It contains cached base/test images plus the current managed run image:
 
 ```text
-recipe digest: sha256:042f6f42ed228f5502d4ae39f1d457a7001753c57656e11adbfba867dd9f8345
-image ID:      sha256:e015c7ab31c2abce6ae04587ec5f705e9fd562102bb390b571b7f392a99b637a
+recipe digest: sha256:edb9ad513be2c85e54af0252fc9c685fcdc76e68a6dddfe9e87f8ac4acb121f8
+image ID:      sha256:6186c69b2a36e4cf0713a5e350e96da1141d33dfda771c3e3eb8b8365bfc0c4b
 ```
 
-The recipe digest last moved when the guest helper gained `diff`. Each time it
-moves, the next run rebuilds the image and every later run and apply reuses it,
-which live-checks content-addressed reuse. Five managed images now sit in the
-VM, one per recipe the helper has ever had; pruning superseded ones belongs to
-the GC slice.
+The recipe digest last moved when the guest helper gained `export`. Each time
+it moves, the next run rebuilds the image and every later run and apply reuses
+it, which live-checks content-addressed reuse. Six managed images now sit in
+the VM, one per recipe the helper has ever had; pruning superseded ones belongs
+to the GC slice.
 
 `pisafe diff` is live-verified against the real VM. A scratch repository with
 one dirty tracked file became a run; inside the run an agent commit, a further
@@ -634,6 +664,18 @@ so mechanical commits remain distinguishable in the imported history. The
 imported `pisafe/<run>` branch carried that split unchanged and the source
 checkout was untouched. A repository with no identity refused to start a run
 before any boundary or image work, naming the two commands that fix it.
+
+`pisafe cp` is live-verified against the real VM. A scratch run holding a
+`dist` directory with a nested executable script and a two-megabyte binary, a
+directory containing a symlink to `/etc/passwd`, and a log file was copied
+from while it stayed active. The directory arrived with its nested layout and
+executable bit intact and nothing from outside the requested path; the log
+file copied to a named destination; an existing destination was refused
+naming `--force` before the run was asked for anything, and `--force` then
+replaced it; absolute, climbing, and whole-workspace requests were refused on
+the Mac; the directory holding the symlink was refused naming
+`"linked/escape"`; and a missing path reported the run's own message. The run
+stayed active with its workspace unchanged, and discard reclaimed it.
 
 That VM entered `VirtualMachineStateError` unattended overnight, almost
 certainly when the host slept, while `limactl list` still reported `Running`
@@ -765,7 +807,10 @@ sandboxed result.
 
 ## Known gaps
 
-- No user-facing `connect`, `cp`, or `gc` implementation exists.
+- No user-facing `connect` or `gc` implementation exists.
+- `pisafe cp` refuses any symlink rather than recreating one that stays inside
+  the copied tree, so a directory holding a single link cannot be copied whole.
+  Naming a narrower path is the only way around it today.
 - `pisafe diff` reports paths and line counts, never file content, so reviewing
   what a run actually wrote still means importing it and using `git diff`, or
   taking single files out once `cp` exists.
@@ -817,7 +862,9 @@ sandboxed result.
 
 Continue Phase 1 without weakening the boundary:
 
-1. Add hardened `cp`, then seven-day GC.
+1. Add seven-day GC: remove imported and discarded runs older than a week,
+   never expire a run with unimported commits, keep branch and import metadata
+   after workspace deletion, and prune superseded managed run images.
 
 ## Useful references
 
