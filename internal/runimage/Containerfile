@@ -2,23 +2,46 @@ FROM docker.io/library/node@sha256:af01d58b748ec92b1d6e8e11429aad424fd1e68c84818
 
 ARG PISAFE_RECIPE_DIGEST
 
-RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+# Pi's published npm-shrinkwrap.json freezes its dependency tree, so the build
+# asserts the tarball still carries one. Three sibling packages appear in that
+# shrinkwrap with a resolved URL but no integrity hash, which lets npm re-resolve
+# their "^" ranges to a newer release than the shrinkwrap names. Each is
+# re-fetched by exact version, checked against its digest, and written over
+# whatever npm installed.
+RUN set -eu; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \
         git \
         openssl \
         openssh-server \
-        tini \
-    && rm -rf /var/lib/apt/lists/* \
-    && package="$(npm pack "@earendil-works/pi-coding-agent@0.82.0" --ignore-scripts --silent)" \
-    && actual="$(openssl dgst -sha512 -binary "${package}" | openssl base64 -A)" \
-    && test "sha512-${actual}" = "sha512-Qnqgn9zhJFQ2HZ8R4iNuGhyCk93XX6+eUw9i+TjTuo47amzCy93ft3bB6yaUCleCrNO58dJDHYSGNHv/GAPWKg==" \
-    && npm install --global --ignore-scripts "./${package}" \
-    && rm -f "${package}" \
-    && npm cache clean --force \
-    && mkdir -p /run/sshd \
-    && rm -f /etc/ssh/ssh_host_* \
-    && rm -rf /root/.npm /root/.cache
+        tini; \
+    rm -rf /var/lib/apt/lists/*; \
+    cd /tmp; \
+    root=/usr/local/lib/node_modules/@earendil-works/pi-coding-agent; \
+    digest() { echo "sha512-$(openssl dgst -sha512 -binary "$1" | openssl base64 -A)"; }; \
+    pin() { \
+        tarball="$(npm pack "$1@$2" --ignore-scripts --silent)"; \
+        test "$(digest "${tarball}")" = "$3"; \
+        test -d "${root}/node_modules/$1"; \
+        rm -rf "${root}/node_modules/$1"; \
+        mkdir -p "${root}/node_modules/$1"; \
+        tar -xzf "${tarball}" -C "${root}/node_modules/$1" --strip-components=1; \
+        rm -f "${tarball}"; \
+        test "$(node -p "require('${root}/node_modules/$1/package.json').version")" = "$2"; \
+    }; \
+    package="$(npm pack "@earendil-works/pi-coding-agent@0.82.0" --ignore-scripts --silent)"; \
+    test "$(digest "${package}")" = "sha512-Qnqgn9zhJFQ2HZ8R4iNuGhyCk93XX6+eUw9i+TjTuo47amzCy93ft3bB6yaUCleCrNO58dJDHYSGNHv/GAPWKg=="; \
+    tar -tzf "${package}" | grep -qx 'package/npm-shrinkwrap.json'; \
+    npm install --global --ignore-scripts "./${package}"; \
+    rm -f "${package}"; \
+    pin @earendil-works/pi-agent-core 0.82.0 'sha512-bnS9DpOKK5T/F/gQkaOnYdMsuuciWiScfAHHWC+k5OQ0HxjSqMFQvp8keurULLoT4+v8NHv4V14pNvd4hsfC0Q=='; \
+    pin @earendil-works/pi-ai 0.82.0 'sha512-8MvW9+zno13sXDuT2kFMnWeTNUufUhPeZDRVO+igGoBRCDWgn7Xh2FkRQI1mRuet6QhF4ENQuLYdIAOyG6BhNw=='; \
+    pin @earendil-works/pi-tui 0.82.0 'sha512-9IDjQOXne7t9l2s2YcjnIBxsVNVPE7qScVSB3YmFlXsBW4pfo2gOElTxggV84KrRiGqABnlFPBWbf0k54hszHQ=='; \
+    npm cache clean --force; \
+    mkdir -p /run/sshd; \
+    rm -f /etc/ssh/ssh_host_*; \
+    rm -rf /root/.npm /root/.cache
 
 COPY --chmod=0755 pisafe-guest /usr/local/bin/pisafe-guest
 

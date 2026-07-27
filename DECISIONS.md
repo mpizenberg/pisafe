@@ -61,6 +61,22 @@ history holds them. New entries are appended in full.
   at runtime would require a Go toolchain in the installed product; checking a
   binary into Git would make history unreviewable. Changing the layout changes
   the managed recipe digest.
+- Pi's transitive tree is frozen by the `npm-shrinkwrap.json` Pi publishes
+  inside its own tarball, which the pinned top-level digest already covers, so
+  the build asserts that shrinkwrap is still there rather than shipping a
+  lockfile of pisafe's own. Three packages — `pi-agent-core`, `pi-ai`, `pi-tui`
+  — appear in that shrinkwrap with a resolved URL but no integrity hash, which
+  is not a pin: npm re-resolved their `^0.82.0` ranges and installed 0.82.1 into
+  the real image while the shrinkwrap named 0.82.0. Each is therefore re-fetched
+  by exact version, checked against a digest recorded beside `PiIntegrity`, and
+  extracted over what npm installed. Shipping a `package-lock.json` and using
+  `npm ci` was tested and rejected: when a dependency publishes a shrinkwrap npm
+  reads that instead, so a corrupted *nested* integrity in our lockfile installs
+  cleanly while only the *top-level* one raises `EINTEGRITY`. Every nested entry
+  would have been decorative, and a reader would reasonably assume otherwise.
+  npm `overrides` were rejected for the same reason — they do not penetrate a
+  published shrinkwrap either. The cost is three digests that must move with
+  `PiVersion`; a unit test fails the build until they do.
 
 ## Storage and lifecycle
 

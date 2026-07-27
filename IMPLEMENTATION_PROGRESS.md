@@ -11,13 +11,14 @@ implemented, what has been verified against a real VM, and what comes next.
 
 Phase 1 is in progress. Every command the design enumerates for it exists:
 `run`, `list`, `connect`, `stop`, `resume`, `diff`, `cp`, `apply`, `discard`,
-`gc`, `zed`, `login`, `broker`, `doctor`. Built in eleven slices: the controller
+`gc`, `zed`, `login`, `broker`, `doctor`. Built in twelve slices: the controller
 and Git isolation core; the Lima VM backend and firewall; SSH transport, run
 records, run image and container contract; per-run SSH credentials; user-facing
 run creation; stop/resume/discard and quota-backed storage; the reverse
 inference relay; ChatGPT subscription login; getting work back out (`diff`,
-`cp`, `gc`); terminal access without an editor (`connect`); and the
-keep-or-replay choice about a run's carried-in baseline commit.
+`cp`, `gc`); terminal access without an editor (`connect`); the
+keep-or-replay choice about a run's carried-in baseline commit; and freezing the
+run image's transitive npm resolution.
 
 `pisafe run` uses the tested mountless path and materializes inside private
 quota-backed VM storage. **Do not add a local-workspace fallback.**
@@ -179,7 +180,13 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   ```
 
 - Pi pinned to `@earendil-works/pi-coding-agent@0.82.0`, with the downloaded
-  tarball checked against its registry SHA-512 before installation.
+  tarball checked against its registry SHA-512 before installation. Pi's own
+  published `npm-shrinkwrap.json` freezes the rest of the tree and travels
+  inside that verified tarball, so the build refuses a Pi release that no longer
+  ships one. The three packages that shrinkwrap names without an integrity hash
+  — `pi-agent-core`, `pi-ai`, `pi-tui` — are re-fetched by exact version,
+  checked against digests recorded beside `PiIntegrity`, and extracted over what
+  npm installed, because without a hash npm resolves their `^` ranges freely.
 - `runimage.Installer` derives a recipe digest from the exact embedded
   Containerfile and static guest-helper bytes, streams a two-file tar context,
   and labels the image with that digest. A mutable recipe-derived tag is only a
@@ -395,6 +402,10 @@ with a fake VM boundary:
   refused, an installed identity proven by reading back a commit's author,
   empty/oversized/newline values refused, unknown guest fields refused, and run
   creation stopping before boundary and image work.
+- **Run image pins**: the Containerfile is checked to contain every recorded
+  pin, to carry no floating tag, to assert Pi still ships a shrinkwrap, and to
+  repin each shrinkwrap gap at exactly `PiVersion` with a SHA-512 digest — so a
+  Pi bump that forgets the three sibling packages fails before any image builds.
 - The generated Lima YAML is checked by the installed Lima validator in the
   normal suite.
 
@@ -403,7 +414,7 @@ with a fake VM boundary:
 ```sh
 PISAFE_LIVE_LIMA=1 go test -v ./internal/lima
 PISAFE_LIVE_LIMA=1 go test -v ./internal/runimage
-PISAFE_LIVE_LIMA=1 PISAFE_LIVE_RUN_IMAGE=sha256:dd0e8f0704cd7f97460607cf55b195af34c76f525e5d69e15a3c31a56575808b \
+PISAFE_LIVE_LIMA=1 PISAFE_LIVE_RUN_IMAGE=sha256:ae321357e51ae824bd020941565fb28ffca4bf9856ae3eb450b023a162b55970 \
   go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
 ```
 
@@ -417,6 +428,16 @@ Verified against a real ARM64 VM:
   firewall-status, and storage helpers work through their narrow rules; the
   root-owned security-profile record is mode 0444 and matches the generated
   definition.
+- **Frozen npm resolution**: the drift was reproduced in the real ARM64 image
+  before it was fixed — `pi-coding-agent` 0.82.0 installed `pi-agent-core`,
+  `pi-ai`, and `pi-tui` at 0.82.1, the versions its own shrinkwrap pinned to
+  0.82.0. After the repinning step the built image reports 0.82.0 for all four
+  and `pi --version` agrees. Both new guards were shown to fail closed in the
+  built image: a wrong sibling digest and a package carrying no shrinkwrap each
+  exit non-zero, while the recorded digest matches. Tampering established why a
+  lockfile was not used: a corrupted nested `integrity` in a pisafe-authored
+  `package-lock.json` installs cleanly under `npm ci` and an `overrides` entry
+  is ignored, while a corrupted top-level integrity raises `EINTEGRITY`.
 - **Image and container**: the tracked Containerfile builds on ARM64; the
   installer built it from its two-file tar stream, validated labels, platform,
   and immutable ID, and reused it on the next call. A runtime check confirmed
@@ -526,8 +547,8 @@ A persistent Lima instance named `pisafe` was left running with security profile
 holding cached base/test images plus the current managed run image:
 
 ```text
-recipe digest: sha256:214e7b0c2231cd2a1811e2cfb43cb8f0758a4b0438060953ef44106206f6b33f
-image ID:      sha256:dd0e8f0704cd7f97460607cf55b195af34c76f525e5d69e15a3c31a56575808b
+recipe digest: sha256:26643d0cbfdca35379ef38e7e05f8381a26812ab946f113f8525c3c328a6e7af
+image ID:      sha256:ae321357e51ae824bd020941565fb28ffca4bf9856ae3eb450b023a162b55970
 ```
 
 Each time the recipe moves, the next run rebuilds and every later run reuses it,
@@ -641,19 +662,22 @@ These explain why parts of the code look the way they do:
 - A crashed VM leaves `limactl list` reporting `Running` while the VZ machine is
   in `error`, visible only in `ha.stderr.log`. Nothing in pisafe detects this, so
   the first command to touch the VM fails with an opaque SSH reset.
-- Pi's top-level tarball is integrity-pinned, but a reproducible published
-  image/digest workflow is still needed to freeze transitive npm resolution.
+- npm resolution inside the run image is frozen, but the `apt-get` layer is not:
+  the Debian packages it installs float, so two builds of one recipe digest are
+  equivalent in Pi and its dependencies without being byte-identical images.
+- The three sibling digests are pinned by hand and must be refreshed whenever
+  `PiVersion` moves. A unit test refuses a mismatch, so the failure is loud, but
+  regenerating them means packing each tarball and recording its SHA-512.
 
 ## Next implementation slice
 
 Every Phase 1 command is implemented and live-verified except the record removal
-noted above. One thing named in the design remains outside that list:
+noted above, and nothing the design names is now unbuilt.
 
-1. A reproducible published image/digest workflow, freezing transitive npm
-   resolution inside the run image.
-
-Two verification debts are also open: re-running the live `gc` sweep against a
-reclaimed run, and the firewall behaviours listed under Known gaps.
+Three verification debts remain open: re-running the live `gc` sweep against a
+reclaimed run, the firewall behaviours listed under Known gaps, and a full
+`run → apply` pass on the repinned image, which has been built and inspected but
+not yet driven end to end.
 
 Do not weaken the boundary for any of them.
 
