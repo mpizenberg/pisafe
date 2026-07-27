@@ -437,7 +437,9 @@ Verified against a real ARM64 VM:
   exit non-zero, while the recorded digest matches. Tampering established why a
   lockfile was not used: a corrupted nested `integrity` in a pisafe-authored
   `package-lock.json` installs cleanly under `npm ci` and an `overrides` entry
-  is ignored, while a corrupted top-level integrity raises `EINTEGRITY`.
+  is ignored, while a corrupted top-level integrity raises `EINTEGRITY`. A real
+  run started from that image — not an inspection container — reports 0.82.0 for
+  `pi --version` and for all three siblings.
 - **Image and container**: the tracked Containerfile builds on ARM64; the
   installer built it from its two-file tar stream, validated labels, platform,
   and immutable ID, and reused it on the next call. A runtime check confirmed
@@ -468,7 +470,13 @@ Verified against a real ARM64 VM:
   `pisafe/<run>`; the untracked file reported and absent; an unchanged source
   checkout (same HEAD, branch, dirty file, submodule); a second apply refused;
   and discard reclaiming everything. Two runs predating `prepare-apply` also
-  applied cleanly with the current image.
+  applied cleanly with the current image. The repinned image drove its own pass:
+  a run carrying a dirty tracked file and an untracked leftover made one commit
+  and left one tracked change uncommitted, `diff` reported the agent's line
+  without the one carried in, and `--keep-baseline` imported baseline, agent
+  commit, and final capture — the agent's commit authored by the repository
+  identity and pisafe's own by `pisafe` — leaving the source checkout on `main`
+  still dirty and refusing a second apply.
 - **diff**: on a still-active run, one commit since baseline, `+2/-0` for an
   edited file, `binary` for a binary one, and the untracked leftover, without
   reporting the dirty line the user carried in. The run's `git status` and HEAD
@@ -510,17 +518,17 @@ Verified against a real ARM64 VM:
   commits stayed authored by `pisafe`, and the imported branch carried that
   split. A repository with no identity refused before any boundary work.
 - **gc**, by aging the exact timestamps the policy reads in an isolated state
-  directory: a freshly imported run reported `Nothing to collect.`; with
-  `imported_at` moved back eight days, `--dry-run` named it and changed nothing
-  and the sweep then reclaimed it (no mount, loop device, container, or stage
-  survived; the SSH key directory was empty; the `pisafe/<run>` branch still held
-  the agent's commit); `diff`, `cp`, and `resume` were then refused before
-  touching the VM; a stopped run aged thirty days was reported, untouched, and
-  resumed cleanly; and the image sweep pruned exactly the six superseded managed
-  images. **That sweep ran when a reclaimed run still left a terminal record
-  behind. Removing the record instead changes only what the Mac writes after the
-  VM-side reclamation, and is covered by unit tests; the live sweep has not been
-  re-run since.**
+  directory: a freshly imported run was left alone while superseded images were
+  still proposed; with `imported_at` moved back eight days, `--dry-run` named the
+  run and changed nothing, and the sweep then reclaimed it. The manifest file
+  itself was gone and `pisafe list` reported no runs, the Mac-side key directory
+  was empty, no mount or loop device survived, and the root-owned storage
+  helper's `verify` exited non-zero for that run while `remove` stayed
+  idempotent. The `pisafe/<run>` branch still held every commit, and `diff`,
+  `cp`, `apply`, and `resume` each refused the run as nonexistent before touching
+  the VM. The image sweep pruned exactly the superseded managed images and kept
+  the current one, recognized by its label. An earlier sweep reported a stopped
+  run aged thirty days without touching it, and resumed it cleanly.
 - **Broker relay**: the full gated suites pass including
   `TestLiveBrokerReverseRelay` and `TestLiveSecondRelayFailsClosed`. With a
   loopback stub upstream, requests from inside a run traversed pasta, the
@@ -671,15 +679,16 @@ These explain why parts of the code look the way they do:
 
 ## Next implementation slice
 
-Every Phase 1 command is implemented and live-verified except the record removal
-noted above, and nothing the design names is now unbuilt.
+Every Phase 1 command is implemented and live-verified, and nothing the design
+names is now unbuilt.
 
-Three verification debts remain open: re-running the live `gc` sweep against a
-reclaimed run, the firewall behaviours listed under Known gaps, and a full
-`run → apply` pass on the repinned image, which has been built and inspected but
-not yet driven end to end.
+One verification debt remains: the firewall behaviours listed under Known gaps —
+DNS answers pointing into private ranges, redirects, raw UDP,
+`host.containers.internal`, and VM loopback attempts. Unlike the debts already
+paid, these need test code rather than a re-run, because no live test exercises
+what the ruleset does with traffic that is shaped to look permitted.
 
-Do not weaken the boundary for any of them.
+Do not weaken the boundary for any of it.
 
 ## Useful references
 
