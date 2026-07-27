@@ -191,26 +191,8 @@ func (controller Controller) Discard(
 		)
 	}
 
-	spec := specForManifest(manifest)
-	if _, err := controller.stopAndRemoveContainer(ctx, spec); err != nil {
+	if err := controller.reclaim(ctx, manifest); err != nil {
 		return runstate.Manifest{}, controller.recordLifecycleError(runID, "discard", err)
-	}
-	var failures []error
-	if err := controller.backend.RemoveStorage(ctx, runID); err != nil {
-		failures = append(failures, err)
-	}
-	if err := controller.backend.RemoveRun(ctx, runID); err != nil {
-		failures = append(failures, err)
-	}
-	if err := controller.ssh.Remove(runID); err != nil {
-		failures = append(failures, err)
-	}
-	if cleanupErr := errors.Join(failures...); cleanupErr != nil {
-		return runstate.Manifest{}, controller.recordLifecycleError(
-			runID,
-			"discard",
-			cleanupErr,
-		)
 	}
 	discarded, err := controller.store.Discard(runID)
 	if err != nil {
@@ -221,6 +203,28 @@ func (controller Controller) Discard(
 		)
 	}
 	return discarded, nil
+}
+
+// reclaim removes everything a run still owns, in the VM and on the Mac. Every
+// step is idempotent, so a partially reclaimed run can always be finished.
+func (controller Controller) reclaim(
+	ctx context.Context,
+	manifest runstate.Manifest,
+) error {
+	if _, err := controller.stopAndRemoveContainer(ctx, specForManifest(manifest)); err != nil {
+		return err
+	}
+	var failures []error
+	if err := controller.backend.RemoveStorage(ctx, manifest.RunID); err != nil {
+		failures = append(failures, err)
+	}
+	if err := controller.backend.RemoveRun(ctx, manifest.RunID); err != nil {
+		failures = append(failures, err)
+	}
+	if err := controller.ssh.Remove(manifest.RunID); err != nil {
+		failures = append(failures, err)
+	}
+	return errors.Join(failures...)
 }
 
 func specForManifest(manifest runstate.Manifest) runcontainer.Spec {

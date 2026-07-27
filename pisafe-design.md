@@ -950,6 +950,34 @@ The first usable release should prove:
   answering an interactive prompt. The CLI has no stdin channel and a prompt
   would break every non-terminal use; `discard`'s explicit confirmation is the
   precedent.
+- Collection expires only imported runs. The alternative this document's
+  lifecycle diagram suggests — expiring an old stopped run once a check proves
+  it holds no unimported commits — was not taken: `diff` can prove the
+  repository is unchanged but sees nothing of the run's home directory, so
+  "no commits" is not "nothing to lose", and an irreversible delete of work the
+  user never imported is the one mistake that cannot be undone. Old unimported
+  runs are reported instead, and `discard` remains the way to reclaim them.
+  Reversing this is additive: the check would gate an expiry that already
+  exists.
+- A run reclaimed by the retention window becomes `expired`, not `discarded`,
+  which moves that state to `imported → expired` rather than the diagram's
+  `stopped → expired`. The audit record then distinguishes what the user threw
+  away from what age reclaimed, and the state is otherwise unused.
+- A record naming an imported branch is never removed, whatever its age, while
+  a discarded record that attributes nothing is removed after seven days. The
+  alternative — removing every finished record on the same schedule — would
+  break the design's requirement that an imported branch stay attributable to
+  its source run, since the branch outlives the workspace indefinitely.
+- Image pruning keeps the current recipe by reading the recipe label each image
+  carries, rather than by first resolving the recipe's image ID. Resolving it
+  cannot distinguish "no image for this recipe" from "the lookup failed", and
+  the consequence of that confusion is deleting the image in use.
+- Only images pinned by a run that can still start a container (`creating`,
+  `active`, `stopped`) are retained. An imported run pins none, because every
+  command that still reads its workspace runs the controller's current image.
+- `pisafe gc` accepts `--dry-run`, which the command sketch above does not
+  list. It is the only command that deletes without naming a target, so
+  previewing the sweep is worth one flag.
 
 ## Primary references
 

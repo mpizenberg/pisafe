@@ -3,12 +3,14 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/runcopy"
+	"github.com/mpizenberg/pisafe/internal/runctl"
 	"github.com/mpizenberg/pisafe/internal/runstart"
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
@@ -319,6 +321,63 @@ func TestParseInputSelectionSeparatesUnsafeApproval(t *testing.T) {
 	} {
 		if _, err := parseInputSelection(args); err == nil {
 			t.Errorf("%s was accepted", name)
+		}
+	}
+}
+
+func TestPrintCollectionSeparatesWhatWasDoneFromWhatWasKept(t *testing.T) {
+	plan := runctl.GCPlan{
+		Expired:   []string{"run-imported"},
+		Forgotten: []string{"run-discarded"},
+		Kept: []runctl.KeptRun{{
+			RunID:  "run-stopped",
+			Reason: "stopped with work that was never imported",
+		}},
+	}
+	var done bytes.Buffer
+	printCollection(&done, plan, []string{"sha256:abc"}, false)
+	for _, expected := range []string{
+		"Expired:",
+		"run-imported",
+		"branch and import record kept",
+		"Forgot:",
+		"run-discarded",
+		"Pruned:",
+		"sha256:abc",
+		"Kept:",
+		"run-stopped (stopped with work that was never imported)",
+	} {
+		if !strings.Contains(done.String(), expected) {
+			t.Errorf("collection output lacks %q:\n%s", expected, done.String())
+		}
+	}
+
+	// A preview must never read as though anything was removed.
+	var preview bytes.Buffer
+	printCollection(&preview, plan, []string{"sha256:abc"}, true)
+	for _, expected := range []string{"Would expire:", "Would forget:", "Would prune:"} {
+		if !strings.Contains(preview.String(), expected) {
+			t.Errorf("dry-run output lacks %q:\n%s", expected, preview.String())
+		}
+	}
+	for _, unexpected := range []string{"Expired:", "Forgot:", "Pruned:"} {
+		if strings.Contains(preview.String(), unexpected) {
+			t.Errorf("dry-run output claims %q:\n%s", unexpected, preview.String())
+		}
+	}
+
+	var empty bytes.Buffer
+	printCollection(&empty, runctl.GCPlan{}, nil, false)
+	if empty.String() != "Nothing to collect.\n" {
+		t.Fatalf("empty collection = %q", empty.String())
+	}
+}
+
+func TestGCRejectsUnknownArguments(t *testing.T) {
+	for _, args := range [][]string{{"--force"}, {"--dry-run", "extra"}, {"run-123"}} {
+		if err := Run(context.Background(), append([]string{"gc"}, args...), io.Discard); err == nil ||
+			!strings.Contains(err.Error(), "usage: pisafe gc") {
+			t.Errorf("gc %v error = %v", args, err)
 		}
 	}
 }

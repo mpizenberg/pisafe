@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -239,4 +240,105 @@ func containsPair(args []string, first string, second string) bool {
 		}
 	}
 	return false
+}
+
+func TestPruneRemovesOnlySupersededManagedImages(t *testing.T) {
+	current := testImageID()
+	superseded := "sha256:" + strings.Repeat("a", 64)
+	// Podman reports a bare hex ID here, and an image that is not pisafe's
+	// must survive even if it reaches the list.
+	foreign := strings.Repeat("f", 64)
+	listed, err := json.Marshal([]listedImage{
+		{ID: current, Labels: map[string]string{recipeLabel: "sha256:current"}},
+		{ID: strings.TrimPrefix(superseded, "sha256:"), Labels: map[string]string{
+			recipeLabel: "sha256:older",
+		}},
+		{ID: foreign, Labels: map[string]string{"org.opencontainers.image.title": "node"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &imageBackend{outputs: [][]byte{listed}}
+
+	removed, err := NewInstaller(backend).Prune(
+		context.Background(),
+		"sha256:current",
+		[]string{current},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(removed, []string{superseded}) {
+		t.Fatalf("removed = %#v", removed)
+	}
+	if len(backend.calls) != 2 {
+		t.Fatalf("calls = %#v", backend.calls)
+	}
+	if !containsPair(backend.calls[0].args, "--filter", "label="+recipeLabel) {
+		t.Fatalf("list args = %#v", backend.calls[0].args)
+	}
+	remove := backend.calls[1].args
+	if !reflect.DeepEqual(remove, []string{"podman", "rmi", superseded}) {
+		t.Fatalf("remove args = %#v", remove)
+	}
+}
+
+// An image a container still uses must fail to remove rather than be forced
+// away, and must not stop the rest of the sweep.
+func TestPruneReportsAnImageStillInUseAndContinues(t *testing.T) {
+	first := "sha256:" + strings.Repeat("a", 64)
+	second := "sha256:" + strings.Repeat("b", 64)
+	listed, err := json.Marshal([]listedImage{
+		{ID: first, Labels: map[string]string{recipeLabel: "sha256:older"}},
+		{ID: second, Labels: map[string]string{recipeLabel: "sha256:oldest"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &imageBackend{
+		outputs: [][]byte{listed, nil, nil},
+		errors:  []error{nil, errors.New("image is in use by a container"), nil},
+	}
+
+	removed, pruneErr := NewInstaller(backend).Prune(context.Background(), "sha256:newest", nil)
+	if pruneErr == nil || !strings.Contains(pruneErr.Error(), first) {
+		t.Fatalf("prune error = %v", pruneErr)
+	}
+	if !reflect.DeepEqual(removed, []string{second}) {
+		t.Fatalf("removed = %#v", removed)
+	}
+}
+
+// A lookup that fails must never be mistaken for a recipe that has no image,
+// so the current recipe is recognized by the label its image carries.
+func TestSupersededKeepsTheCurrentRecipeWithoutLookingItUp(t *testing.T) {
+	current := "sha256:" + strings.Repeat("a", 64)
+	older := "sha256:" + strings.Repeat("b", 64)
+	listed, err := json.Marshal([]listedImage{
+		{ID: current, Labels: map[string]string{recipeLabel: "sha256:current"}},
+		{ID: older, Labels: map[string]string{recipeLabel: "sha256:older"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &imageBackend{outputs: [][]byte{listed}}
+
+	superseded, err := NewInstaller(backend).Superseded(
+		context.Background(),
+		"sha256:current",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(superseded, []string{older}) {
+		t.Fatalf("superseded = %#v", superseded)
+	}
+	// Exactly one call: the image list. Nothing was resolved by tag.
+	if len(backend.calls) != 1 {
+		t.Fatalf("calls = %#v", backend.calls)
+	}
+	if _, err := NewInstaller(backend).Superseded(context.Background(), "", nil); err == nil {
+		t.Fatal("collection proceeded without knowing the current recipe")
+	}
 }

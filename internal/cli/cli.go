@@ -13,7 +13,7 @@ import (
 )
 
 var errUsage = errors.New(
-	"usage: pisafe <run|stop|resume|diff|cp|apply|discard|list|zed|login|broker|doctor|help>",
+	"usage: pisafe <run|stop|resume|diff|cp|apply|discard|gc|list|zed|login|broker|doctor|help>",
 )
 
 func Run(ctx context.Context, args []string, out io.Writer) error {
@@ -82,6 +82,8 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 			return fmt.Errorf("discard confirmation does not exactly match run %q", args[1])
 		}
 		return runDiscard(ctx, args[1], out)
+	case "gc":
+		return runGC(ctx, args[1:], out)
 	case "help", "-h", "--help":
 		printHelp(out)
 		return nil
@@ -115,6 +117,10 @@ Usage:
                    your checkout, index, and current branch are not touched.
   pisafe discard RUN --confirm RUN
                    Permanently delete one exact run workspace
+  pisafe gc [--dry-run]
+                   Reclaim runs finished more than seven days ago and prune
+                   superseded run images. A run whose work was never imported
+                   is only reported; discard it explicitly.
   pisafe zed RUN   Open a configured run in Zed
   pisafe login chatgpt
                    Store a ChatGPT subscription login in the macOS Keychain

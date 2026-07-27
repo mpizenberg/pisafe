@@ -281,6 +281,58 @@ func (store Store) Resume(runID string, capability string, startedAt time.Time) 
 	return store.replace(manifest)
 }
 
+// Expire records that the retention window, rather than the user, reclaimed a
+// run. Only an imported run can expire: its commits already live in the user's
+// repository, so age alone never removes work that was never imported. The
+// branch and import timestamps stay, so an imported branch remains
+// attributable after its workspace is gone.
+func (store Store) Expire(runID string) (Manifest, error) {
+	manifest, err := store.Get(runID)
+	if err != nil {
+		return Manifest{}, err
+	}
+	if manifest.State != StateImported {
+		return Manifest{}, fmt.Errorf(
+			"invalid run transition %q → %q",
+			manifest.State,
+			StateExpired,
+		)
+	}
+	manifest.State = StateExpired
+	manifest.LastError = ""
+	manifest.UpdatedAt = store.now().UTC()
+	return store.replace(manifest)
+}
+
+// Forget removes the durable record of a run that owns nothing and attributes
+// nothing. A record naming an imported branch is refused, so every
+// pisafe/<run> branch in the user's repository keeps naming the run that
+// produced it.
+func (store Store) Forget(runID string) error {
+	manifest, err := store.Get(runID)
+	if err != nil {
+		return err
+	}
+	if manifest.State != StateDiscarded {
+		return fmt.Errorf("run %q is %s and still owns resources", runID, manifest.State)
+	}
+	if manifest.ImportedBranch != "" {
+		return fmt.Errorf(
+			"run %q is what %s was imported from and is kept",
+			runID,
+			manifest.ImportedBranch,
+		)
+	}
+	path, err := store.manifestPath(runID)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("remove run manifest: %w", err)
+	}
+	return store.syncRoot()
+}
+
 func (store Store) Discard(runID string) (Manifest, error) {
 	manifest, err := store.Get(runID)
 	if err != nil {
@@ -522,6 +574,10 @@ func (store Store) writeAtomic(path string, manifest Manifest, replace bool) err
 		}
 	}
 	complete = true
+	return store.syncRoot()
+}
+
+func (store Store) syncRoot() error {
 	directory, err := os.Open(store.root)
 	if err != nil {
 		return fmt.Errorf("open run-state directory: %w", err)
