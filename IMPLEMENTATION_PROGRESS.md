@@ -2,451 +2,279 @@
 
 Last updated: 2026-07-27
 
-This file is the durable handoff for continuing `pisafe` from a fresh session.
-The design authority remains [`pisafe-design.md`](pisafe-design.md); this file
-records what is implemented, what has been verified, and what should happen
-next.
+The durable handoff for continuing `pisafe` from a fresh session. The design
+authority is [`pisafe-design.md`](pisafe-design.md); this file records what is
+implemented, what has been verified against a real VM, and what comes next.
 
 ## Current milestone
 
-Phase 1 is in progress. Nine implementation slices now exist:
+Phase 1 is in progress. Every command the design enumerates for it exists:
+`run`, `list`, `stop`, `resume`, `diff`, `cp`, `apply`, `discard`, `gc`, `zed`,
+`login`, `broker`, `doctor`. Built in nine slices: the controller and Git
+isolation core; the Lima VM backend and firewall; SSH transport, run records,
+run image and container contract; per-run SSH credentials; user-facing run
+creation; stop/resume/discard and quota-backed storage; the reverse inference
+relay; ChatGPT subscription login; and getting work back out (`diff`, `cp`,
+`gc`).
 
-1. The Go controller skeleton and single-repository Git isolation core.
-2. The dedicated Lima VM backend, host-network discovery, and initial static
-   firewall boundary.
-3. The SSH artifact transport, durable run records, pinned run image, hardened
-   Podman launch contract, Linux materialization helper, and internal run
-   creation transaction.
-4. Per-run SSH credentials, non-root container `sshd`, strict host-key
-   pinning, and a portless Lima control-SSH ProxyCommand.
-5. User-facing run creation, fresh/reused VM orchestration, packaged image
-   artifacts, excluded-input reporting, and explicit Zed connection launch.
-6. Stop/resume, exact-confirmation discard and failed-creation cleanup
-   recovery, cumulative wall-clock enforcement, and quota-backed persistent
-   run storage.
-7. The reverse inference relay: a static broker firewall exception, run-scoped
-   revocable capabilities in the manifest lifecycle, the Mac-side `pisafe
-   broker` relay with fail-closed request contract, and run-side Pi provider
-   configuration.
-8. `pisafe login chatgpt`: the ChatGPT subscription OAuth flow with macOS
-   Keychain persistence, the Codex upstream with broker-side token refresh,
-   and the curated run-side model catalog. This replaced the interim
-   `PISAFE_INFERENCE_*` environment configuration.
-9. Getting work back out and letting it go: `pisafe diff`, hardened
-   `pisafe cp`, and `pisafe gc`, the seven-day retention sweep that also prunes
-   superseded managed run images. This completed the command set the design
-   enumerates for Phase 1.
-
-`pisafe run` now uses the tested mountless path and materializes inside private
-quota-backed VM storage. Do not add a local-workspace fallback.
+`pisafe run` uses the tested mountless path and materializes inside private
+quota-backed VM storage. **Do not add a local-workspace fallback.**
 
 ## Implemented
 
-### Controller and Git boundary
+### Git boundary
 
-- Dependency-free Go module and `cmd/pisafe` executable.
-- Compact CLI help and `pisafe doctor`.
-- Git staging split at the VM boundary:
-  - `gitstage.Prepare` runs on the Mac and produces a Git bundle plus a binary
-    patch of the final tracked state.
-  - `gitstage.Materialize` consumes those artifacts in the isolated
-    environment and never accesses the recorded Mac source path.
-- Dirty tracked state is flattened into a clearly labelled baseline commit.
-- Untracked files remain excluded and are reported at finalization.
-- Untracked or ignored inputs enter a run only when `pisafe run --include PATH`
-  names them. Selection resolves paths against the repository, expands
-  directories, and refuses anything Git tracks, anything outside the
-  repository, symlinks pointing out of it, special files, and selections over
-  the file-count or byte limits. Credential-shaped names need
-  `--include-unsafe PATH`; the message states that including one lets
-  everything in the run read and exfiltrate it.
-- Selected inputs travel as a tar beside the bundle and patch, are re-validated
-  on extraction (no absolute, climbing, or `.git` paths, no non-regular
-  entries), must match the names recorded in the staged snapshot, and are
-  staged with literal pathspecs so they join the baseline commit.
-- Apply is split in the opposite direction and journaled across repositories:
-  - `gitstage.PrepareApply` commits whatever the agent left uncommitted, in
-    the submodules first so the superproject records where they ended up, and
-    creates one incremental bundle per changed repository.
-  - `gitstage.ImportApply` verifies and fetches every object set into
-    temporary refs on the Mac before anything user-visible changes, then
-    returns the journal of intended refs.
-  - `gitstage.CommitApply` executes that journal one repository at a time and
-    `gitstage.RollbackApply` undoes a partial one.
-- Apply creates only `refs/heads/pisafe/<run>`, in the superproject and in
-  each changed submodule, with compare-and-swap `git update-ref`; it does not
-  change any current branch, index, or working tree. Submodule refs are
+- Dependency-free Go module, `cmd/pisafe` and `cmd/pisafe-guest`.
+- Staging is split at the boundary: `gitstage.Prepare` runs on the Mac and
+  produces a Git bundle plus a binary patch of the final tracked state;
+  `gitstage.Materialize` consumes them inside the run and never sees the Mac
+  source path. Dirty tracked state becomes a labelled baseline commit.
+- Untracked and ignored inputs enter only through `--include PATH`. Selection
+  refuses tracked files, paths outside the repository, escaping symlinks,
+  special files, and over-limit selections; credential-shaped names need
+  `--include-unsafe`. They travel as a tar beside the bundle, are re-validated
+  on extraction against the names in the staged snapshot, and join the baseline
+  commit.
+- Initialized submodules each contribute their own bundle and patch, are
+  reconstructed and registered from `.gitmodules`, and get their own baseline
+  commit; the superproject baseline records the gitlink they actually ended up
+  at, and its patch ignores submodules so gitlink changes travel once.
+  Uninitialized submodules stay uninitialized. Nested submodules and Git LFS
+  fail closed. External diff/textconv drivers are disabled during capture, and
+  parsing is NUL-delimited so unusual filenames survive.
+- Apply is split in the opposite direction and journaled: `PrepareApply`
+  commits what the agent left uncommitted (submodules first), `ImportApply`
+  verifies and fetches every object set into temporary refs before anything
+  user-visible changes, `CommitApply` executes the journal one repository at a
+  time, `RollbackApply` undoes a partial one. Only `refs/heads/pisafe/<run>` is
+  ever created, with compare-and-swap; a contested ref stops with
+  `ErrApplyNeedsReconciliation` rather than overwriting. Submodule refs are
   created first, so an interruption can leave commits reachable but never a
   branch whose gitlinks are not.
-- The journal is idempotent: a ref already holding the recorded commit is a
-  completed step, and a ref holding anything else stops with
-  `ErrApplyNeedsReconciliation` rather than overwriting a change made
-  meanwhile. Rollback deletes only refs that still hold what apply wrote.
-- The result reports which commit the imported branch expects in each
-  submodule and which branch keeps it reachable.
-- `pisafe apply RUN` drives that across the boundary. It stops an active run,
-  captures it with `pisafe-guest prepare-apply` in a throwaway
-  `--network=none` container mounted only on the run's workspace, streams each
-  bundle back through Lima control SSH bounded and SHA-256 verified, imports
-  every object set into temporary refs, records the plan in the run manifest,
-  and only then moves refs. A prepared apply carries hashes and fixed artifact
-  names, never a filesystem path.
-- A recorded plan is always finished rather than redone: apply on a run that
-  already has one replays the journal without touching the run at all. A
-  contested ref leaves the plan recorded so the user can reconcile and rerun.
-  The run becomes `imported` only once every ref holds its recorded commit,
-  and an imported run cannot be resumed or applied again.
-- Apply runs the controller's current managed run image rather than the image
-  the manifest records, so the guest helper always matches the controller
-  reading what it produced.
-- Apply verifies the run's storage before capturing it. A run's fixed-capacity
-  filesystem is mounted per VM boot, not per run, so a VM that restarted
-  between the run and its apply presents an empty run root until the
-  fixed-policy helper remounts it.
-- `pisafe diff RUN` reports what a run changed since it started: its commits,
-  the paths that differ from the state it began in with per-path line counts,
-  and the untracked files apply would leave behind, for the superproject and
-  each submodule. It measures from the baseline commit, so dirty state the user
-  carried in is not attributed to the agent, and the superproject ignores
-  submodule gitlinks so no change is reported twice. Every list is capped and
-  paired with its exact total.
-- Diff runs in a throwaway `--network=none` container that mounts the run's
-  workspace read-only, with Git's optional index locks disabled, so it works on
-  an active, stopped, or imported run without altering or blocking it. It
-  reports names and counts, never file content, and the controller quotes every
-  name and commit subject because a run wrote them.
-- `pisafe cp RUN:PATH [DEST] [--force]` copies one file or directory out of a
-  run. The archive streams from a throwaway `--network=none` container holding
-  the workspace read-only, so nothing is written inside the run and an active
-  run is undisturbed.
-- Both ends are hardened. The run refuses an absolute, climbing, or
-  whole-workspace request and archives only regular files and directories,
-  naming any symlink or special file that stops the copy. The Mac re-validates
-  every entry, refuses anything outside the single path it asked for, and
-  writes through an `os.Root` directory handle, so no entry can escape however
-  the archive is shaped. Copies are bounded at 4096 entries, 1 GiB total, and
-  256 MiB per file.
-- Everything lands in a staging directory beside the destination and is moved
-  into place only once the whole copy has arrived, so a refused copy leaves the
-  destination exactly as it was. An existing destination is replaced only with
-  `--force`, and is then removed rather than written through, so a destination
-  symlink cannot redirect the copy. An impossible destination is refused before
-  the run is asked to produce anything.
-- `pisafe gc [--dry-run]` applies the seven-day retention window. An imported
-  run past it is reclaimed: its container, storage, VM stage, Mac-side SSH key,
-  and durable record all go through the same idempotent path discard uses. The
-  record is not kept, because the `pisafe/<run>` branch already names the run
-  that produced it.
-- Age alone never removes work that was never imported. A `creating`, `active`,
-  or `stopped` run past the window is reported with the reason and left exactly
-  as it was; `pisafe discard` remains the only way to release it.
-- Retention is measured from `imported_at`, the timestamp of the event that
-  finished the run, not from creation or last update, so a run resumed for a
-  month is never near reclamation.
-- `gc` prunes superseded managed run images. The current recipe's image is
-  recognized by the recipe label the image carries rather than by resolving the
-  recipe's ID first, so a failed lookup can never be mistaken for a recipe with
-  no image. Images pinned by a run that can still start a container are also
-  kept, an unlabelled image is never a candidate, and an image still in use
-  fails to remove and is reported rather than forced away.
-- `--dry-run` reports the same sweep without removing anything, and a plan that
-  cannot be built stops collection entirely rather than pruning against an
-  incomplete keep set.
-- Discard reclaims a run from any state, including `imported`, and removes its
-  record with it. An imported run keeps its workspace and its 10 GiB filesystem
-  until discard or the retention window reclaims it.
-- A run commits as its user. `pisafe run` resolves the identity Git would use
-  in the source repository, so repository-local and conditional configuration
-  wins exactly as it does outside a run, and installs it once in the run's own
-  global Git configuration. A repository with no `user.name`/`user.email`
-  refuses to start a run and says how to set one, because that run's commits
-  would fail. Only pisafe's own baseline and final commits keep the fixed
-  `pisafe` author.
-- Initialized submodules are staged with the superproject: each one
-  contributes its own bundle and tracked-state patch, is reconstructed in the
-  run, absorbs its git directory, and is registered from `.gitmodules`. Its
-  dirty tracked state becomes a baseline commit inside the submodule, and the
-  superproject baseline records the gitlink the submodule actually ended up
-  at. Uninitialized submodules stay uninitialized.
-- The superproject patch ignores submodule changes, so submodule state travels
-  only through the submodule's own artifacts.
-- Nested submodules and Git LFS fail closed rather than staging incomplete
-  repositories.
-- External diff and text-conversion drivers are disabled during host capture.
-- NUL-delimited parsing preserves unusual Git filenames.
-- User-facing staging reports untracked and ignored inputs separately,
-  excludes everything not explicitly selected, and lists what was included.
-  Output is safely quoted and capped to remain readable.
+- A run commits as its user: `pisafe run` resolves the identity Git would use
+  in the source repository and installs it in the run's own global config. A
+  repository with no `user.name`/`user.email` refuses to start a run. Only
+  pisafe's own baseline and final-capture commits keep the fixed `pisafe`
+  author.
 
-### Host-network discovery
+### Commands over the boundary
 
-- `internal/hostnet` gathers IPv4 prefixes from every active, non-loopback Mac
-  interface.
-- It also records the default IPv4 gateway.
-- Prefixes are canonicalized, deduplicated, and collapsed so nftables interval
-  sets never receive overlapping networks.
-- Discovery fails closed if the host network cannot be determined.
+- `pisafe apply RUN` stops an active run, captures it with
+  `pisafe-guest prepare-apply` in a throwaway `--network=none` container mounted
+  only on the workspace, streams each bundle back bounded and SHA-256 verified,
+  imports into temporary refs, records the plan in the manifest, and only then
+  moves refs. A recorded plan is replayed rather than redone, so apply on a run
+  that already has one never touches the run. The run becomes `imported` only
+  once every ref holds its recorded commit, and cannot then be resumed or
+  applied again. Apply runs the controller's *current* image, and verifies the
+  run's storage first (a fixed-capacity filesystem is mounted per VM boot, not
+  per run).
+- `pisafe diff RUN` reports commits, per-path line counts, and untracked
+  leftovers for the superproject and each submodule, measured from the baseline
+  commit so carried-in dirty state is not attributed to the agent. Every list is
+  capped and paired with its exact total. It runs in a throwaway
+  `--network=none` container mounting the workspace read-only with Git's
+  optional index locks disabled, so it works on an active, stopped, or imported
+  run without disturbing it, and it reports names and counts, never content —
+  the controller quotes every run-authored name and subject.
+- `pisafe cp RUN:PATH [DEST] [--force]` streams a tar from the same read-only
+  container. The run refuses absolute, climbing, or whole-workspace requests and
+  archives only regular files and directories, naming any symlink or special
+  file that stops the copy. The Mac re-validates every entry, refuses anything
+  outside the requested path, and writes through an `os.Root` handle, bounded at
+  4096 entries, 1 GiB total, 256 MiB per file. Everything lands in a staging
+  directory beside the destination and moves into place only once complete; an
+  existing destination is refused before the run is asked for anything, and
+  `--force` removes it rather than writing through it.
+- `pisafe gc [--dry-run]` applies the seven-day window, measured from
+  `imported_at`. An imported run past it is reclaimed — container, storage, VM
+  stage, Mac-side SSH key, and record — through the same idempotent path discard
+  uses; the `pisafe/<run>` branch is what keeps the work. Age alone never
+  removes an unimported run: a `creating`, `active`, or `stopped` run past the
+  window is reported with its reason and keeps the image it can still start
+  from. Superseded managed images are pruned, recognizing the current recipe by
+  the label each image carries rather than by resolving its ID; an unlabelled
+  image is never a candidate, and an image still in use is reported rather than
+  forced away. A plan that cannot be built stops collection entirely.
+- `pisafe discard RUN --confirm RUN` reclaims from any state, removing the
+  record with the resources. Failed `creating` records use the same path.
 
-### Lima backend
+### Host network and Lima backend
 
-- Dedicated instance name: `pisafe`.
-- Minimum Lima version: 2.2.0.
-- Lima `plain: true`, which disables mounts, dynamic forwarding, containerd,
-  the guest agent, and SSH-agent forwarding.
+- `internal/hostnet` gathers IPv4 prefixes from every active non-loopback Mac
+  interface plus the default gateway, canonicalized, deduplicated, and collapsed
+  so nftables interval sets never overlap. Discovery fails closed.
+- Dedicated instance `pisafe`, Lima ≥ 2.2.0, `plain: true` (no mounts, dynamic
+  forwarding, containerd, guest agent, or agent forwarding), explicitly empty
+  mounts, no forwarded X11/proxy/host-resolver/Podman socket, public DNS, IPv6
+  disabled. Default resources: 4 CPUs, 8 GiB, 64 GiB sparse disk.
 - Pinned Fedora 44 ARM64 cloud image:
 
   ```text
   sha256:55c60a3b80d3616a08705afd0459e75fe9f03c54aba7a46e4002a41a72fa0d5b
   ```
 
-- Default VM resources: 4 CPUs, 8 GiB memory, 64 GiB sparse disk.
-- Explicitly empty mounts.
-- No forwarded SSH agent, X11, host proxy environment, Lima host resolver, or
-  Podman socket.
-- Public DNS configured directly.
-- Rootless Podman, Git, nftables, and OpenSSH installed during provisioning.
-- A 65,536-ID subordinate UID/GID range is assigned to the Lima user.
-- Provisioning runs `podman system migrate` after assigning those ranges.
-- Chrony is enabled, and every start/resume calls a narrowly privileged clock
-  step because plain mode has no guest-agent time correction.
-- Every provisioned VM records a root-owned SHA-256 fingerprint derived from
-  the complete generated Lima definition and immutable host-network set.
-  `Manager.Start` checks it before clock or firewall verification, so an older
-  or locally modified security definition fails closed.
-- IPv6 is disabled.
-- A dedicated `192.0.2.1/32` dummy address carries the inference-broker
-  reverse relay.
-- SSH remote forwarding is restricted to exactly `192.0.2.1:18080` through
-  `PermitListen`; there is no dynamic broker port set.
-- The generated configuration removes the cloud image's unrestricted
-  passwordless sudo and removes the Lima user from `wheel`. It grants only
-  two exact no-argument helpers: clock synchronization and firewall status.
+- Provisioning installs rootless Podman, Git, nftables, and OpenSSH, assigns a
+  65,536-ID subordinate UID/GID range, runs `podman system migrate`, and enables
+  chrony; start/resume calls a narrowly privileged clock step because plain mode
+  has no guest-agent time correction.
+- The generated config removes the cloud image's unrestricted passwordless sudo
+  and the Lima user from `wheel`, granting only exact no-argument helpers: clock
+  step, firewall status, and the fixed-policy run-storage helper.
+- Every VM records a root-owned SHA-256 fingerprint of the complete generated
+  definition and immutable host-network set. `Manager.Start` checks it before
+  clock or firewall verification, so an older or locally modified security
+  definition fails closed.
+- A dedicated `192.0.2.1/32` dummy address carries the broker relay; SSH remote
+  forwarding is restricted to exactly `192.0.2.1:18080` via `PermitListen`.
 
 ### Firewall
 
-- A boot-persistent `pisafe-firewall.service` owns the nftables ruleset.
-- `firewalld` is disabled in the dedicated VM.
-- All three chains accept established/related conntrack traffic, so policy
-  gates connection initiation and conntrack owns replies.
-- Input otherwise defaults to drop, with DHCP replies, control SSH, and
-  exactly `192.0.2.1:18080` (the broker relay) admitted.
-- Both output and forward hooks deny new connections toward:
-  - IPv4 loopback;
-  - RFC1918;
-  - CGNAT;
-  - link-local and metadata;
-  - TEST-NET broker space except the static `192.0.2.1:18080` exception;
-  - multicast and reserved/broadcast ranges; and
-  - the Mac's current on-link networks.
-- Root DHCP and root loopback exceptions keep VM infrastructure functional.
-- `lima.Manager.Start` requires a non-empty host-prefix set and compares it
-  with a root-owned record of the set baked into the firewall. A network
-  change fails closed and requires VM recreation.
-- There is deliberately no runtime firewall-mutation privilege for the Lima
-  user. A merely syntax-valid refresh helper would still let an escaped
+- Boot-persistent `pisafe-firewall.service` owns the ruleset; `firewalld` is
+  disabled. All three chains accept established/related conntrack traffic, so
+  policy gates connection initiation and conntrack owns replies.
+- Input defaults to drop, admitting DHCP replies, control SSH, and exactly
+  `192.0.2.1:18080`. Output and forward deny new connections toward IPv4
+  loopback, RFC1918, CGNAT, link-local and metadata, TEST-NET except the static
+  broker exception, multicast and reserved/broadcast, and the Mac's current
+  on-link networks. Root DHCP and root loopback exceptions keep VM
+  infrastructure working.
+- `Start` requires a non-empty host-prefix set and compares it against the
+  root-owned record baked into the firewall; a network change fails closed and
+  requires VM recreation.
+- **There is deliberately no runtime firewall-mutation privilege for the Lima
+  user.** A merely syntax-valid refresh helper would still let an escaped
   process replace the real LAN set with an unrelated valid prefix.
 
-### SSH transport and guest materialization
+### SSH transport and materialization
 
-- `lima.Transport` executes argv-style commands through Lima's control SSH
-  connection.
-- It allocates a private VM-side run directory and uploads `source.bundle`,
-  `tracked.patch`, and `snapshot.json` independently.
-- Every upload is streamed as binary data, checked for exact byte count and
-  SHA-256 in the VM, and atomically renamed.
-- The guest snapshot omits the Mac source path.
+- `lima.Transport` runs argv-style commands over Lima's control SSH, allocates a
+  private VM-side run directory, and uploads `source.bundle`, `tracked.patch`,
+  and `snapshot.json` independently — each streamed as binary, checked for exact
+  byte count and SHA-256 in the VM, then atomically renamed. The guest snapshot
+  omits the Mac source path and is rejected if it names one.
 - Stage files are imported with `podman unshare` into a private fixed-capacity
-  filesystem; no Mac mount, Podman socket, or unsupported
-  `podman cp --chown` path is used.
-- `cmd/pisafe-guest` invokes the same tested `gitstage.Materialize`
-  implementation inside Linux and rejects snapshots containing a Mac path.
+  filesystem: no Mac mount, no Podman socket, no `podman cp --chown`.
 
 ### Run image and container contract
 
-- Root image is pinned to the ARM64 Node manifest:
+- Root image pinned to the ARM64 Node manifest:
 
   ```text
   docker.io/library/node@sha256:af01d58b748ec92b1d6e8e11429aad424fd1e68c848185399dca0596a1ab8f5c
   ```
 
-- Pi is pinned to `@earendil-works/pi-coding-agent@0.82.0`; the downloaded
-  package tarball is checked against its registry SHA-512 integrity before
-  installation.
+- Pi pinned to `@earendil-works/pi-coding-agent@0.82.0`, with the downloaded
+  tarball checked against its registry SHA-512 before installation.
 - `runimage.Installer` derives a recipe digest from the exact embedded
-  Containerfile and static guest-helper bytes, streams a tar context containing
-  only those two files, and passes that digest into an image label.
-- The macOS controller embeds the Containerfile. Release/development layouts
-  provide a sibling `pisafe-guest-linux-arm64` sidecar; an explicit
-  `PISAFE_GUEST_HELPER` path is available for development.
-- A mutable, recipe-derived local tag is used only as a cache key. Reuse
-  requires matching recipe, base, and Pi labels, Linux/ARM64 platform, and a
-  valid immutable SHA-256 image ID. Run containers continue to receive only
-  that immutable ID.
-- Artifact loading rejects symlinks, file swaps, oversize inputs, non-ELF or
-  non-ARM64 helpers, dynamic interpreters, and imported shared libraries.
-- The image contains Git, OpenSSH, Tini, Pi, and the static ARM64 guest helper.
-- Build-time SSH host keys are removed. A network-disabled one-shot container
-  generates each run's host key and installs only its client public key into
-  private quota-backed home storage.
-- Run commands require an immutable `sha256:` image ID and use:
-  - UID/GID 1000;
-  - read-only root;
-  - all capabilities dropped;
-  - `no-new-privileges`;
-  - rootless pasta networking with explicit public DNS;
-  - 2 CPUs, 4 GiB memory with no extra swap, and 512 PIDs;
-  - bounded `/tmp` and `/run` tmpfs mounts; and
-  - unique workspace and home directories inside a run-scoped,
-    fixed-capacity filesystem owned by the mapped non-root user.
-- No Podman/Docker socket, forwarded SSH agent, or credential environment is
-  added.
-- Each run receives one sparse 10 GiB ext4 filesystem shared by its persistent
-  workspace and home. Root-owned image storage and a narrow fixed-policy helper
-  prevent the rootless VM user from resizing or remounting it.
-- Podman's independent `--timeout` enforces the run's remaining active budget
-  even after the Mac controller exits.
+  Containerfile and static guest-helper bytes, streams a two-file tar context,
+  and labels the image with that digest. A mutable recipe-derived tag is only a
+  cache key: reuse requires matching recipe/base/Pi labels, Linux/ARM64
+  platform, and a valid immutable SHA-256 ID, which is what run containers
+  receive. Artifact loading rejects symlinks, file swaps, oversize inputs,
+  non-ELF or non-ARM64 helpers, dynamic interpreters, and imported shared
+  libraries.
+- Build-time SSH host keys are removed; a network-disabled one-shot container
+  generates each run's host key and installs only its client public key.
+- Run commands require an immutable `sha256:` ID and use UID/GID 1000, read-only
+  root, all capabilities dropped, `no-new-privileges`, rootless pasta networking
+  with explicit public DNS, 2 CPUs, 4 GiB memory with no extra swap, 512 PIDs,
+  bounded `/tmp` and `/run` tmpfs, and unique workspace/home directories inside a
+  run-scoped fixed-capacity filesystem owned by the mapped non-root user. No
+  Podman/Docker socket, forwarded agent, or credential environment is added.
+- Each run gets one sparse 10 GiB ext4 filesystem for workspace and home.
+  Root-owned image storage and the fixed-policy helper prevent the rootless VM
+  user from resizing or remounting it. Podman's independent `--timeout` enforces
+  the remaining active budget even after the controller exits.
 
 ### Per-run SSH boundary
 
-- `internal/runssh` creates a unique Ed25519 client key under mode-0700
-  run-local Mac state; private and public key files are restricted to 0600.
-- Both client and host public keys are decoded and validated as exact
-  32-byte Ed25519 SSH wire values rather than accepted as arbitrary text.
-- The container generates its own Ed25519 host key. The Mac stores a strict
-  per-run `known_hosts` file and SHA-256 fingerprint before activation.
-- `sshd` runs as UID/GID 1000 and is the container's main process. It listens
-  only on container-local `127.0.0.1:2222`, permits public-key authentication
-  only, and disables password, keyboard-interactive, root, agent, X11, tunnel,
-  user-RC, and TCP-forwarding paths.
-- No SSH port is published into the VM or onto macOS.
-- The generated per-run OpenSSH config uses Lima's generated SSH config and a
-  `ProxyCommand` that executes:
+- `internal/runssh` creates a unique Ed25519 client key under mode-0700 run-local
+  Mac state (key files 0600). Both client and host public keys are validated as
+  exact 32-byte Ed25519 SSH wire values.
+- The container generates its own Ed25519 host key; the Mac stores a strict
+  per-run `known_hosts` and fingerprint before activation. `sshd` runs as UID
+  1000 as the container's main process, listening only on container-local
+  `127.0.0.1:2222`, public-key only, with password, keyboard-interactive, root,
+  agent, X11, tunnel, user-RC, and TCP forwarding disabled. No port is published.
+- The per-run OpenSSH config uses a `ProxyCommand` executing
+  `podman exec --interactive <run-container> pisafe-guest proxy-ssh`, which
+  relays binary stdio only to container loopback. The client private key never
+  enters Lima or the run.
 
-  ```text
-  podman exec --interactive <run-container> pisafe-guest proxy-ssh
-  ```
+### Inference broker and ChatGPT login
 
-  The static guest helper relays binary stdio only to container loopback.
-- The client private key never enters Lima or the run. The authorized public
-  key is further restricted against agent, TCP, X11, and user-RC forwarding.
-- Run manifests record the alias, identity/config/known-hosts paths, and pinned
-  host-key fingerprint. A creating run can become active only through the
-  activation operation that supplies this connection record.
-
-### Inference broker relay and run-scoped capability
-
-- `internal/broker` is the Mac-side relay. Provider credentials never leave
-  the Mac; runs authenticate with a `pisafe-cap-<64 hex>` capability minted
-  from 32 bytes of `crypto/rand`.
-- Capabilities live only in the version-4 manifest: activation and resume
-  require a fresh one, stop clears it, and a stored manifest is invalid if an
-  inactive state retains one. The broker re-reads the durable records on every
-  request, so a run that has stopped, been reclaimed, or exhausted its
-  wall clock is rejected immediately with the same uniform 401. Matching is
-  constant-time over SHA-256 digests.
-- The relay accepts exactly one method and path derived from the configured
-  API (`POST /v1/messages`, `/v1/chat/completions`, `/v1/responses`, or
-  `/codex/responses`), rejects unknown paths/methods, caps request bodies at
-  64 MiB, caps each run at 4 concurrent upstream requests, refuses upstream
-  redirects, and streams responses (SSE-safe flushing) without rewriting
-  them. Client Content-Type/Accept/Content-Encoding, the Anthropic and
-  OpenAI beta/version headers, originator, session-id, x-client-request-id,
-  and User-Agent are forwarded; credentials never are, because the broker
-  sets its own from a per-request credential source.
-- `pisafe broker` runs in the foreground: it verifies the VM boundary, serves
-  the relay on an ephemeral `127.0.0.1` port, and publishes it at
-  `192.0.2.1:18080` inside the VM through a dedicated
-  `ssh -N -R` child over Lima's generated SSH config with
-  `ExitOnForwardFailure` and multiplexing disabled. The VM listener dies with
-  the process, a second broker fails loudly instead of stealing the binding,
-  and startup confirms reachability by probing `/dev/tcp/192.0.2.1/18080`
-  from inside the VM.
+- `internal/broker` is the Mac-side relay. Runs authenticate with a
+  `pisafe-cap-<64 hex>` capability from `crypto/rand`, stored only in the
+  version-4 manifest: activation and resume require a fresh one, stop clears it,
+  and a manifest is invalid if an inactive state retains one. The broker
+  re-reads durable records per request, so a run that stopped, was reclaimed, or
+  exhausted its wall clock is rejected immediately with a uniform 401. Matching
+  is constant-time over SHA-256 digests.
+- The relay accepts exactly one method and path derived from the configured API
+  (`POST /v1/messages`, `/v1/chat/completions`, `/v1/responses`, or
+  `/codex/responses`), caps bodies at 64 MiB and each run at 4 concurrent
+  upstream requests, refuses upstream redirects, and streams responses
+  (SSE-safe flushing) unrewritten. Client content/beta/version/originator/
+  session/user-agent headers are forwarded; credentials never are, because the
+  broker sets its own.
+- `pisafe broker` runs in the foreground: verifies the VM boundary, serves on an
+  ephemeral `127.0.0.1` port, and publishes it at `192.0.2.1:18080` through a
+  dedicated `ssh -N -R` child with `ExitOnForwardFailure` and multiplexing
+  disabled, confirming reachability from inside the VM. The listener dies with
+  the process and a second broker fails loudly.
 - Run creation and resume exec `pisafe-guest configure-inference`, which
-  atomically installs a validated `~/.pi/agent/models.json` (mode 0600) whose
-  `apiKey` is the run's current capability, and pins `transport: "sse"` in
-  the run's Pi settings (merging, because Pi writes that file too) since
-  Pi's default auto transport dials a WebSocket the HTTP relay cannot speak.
-  The pinned Pi clients were inspected to fix the base URLs:
-  `http://192.0.2.1:18080` for anthropic-messages and the Codex API,
-  `http://192.0.2.1:18080/v1` for the standard OpenAI APIs.
-- The relay accepts the capability as `x-api-key`, a Bearer token, or the
-  JWT-wrapped Bearer token the Codex client requires (the capability rides
-  as the signature segment and is stripped before constant-time matching).
-
-### ChatGPT subscription login
-
-- `pisafe login chatgpt` runs the browser OAuth flow: PKCE S256 against
-  `auth.openai.com` with the exact client ID, scope, redirect URI
-  (`localhost:1455`), and authorize parameters of the pinned Pi AI client;
-  the callback page is served locally with escaped output and a strict state
-  check, and the code exchange yields access/refresh tokens plus the ChatGPT
-  account ID extracted from the access-token JWT claim.
-- The credential persists in the login keychain (`security` service
-  `pisafe`, account `chatgpt`), written over `/usr/bin/security`'s
-  interactive stdin base64-wrapped so tokens never appear in argv. A missing
-  item maps to a distinct not-logged-in error that the CLI turns into a
-  `pisafe login chatgpt` prompt.
-- The broker holds a serialized credential source: access tokens refresh
+  atomically installs a validated mode-0600 `~/.pi/agent/models.json` whose
+  `apiKey` is the current capability, and merges `transport: "sse"` into the
+  run's Pi settings. Base URLs were fixed against the pinned clients:
+  `http://192.0.2.1:18080` for anthropic-messages and Codex,
+  `http://192.0.2.1:18080/v1` for the standard OpenAI APIs. The capability is
+  accepted as `x-api-key`, a Bearer token, or the JWT-wrapped Bearer token the
+  Codex client requires.
+- `pisafe login chatgpt` runs the browser OAuth flow — PKCE S256 against
+  `auth.openai.com` with the pinned client's exact client ID, scope, redirect
+  (`localhost:1455`), and parameters — serving the callback locally with escaped
+  output and a strict state check, and extracting the account ID from the
+  access-token JWT. The credential persists in the login keychain (service
+  `pisafe`, account `chatgpt`) written over `security`'s stdin base64-wrapped, so
+  tokens never appear in argv; a missing item becomes a not-logged-in error the
+  CLI turns into a login prompt.
+- The broker's credential source is serialized: access tokens refresh
   proactively within five minutes of expiry and the rotated refresh token is
-  persisted before use. `pisafe broker` forces one credential check at
-  startup so a dead login fails there, loudly, not inside runs. Upstream
-  requests to `https://chatgpt.com/backend-api/codex/responses` carry
-  `Authorization: Bearer` plus the real `chatgpt-account-id`; the run only
-  ever sees the placeholder account ID `pisafe` in its wrapped capability.
-- Runs receive a curated model catalog embedded from the pinned Pi AI Codex
-  data (context windows, cost rates, thinking-level maps) with per-model
-  `api`/`provider`/`baseUrl`/`headers` stripped so models.json can never
-  route a run around the broker.
+  persisted before use. `pisafe broker` forces one credential check at startup.
+  Upstream requests to `https://chatgpt.com/backend-api/codex/responses` carry
+  the real Bearer token and `chatgpt-account-id`; the run only ever sees the
+  placeholder account ID `pisafe`. Its model catalog is embedded from the pinned
+  Pi AI Codex data with per-model routing fields stripped.
 
-### Run records and internal controller
+### Run records and controller
 
 - `internal/runstate` writes version-4, mode-0600 JSON manifests atomically
-  under the user config directory (or `PISAFE_STATE_DIR`).
-- It enforces `creating → active → stopped → active|imported`, and binds one
-  inference capability to exactly the active state. There is no terminal state:
-  reclaiming a run removes its record, and only an active run's record is
-  refused, because it is the one route back to a running container.
-- Failed creation remains visibly `creating` with `last_error`; it is not
-  silently deleted or mislabeled active.
-- `internal/runctl.StartPrepared` composes stage upload, private-storage import,
-  per-run key generation, network-disabled SSH initialization, hardened
-  container start, host-key pinning, in-container materialization, transfer
-  cleanup, manifest activation, and bounded rollback.
-- Creation rollback removes partial SSH client state along with the container,
-  persistent filesystem, and VM-side transfer directory. Allocation commands
-  are treated as potentially successful even when their transport response
-  fails, and the fixed storage helper independently removes exact partial
-  image or mount-directory artifacts.
-- Activation records the baseline commit returned by actual in-container
-  materialization rather than retaining the host's pre-materialization
-  placeholder.
-- `pisafe run` now:
-  - resolves the current Git root and creates a project-derived run ID with a
-    UTC timestamp plus 48 bits of cryptographic entropy;
-  - discovers the current Mac networks;
-  - creates or reuses and verifies the dedicated VM;
-  - installs/reuses the managed image;
-  - prepares and starts the run through `runctl`; and
-  - prints the run, workspace, branch, exact `ssh -F` command, excluded input
-    summary, and whether `pisafe broker` will serve inference.
-- `pisafe zed <run>` opens an active connection after the user has explicitly
-  saved the printed `ssh -F` command through Zed's "Connect New Server" flow.
-  PiSafe never edits global SSH or Zed settings.
-- `pisafe list` displays the durable records.
-- `pisafe stop <run>` stops and removes only the container, accounts elapsed
-  active seconds conservatively, and preserves quota-backed storage and SSH
-  identity.
-- `pisafe resume <run>` verifies the current VM boundary, storage identity,
-  image, container identity, and mount sources before recreating the container
-  with only its remaining eight-hour cumulative active budget.
-- `pisafe discard <run> --confirm <run>` requires an exact repeated ID, stops
-  active work, and idempotently removes the exact container, storage
-  filesystem image, transfer stage, and Mac-side SSH secret before recording the
-  discard event. Failed `creating` records use the same recovery path.
+  under the user config directory (or `PISAFE_STATE_DIR`), enforcing
+  `creating → active → stopped → active|imported` and binding one capability to
+  exactly the active state. There is no terminal state: reclaiming a run removes
+  its record, and only an active run's record is refused, because it is the one
+  route back to a running container. Failed creation stays visibly `creating`
+  with `last_error`.
+- `runctl.StartPrepared` composes stage upload, private-storage import, per-run
+  key generation, network-disabled SSH init, hardened container start, host-key
+  pinning, in-container materialization, transfer cleanup, activation, and
+  bounded rollback. Rollback removes partial SSH state with the container,
+  filesystem, and VM stage; allocation commands are treated as possibly
+  successful even when their transport response fails. Activation records the
+  baseline commit returned by actual materialization, not the host placeholder.
+- `pisafe run` resolves the Git root, mints a project-derived run ID with a UTC
+  timestamp plus 48 bits of entropy, discovers Mac networks, creates or reuses
+  and verifies the VM, installs or reuses the image, starts the run, and prints
+  the run, workspace, branch, exact `ssh -F` command, excluded inputs, and
+  whether the broker will serve inference.
+- `pisafe stop` removes only the container and accounts elapsed active seconds
+  conservatively; `pisafe resume` verifies VM boundary, storage identity, image,
+  container identity, and mount sources before recreating with the remaining
+  budget. `pisafe zed` opens a connection the user saved once through Zed's
+  "Connect New Server" flow; pisafe never edits global SSH or Zed settings.
 
 ## Tests and verification
-
-Normal checks:
 
 ```sh
 go test -race -cover ./...
@@ -457,510 +285,301 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
 git diff --check
 ```
 
-Current package coverage at this milestone:
+Package coverage at this milestone:
 
 ```text
-pisafe        0.0%
-pisafe-guest  64.1%
-broker        96.2%
-chatgpt       70.1%
-cli           36.1%
-gitstage      78.8%
-hostnet       50.0%
-lima          67.0%
-runcontainer  72.6%
-runcopy       80.3%
-runctl        70.1%
-runid         92.3%
-runimage      76.8%
-runssh        68.0%
-runstart      80.9%
-runstate      74.4%
+pisafe        0.0%    runcontainer  72.6%
+pisafe-guest  64.1%   runcopy       80.3%
+broker        96.2%   runctl        70.1%
+chatgpt       70.1%   runid         92.3%
+cli           36.1%   runimage      76.8%
+gitstage      78.8%   runssh        68.0%
+hostnet       50.0%   runstart      80.9%
+lima          67.0%   runstate      74.4%
 ```
 
-The broker contract is covered directly: capability auth against durable
-records (unknown, malformed, stopped, and deadline-exhausted capabilities all
-return the same 401), missing-provider 503, method/path/oversize fail-closed
-responses, upstream credential injection without leaking the client header,
-SSE streaming fidelity, redirect refusal, and the per-run concurrency cap.
-The Codex path additionally covers the JWT-wrapped capability, the
-account-id header replacement, forwarded client headers, and the 503 (with
-no detail leak) when credentials cannot be refreshed. The chatgpt package
-covers the full login exchange and state rejection against a stub token
-endpoint, proactive refresh with persistence of the rotated refresh token,
-Keychain round-trips through a fake `security` runner, and the embedded
-catalog's no-routing-override invariant.
+What the unit and integration suites cover, mostly against real repositories
+with a fake VM boundary:
 
-Input selection is covered end to end against real repositories: a run whose
-baseline commit carries a selected untracked file, an ignored build artifact,
-an executable, and a symlink, leaving the staged workspace clean and the
-source untouched; refusal of credential-shaped names with and without the
-unsafe flag, including a directory that contains one; refusal of tracked,
-missing, outside, escaping-symlink, special, and whole-repository selections;
-the per-file size limit; archive entries that climb, are absolute, name
-`.git`, or are devices; a snapshot/archive name mismatch; and the whole-word
-secret matcher.
+- **Broker**: capability auth against durable records (unknown, malformed,
+  stopped, and deadline-exhausted all return the same 401), missing-provider
+  503, method/path/oversize fail-closed, upstream credential injection without
+  leaking the client header, SSE fidelity, redirect refusal, concurrency cap,
+  and the Codex JWT wrapper and account-id replacement. **chatgpt**: the login
+  exchange and state rejection against a stub endpoint, proactive refresh with
+  rotated-token persistence, Keychain round-trips through a fake `security`
+  runner, and the catalog's no-routing-override invariant.
+- **Input selection**: a baseline commit carrying a selected untracked file, an
+  ignored artifact, an executable, and a symlink, leaving the workspace clean
+  and the source untouched; refusal of credential-shaped, tracked, missing,
+  outside, escaping, special, and whole-repository selections; size limits;
+  archive entries that climb, are absolute, name `.git`, or are devices; a
+  snapshot/archive mismatch; and the whole-word secret matcher.
+- **Submodules and journaled apply**: reconstruction with dirty state in both
+  repositories, an uninitialized submodule left alone, refusal of nested
+  submodules and LFS, mismatched artifacts, path-escape refusal, gitlink
+  resolving to exactly the imported commit, an unchanged submodule getting no
+  branch, journal replay as a no-op, a contested ref stopping for
+  reconciliation, and rollback removing only what apply created. End to end: a
+  stopped run captured, imported, and marked imported while the checkout stays
+  untouched; a second apply refused; a recorded plan finished without touching
+  the run; a contested ref leaving the run stopped with its plan intact.
+- **Diff**: commits, an uncommitted edit, an untracked file, a deletion, and a
+  binary path each reported correctly; carried-in baseline work excluded; a
+  submodule reporting its own work without the superproject repeating it; caps
+  with exact totals; escaping submodule path refused; the guest command refusing
+  a Mac-path snapshot and leaving the workspace byte-identical; the controller
+  refusing a run with no workspace, verifying storage first, and leaving an
+  active run active; read-only mount arguments; and output quoting every
+  run-authored name.
+- **cp**: a directory round-tripping with its executable bit and nothing from
+  outside the request; a single file to a named destination; a symlink stopping
+  the copy run-side; Mac-side refusal of climbing, absolute, outside-request,
+  symlink, hard-link, device, named-pipe entries and lookalike prefixes; an
+  occupied destination refused before the run starts and left intact; `--force`
+  replacing it; a destination symlink replaced rather than followed; an
+  oversized file and a failed run each leaving nothing behind.
+- **Collection**: an imported run inside the window untouched; the same run past
+  it reclaimed with container, storage, stage, SSH key, and record all gone,
+  after which every command refuses it as unknown; an unimported run only
+  reported whatever its age, keeping its image and seeing no backend call; a
+  discarded run leaving a later sweep nothing. The store's own test covers
+  removal directly: a reclaimed record is deleted, disappears from listings,
+  cannot be deleted twice, and an active run's record is refused. Image pruning
+  covers the label filter, Podman's bare hex ID, an unlabelled image surviving,
+  the current recipe recognized without a lookup, a missing recipe digest
+  refused, and an in-use image reported without stopping the sweep.
+- **Git identity**: repository config preferred over global, an unconfigured Mac
+  refused, an installed identity proven by reading back a commit's author,
+  empty/oversized/newline values refused, unknown guest fields refused, and run
+  creation stopping before boundary and image work.
+- The generated Lima YAML is checked by the installed Lima validator in the
+  normal suite.
 
-Submodule staging and journaled apply are covered against real repositories:
-reconstruction of an initialized submodule with dirty state in both
-repositories, an uninitialized submodule left alone, refusal of nested
-submodules and of Git LFS inside a submodule, mismatched submodule artifacts,
-path-escape refusal, import of submodule history with the superproject
-gitlink resolving to exactly the imported commit, an unchanged submodule
-getting no branch, journal replay as a no-op, a contested ref stopping for
-reconciliation instead of being overwritten, and rollback removing only the
-refs apply created.
-
-Diff is covered from both sides against real repositories: commits, an
-uncommitted edit, an untracked file, a deletion, and a binary path are each
-reported correctly; carried-in baseline work is excluded; a submodule reports
-its own work while the superproject does not repeat it; lists cap while totals
-stay exact; commit subjects are bounded; an escaping submodule path is refused;
-the guest command refuses a snapshot naming a Mac path and leaves the workspace
-byte-for-byte unchanged; the controller refuses a run with no workspace left,
-verifies storage before reading, and leaves an active run active; the container
-arguments mount the workspace read-only; and the rendered output quotes every
-run-authored name and subject, dropping no escape sequence into the terminal.
-
-Copying out is covered from both sides: a directory round-trips with its
-executable bit and without reaching outside the requested path; a single file
-copies to a named destination; a symlink stops the copy on the run side; and
-on the Mac side climbing, absolute, outside-the-request, symlink, hard-link,
-device, and named-pipe entries are all refused, as is a prefix that merely
-looks like the requested one. An occupied destination is refused before the
-run starts and left byte-for-byte intact, `--force` then replaces it, a
-destination symlink is replaced rather than followed, an oversized file leaves
-no destination behind, a failed run leaves nothing behind, and the container
-arguments mount the workspace read-only. The CLI's own parsing and rendering
-are covered, including quoting names a run chose.
-
-Collection is covered end to end against real repositories with a fake VM
-boundary: an imported run inside the window is untouched, the same run past it
-is reclaimed with its container, storage, stage, SSH key, and record all gone,
-and every command that would read its workspace then refuses it as unknown; a
-run whose work was never imported is only reported, whatever its age, keeps the
-image it can still start from, and sees no backend call at all; a discarded run
-leaves a later sweep nothing to find. The store's own test covers the removal
-directly: a reclaimed record is deleted, disappears from listings, cannot be
-deleted twice, and an active run's record is refused. Image
-pruning is covered for the label filter, the bare hex ID Podman reports, an
-unlabelled image that must survive, the current recipe recognized by label
-without any lookup, a missing recipe digest refused, and an image still in use
-reported without stopping the sweep. The CLI's rendering is covered for both
-the executed and the preview wording.
-
-The run's Git identity is covered from both sides: resolution prefers
-repository configuration over the global one and refuses an unconfigured Mac;
-an installed identity is proven by making a commit with it and reading back the
-author; empty, oversized, and newline-bearing values are refused before
-anything is written; the guest command refuses unknown fields and trailing
-data; and run creation stops before the boundary and image work when no
-identity exists.
-
-The user-facing apply path is covered end to end against real repositories
-with a fake VM boundary: a stopped run captured, fetched, imported, and marked
-imported while the source checkout stays untouched; a second apply refused; a
-recorded plan finished without touching the run at all; and a contested ref
-leaving the run stopped with its plan intact. The manifest's own tests cover
-recording, rereading, and completing a plan, refusal of a second plan, and
-refusal of plans naming another run, another ref, a relative repository, or an
-invalid commit.
-
-The generated YAML is checked by the installed Lima validator in the normal
-test suite.
-
-The live suite is intentionally gated because it creates/reuses a persistent
-VM and may download images:
+### Live verification
 
 ```sh
 PISAFE_LIVE_LIMA=1 go test -v ./internal/lima
 PISAFE_LIVE_LIMA=1 go test -v ./internal/runimage
+PISAFE_LIVE_LIMA=1 PISAFE_LIVE_RUN_IMAGE=sha256:69a90d7f6902dc3f694cca9c98383e5e4d03f8575efdbf98814ff09362e2643c \
+  go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
 ```
 
 Verified against a real ARM64 VM:
 
-- Lima reaches READY.
-- `/Users` is absent.
-- No Podman socket is forwarded.
-- The Podman user namespace has the expected direct UID plus subordinate
-  65,536-ID mapping.
-- The firewall service and nftables table are active.
-- IPv6 is disabled.
-- Public HTTPS works from a rootless Alpine container.
-- RFC1918 and metadata TCP destinations fail from that container.
-- `pisafe doctor` validates the current host networks and generated Lima
-  configuration.
-- The final tracked `Containerfile` builds on ARM64.
-- That session's image was:
-
-  ```text
-  recipe digest:   sha256:2ffa36731cbcc11510a87a1f2dbe205d788407cb3e8ba60dc74387f5471ad052
-  image ID:        sha256:741fdd45acd031b010bd694b2a3bddeeaed1c57be531d98fc6ef4f95c7fa49b5
-  manifest digest: sha256:adf1001f96e66a172cddf8d3f6964b943c0605ef9843f58f4fd863948153c6c0
-  ```
-
-- The managed installer built that image from its two-file tar stream,
-  validated its labels/platform/immutable ID, and reused it on the next call.
-- That verification session's VM used security profile
-  `sha256:6a9c31943325290e23272c7c95af4ae80df8c94718c3ed8ec5e1824efbfcc927`.
-- The storage helper created an exact mapped-UID 10 GiB ext4 filesystem,
-  accepted an allocation within the limit, rejected an over-limit allocation,
-  and removed both its mount and sparse backing image.
-- A disposable Podman container with a two-second `--timeout` was killed
-  independently and left exited for lifecycle reconciliation.
-- A direct runtime check verified UID 1000, zero effective/bounding
-  capabilities, `NoNewPrivs=1`, read-only root, 4 GiB memory, 512 PIDs,
-  Pi 0.82.0, and public HTTPS.
-- `TestLiveSSHStageAndContainerMaterialize` passed against that exact image:
-  dirty tracked state crossed Lima SSH, entered private quota-backed storage,
-  materialized inside the hardened container, and could be deleted there
-  without altering the Mac checkout.
-- That same live test generated fresh client and host keys, pinned the host
-  key, connected with the generated ProxyCommand, and wrote a file through the
-  Zed-compatible OpenSSH session. A Pi executable in the same container saw
-  that exact file and workspace. The SSH session ran as UID 1000 with no
-  forwarded agent or `/Users`, and `podman port` reported no published port.
-- The actual `pisafe run` CLI was exercised from this working tree with
-  isolated temporary Mac state. It reused the verified VM, installed the
-  current recipe, created an active manifest containing the real dirty
-  baseline commit, reported all five then-untracked implementation files as
-  excluded, and connected through its printed SSH command as UID 1000. The
-  imported baseline was clean and the original checkout remained unchanged.
-- The actual CLI then completed
-  `run → stop → resume → SSH → discard --confirm`: stop preserved the
-  workspace, resume reused the pinned SSH host identity and connected as UID
-  1000 with the reduced budget, and discard left a version-3 audit manifest
-  while removing the container, persistent filesystem, remote stage, and
-  client key.
-
-`pisafe apply` is now live-verified end to end against the real VM. A scratch
-repository with an initialized submodule, one dirty tracked file, and one
-untracked file became a run; inside the run, commits were made in both the
-submodule and the superproject, one tracked change was left uncommitted, and
-one untracked file was left behind. Applying that active run stopped it,
-rebuilt the managed image for the current recipe, captured the workspace in
-the throwaway network-less container, streamed both bundles back through
-`podman unshare`, and created `pisafe/<run>` in the superproject and in the
-submodule. Verified afterwards:
-
-- the imported superproject history carries the baseline commit, the commit
-  made in the run, and a final commit holding the uncommitted change;
-- the gitlink on the imported branch is exactly the submodule commit made in
-  the run, and the submodule's own `pisafe/<run>` branch holds it;
-- the untracked file was reported as left behind and is absent from the
-  imported tree;
-- the source checkout is unchanged: same HEAD, same branch, same dirty
-  `app.txt`, same submodule checkout, same file contents;
-- a second apply is refused with `already imported as pisafe/<run>`; and
-- discarding the imported run removed its container, loop mount, and backing
-  filesystem image, leaving the audit record naming the imported branch.
-
-Two runs made before `prepare-apply` existed were also applied with the
-current image, confirming that path: both captured cleanly and reported no
-change, which their workspaces independently confirmed.
-
-Run that end-to-end test with:
-
-```sh
-PISAFE_LIVE_LIMA=1 \
-PISAFE_LIVE_RUN_IMAGE=sha256:69a90d7f6902dc3f694cca9c98383e5e4d03f8575efdbf98814ff09362e2643c \
-go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
-```
+- **Boundary**: Lima reaches READY, `/Users` is absent, no Podman socket is
+  forwarded, the user namespace has the expected direct UID plus 65,536-ID
+  subordinate mapping, the firewall service and table are active, IPv6 is
+  disabled. Public HTTPS works from a rootless container; RFC1918 and metadata
+  TCP destinations fail. Unrestricted `sudo -n true` is denied while the clock,
+  firewall-status, and storage helpers work through their narrow rules; the
+  root-owned security-profile record is mode 0444 and matches the generated
+  definition.
+- **Image and container**: the tracked Containerfile builds on ARM64; the
+  installer built it from its two-file tar stream, validated labels, platform,
+  and immutable ID, and reused it on the next call. A runtime check confirmed
+  UID 1000, zero effective/bounding capabilities, `NoNewPrivs=1`, read-only
+  root, 4 GiB memory, 512 PIDs, Pi 0.82.0, and public HTTPS. The storage helper
+  created an exact mapped-UID 10 GiB ext4 filesystem, accepted an in-limit and
+  rejected an over-limit allocation, and removed both mount and backing image. A
+  container with a two-second `--timeout` was killed independently and left
+  exited for reconciliation.
+- **Staging and SSH**: dirty tracked state crossed Lima SSH into private
+  quota-backed storage, materialized inside the hardened container, and was
+  deleted there without altering the Mac checkout. Fresh client and host keys
+  were generated and pinned, the generated ProxyCommand connected, and a file
+  written over the Zed-compatible session was seen by a Pi executable in the
+  same container. The session ran as UID 1000 with no forwarded agent or
+  `/Users`, and `podman port` reported no published port.
+- **Lifecycle**: the real CLI completed `run → stop → resume → SSH → discard`
+  with isolated Mac state — the manifest carried the real dirty baseline commit,
+  untracked files were reported as excluded, stop preserved the workspace,
+  resume reused the pinned host identity with the reduced budget, and discard
+  removed container, filesystem, remote stage, and client key.
+- **apply**: a scratch repository with an initialized submodule, one dirty
+  tracked file, and one untracked file became a run in which commits were made
+  in both repositories, one tracked change was left uncommitted, and one
+  untracked file was left behind. Applying it produced a superproject history
+  with baseline, run commit, and final capture; a gitlink pointing at exactly
+  the submodule commit made in the run, held by the submodule's own
+  `pisafe/<run>`; the untracked file reported and absent; an unchanged source
+  checkout (same HEAD, branch, dirty file, submodule); a second apply refused;
+  and discard reclaiming everything. Two runs predating `prepare-apply` also
+  applied cleanly with the current image.
+- **diff**: on a still-active run, one commit since baseline, `+2/-0` for an
+  edited file, `binary` for a binary one, and the untracked leftover, without
+  reporting the dirty line the user carried in. The run's `git status` and HEAD
+  were identical afterwards, and the same run reported identically while stopped
+  and while imported.
+- **cp**: a `dist` directory with a nested executable and a 2 MiB binary arrived
+  intact with nothing from outside the request; a log file copied to a named
+  destination; an occupied destination was refused naming `--force` before the
+  run was asked for anything, then replaced with it; absolute, climbing, and
+  whole-workspace requests were refused Mac-side; a directory holding a symlink
+  to `/etc/passwd` was refused naming `"linked/escape"`. The run stayed active
+  and unchanged.
+- **Git identity**: a repository whose local identity differed from the global
+  one produced a run whose `~/.gitconfig` held the local one; an agent commit
+  over SSH with no hand configuration was authored by it while pisafe's own
+  commits stayed authored by `pisafe`, and the imported branch carried that
+  split. A repository with no identity refused before any boundary work.
+- **gc**, by aging the exact timestamps the policy reads in an isolated state
+  directory: a freshly imported run reported `Nothing to collect.`; with
+  `imported_at` moved back eight days, `--dry-run` named it and changed nothing
+  and the sweep then reclaimed it (no mount, loop device, container, or stage
+  survived; the SSH key directory was empty; the `pisafe/<run>` branch still held
+  the agent's commit); `diff`, `cp`, and `resume` were then refused before
+  touching the VM; a stopped run aged thirty days was reported, untouched, and
+  resumed cleanly; and the image sweep pruned exactly the six superseded managed
+  images. **That sweep ran when a reclaimed run still left a terminal record
+  behind. Removing the record instead changes only what the Mac writes after the
+  VM-side reclamation, and is covered by unit tests; the live sweep has not been
+  re-run since.**
+- **Broker relay**: the full gated suites pass including
+  `TestLiveBrokerReverseRelay` and `TestLiveSecondRelayFailsClosed`. With a
+  loopback stub upstream, requests from inside a run traversed pasta, the
+  firewall, the reverse forward, and capability auth — plain JSON and streamed
+  SSE both intact. A wrong capability got 401, a non-canonical path 404, a
+  capability replayed after `pisafe stop` 401, and `pisafe resume` rotated it so
+  the new one worked in the recreated container.
+- **ChatGPT subscription**, against the real provider: login stored the
+  credential in the Keychain, `pisafe broker` passed its startup check and
+  reported the Codex upstream, and a run drove real Pi conversations through the
+  relay. Inspection confirmed `settings.json` carrying `"transport": "sse"`
+  merged with Pi's own session state; `models.json` exposing only the curated
+  catalog under provider `pisafe` with no per-model routing override; the
+  unsigned-JWT `apiKey` accepted by Pi's Codex client; four assistant turns
+  served by provider `pisafe` across two catalog models; and **no provider
+  credential in the run** — `auth.json` is `{}`, no OpenAI/ChatGPT environment
+  variable exists, and the real token and account ID appear only on the broker's
+  upstream request.
 
 ## Live VM state
 
-A persistent Lima instance named `pisafe` was left running with security
-profile
-`sha256:35c2cd370359201ce6861c91bc7fb25d8ada1497cf1db2d29c0017eea7e1f459`.
-It contains cached base/test images plus the current managed run image:
+A persistent Lima instance named `pisafe` was left running with security profile
+`sha256:35c2cd370359201ce6861c91bc7fb25d8ada1497cf1db2d29c0017eea7e1f459`,
+holding cached base/test images plus the current managed run image:
 
 ```text
 recipe digest: sha256:069ff698f6cf1b44fab97636b702a9a93a90c3373527d2d656b4393574dba7b1
 image ID:      sha256:69a90d7f6902dc3f694cca9c98383e5e4d03f8575efdbf98814ff09362e2643c
 ```
 
-Each time the recipe moves, the next run rebuilds the image and every later run
-and apply reuses it, which live-checks content-addressed reuse. The six managed
-images that had accumulated, one per recipe the helper has ever had, were
-pruned by `pisafe gc`; exactly one managed image now sits in the VM alongside
-the unlabelled `node` and `alpine` bases.
+Each time the recipe moves, the next run rebuilds and every later run reuses it,
+which live-checks content-addressed reuse. When a recorded digest and a rebuild
+disagree, the rebuild is right: the recipe derives from the exact Containerfile
+and guest-helper bytes.
 
-The digest recorded here previously (`sha256:edb9ad51…`) named an image built
-partway through the `cp` slice, before the destination-check fix changed
-`runcopy`. It was never the digest of a committed tree. When a recorded digest
-and a rebuild disagree, the rebuild is right: the recipe is derived from the
-exact Containerfile and guest-helper bytes, and that build is reproducible.
+The VM once entered `VirtualMachineStateError` unattended overnight, almost
+certainly on host sleep, while `limactl list` still reported `Running` because
+the host agent survived. `limactl stop --force` then `limactl start` recovered
+it with the disk and both runs intact.
 
-`pisafe diff` is live-verified against the real VM. A scratch repository with
-one dirty tracked file became a run; inside the run an agent commit, a further
-uncommitted edit, a staged binary file, and an untracked file were left behind.
-Diff on the still-active run reported one commit since the baseline, `+2/-0`
-for the edited file, `binary` for the binary one, and the untracked leftover,
-and did not report the dirty line the user carried in. The run stayed active,
-and its `git status` and HEAD were identical afterwards. The same run then
-reported identically while stopped and while imported, and `pisafe apply`
-still worked through the refactored throwaway-container arguments. Discard
-reclaimed the scratch run, leaving no `pisafe-*` mounts.
+**When Codex runs inside a restricted filesystem sandbox it may be unable to
+connect to `~/.lima/pisafe/ha.sock`, and `limactl list` then falsely labels the
+instance `Broken`. Run the diagnostic with the needed host permission before
+acting on that status; never delete or recreate the VM based on the sandboxed
+result.**
 
-The run Git identity is live-verified end to end. A scratch repository whose
-repository-local identity differed from the Mac's global one produced a run
-whose `~/.gitconfig` held the repository-local identity; an agent commit made
-over SSH with no hand configuration succeeded and was authored by it, while
-pisafe's own baseline and final-capture commits stayed authored by `pisafe`,
-so mechanical commits remain distinguishable in the imported history. The
-imported `pisafe/<run>` branch carried that split unchanged and the source
-checkout was untouched. A repository with no identity refused to start a run
-before any boundary or image work, naming the two commands that fix it.
+### Live-only issues found and fixed
 
-`pisafe cp` is live-verified against the real VM. A scratch run holding a
-`dist` directory with a nested executable script and a two-megabyte binary, a
-directory containing a symlink to `/etc/passwd`, and a log file was copied
-from while it stayed active. The directory arrived with its nested layout and
-executable bit intact and nothing from outside the requested path; the log
-file copied to a named destination; an existing destination was refused
-naming `--force` before the run was asked for anything, and `--force` then
-replaced it; absolute, climbing, and whole-workspace requests were refused on
-the Mac; the directory holding the symlink was refused naming
-`"linked/escape"`; and a missing path reported the run's own message. The run
-stayed active with its workspace unchanged, and discard reclaimed it.
-
-`pisafe gc` is live-verified against the real VM, in an isolated state
-directory, by aging the exact timestamps the retention policy reads:
-
-- a freshly imported run reported `Nothing to collect.`;
-- with `imported_at` moved back eight days, `--dry-run` named it and changed
-  nothing, and the sweep then reclaimed it: no `pisafe-*` mount, loop device,
-  container, or VM stage directory survived, the Mac-side SSH key directory was
-  empty, and the `pisafe/<run>` branch still held the agent's commit;
-- `diff`, `cp`, and `resume` on that reclaimed run were each refused before
-  touching the VM;
-- a stopped run aged thirty days was reported as kept, not touched; its
-  filesystem was still mounted afterwards and it resumed cleanly with its
-  workspace intact;
-- discarding a run removed everything it owned; and
-- the image sweep pruned exactly the six superseded managed images, keeping the
-  current recipe's image and both unlabelled base images.
-
-That sweep ran when a reclaimed run still left an `expired` or `discarded`
-record behind. Removing the record instead changes only what the Mac writes
-after the VM-side reclamation the run above verified, and is covered by unit
-tests; the live sweep has not been re-run since.
-
-The dry run caught a defect before anything was removed: it proposed pruning
-the current image. The cause was that the current image was found by resolving
-the recipe's tag, and that lookup returned "nothing installed" for every kind
-of failure, so a transport error would have marked every managed image
-prunable. Pruning now recognizes the current recipe by the label each image
-carries, which needs no lookup at all; the tag-resolving helper was deleted
-rather than repaired.
-
-That VM entered `VirtualMachineStateError` unattended overnight, almost
-certainly when the host slept, while `limactl list` still reported `Running`
-because the host agent survived. `limactl stop --force` followed by
-`limactl start` recovered it with the disk and both runs intact, and SSH
-returned immediately over a vsock forwarder rather than a forwarded port.
-The stopped-VM SSH failure recorded below did not reproduce.
-
-Recovering that VM exposed two defects, both fixed and covered by tests:
-
-1. A run's storage is mounted per VM boot. Apply did not verify storage
-   before capturing, so after the restart it launched its container over an
-   empty run root and failed with `statfs .../workspace: no such file or
-   directory`. Stop and resume already verified; apply now does too.
-2. An imported run could not be discarded, so its 10 GiB filesystem was
-   unreclaimable and apply's own closing guidance named a command that
-   refused. Discard now covers every state that still owns resources.
-
-The broker-relay slice is fully live-verified against this VM. The first
-live run of the relay tests failed: sshd bound `192.0.2.1:18080` correctly,
-but its SYN-ACK replies carry the client's ephemeral port, matched no accept
-rule in the then-stateless output chain, and were rejected by the TEST-NET
-deny — every broker connection timed out. The template now accepts
-established/related conntrack traffic in the output and forward chains (the
-input chain always did); after recreation the full gated lima and runimage
-suites passed, including `TestLiveBrokerReverseRelay`,
-`TestLiveSecondRelayFailsClosed`, and the end-to-end staging test above.
-
-The brokered inference chain was then verified with the real CLI against a
-loopback stub upstream, configured through the interim environment provider
-that the ChatGPT login has since replaced: `pisafe run` installed a
-correct `models.json`, and from inside the run container, requests through
-`http://192.0.2.1:18080` traversed pasta, the firewall, the reverse forward,
-and broker capability auth to reach the stub carrying the upstream key —
-plain JSON and streamed SSE both intact. A wrong capability got 401, a
-non-canonical path 404, the capability replayed after `pisafe stop` got 401,
-and `pisafe resume` rotated the capability, after which the new one worked
-inside the recreated container. The scratch run was discarded; no containers
-remain.
-
-The ChatGPT subscription slice was then verified against the real provider on
-the same VM. `pisafe login chatgpt` completed the browser OAuth flow and stored
-the credential in the Keychain, `pisafe broker` passed its startup credential
-check and reported the Codex upstream, and a run created afterwards drove real
-Pi conversations through the relay. Inspection of that run confirmed the
-intended contract end to end:
-
-- `settings.json` carries `"transport": "sse"` merged with the settings Pi
-  itself wrote during the session (theme, default provider/model, thinking
-  level), so the pin neither blocks nor discards Pi's own state;
-- `models.json` exposes only the curated catalog under provider `pisafe` with
-  `baseUrl` `http://192.0.2.1:18080` and `api` `openai-codex-responses`, and no
-  per-model routing override;
-- its `apiKey` is the unsigned-JWT wrapper whose payload carries the
-  placeholder account id `pisafe` and whose signature segment is the run-scoped
-  capability, and Pi's Codex client accepted it;
-- the session record shows four assistant turns served entirely by provider
-  `pisafe`, across two catalog models (`gpt-5.6-terra` and `gpt-5.6-luna`), so
-  model selection works through the relay; and
-- the run holds no provider credential: Pi's `auth.json` is `{}`, no
-  OpenAI/ChatGPT environment variable exists in the container, and the real
-  access token and account id appear only on the broker's upstream request.
-
-Everything below was first verified against profile
-`sha256:6a9c31943325290e23272c7c95af4ae80df8c94718c3ed8ec5e1824efbfcc927`
-and re-verified by the gated suite during the two recreations above.
-
-Fresh provisioning verified all security-sensitive setup together:
-
-- automatic subordinate UID/GID assignment and `podman system migrate`;
-- the clock-step, firewall-status, and fixed-policy run-storage helpers work
-  through their narrow sudo rules;
-- unrestricted `sudo -n true` is denied;
-- the root-owned security-profile record is mode 0444 and matches the
-  generated definition;
-- the full container network suite passes; and
-- the managed image install/reuse and end-to-end staging tests pass.
-
-The final cleanup audit found no run-labelled containers, run filesystems, or
-VM-side staging directories.
-
-The VM was recreated while fixing live-only provisioning issues. Those issues
-were:
+These explain why parts of the code look the way they do:
 
 1. Overlapping `/24` and gateway `/32` nftables interval elements.
 2. A readiness probe that enumerated nftables without `sudo`.
-3. Missing rootless Podman subordinate IDs.
-4. Podman's existing pause namespace needing migration after the ID assignment.
-5. Pasta's default link-local DNS forwarder being denied by the intended
-   firewall; run/build commands now specify public DNS explicitly.
-6. Plain-mode VM time drifting by roughly 6.5 hours after host sleep; manager
-   start/resume now invokes the restricted chrony step helper.
-7. Fedora cloud-init granting the Lima user unrestricted passwordless sudo,
-   which would let a VM-user escape remove the firewall. The newly generated
-   config revokes it and exposes only two exact, non-firewall-mutating
-   controller helpers.
-8. Fedora Podman not supporting `podman cp --chown`; stage transfer first used
-   local-volume import and now uses `podman unshare` extraction into
-   quota-backed storage.
-9. Fedora Podman's image-inspection `Id` is a bare 64-character hex value,
-   while run specs deliberately require `sha256:` form. The installer now
-   validates and normalizes it before returning the immutable ID.
-10. Fedora Podman rejects `uid=` and `gid=` in `--tmpfs` option strings. The
-    bounded writable `/run` now uses Podman's supported
-    `type=tmpfs,...,U=true` mount form.
-11. A VM-loopback published SSH port could not cross the intended firewall,
-    which denies loopback to the unprivileged Lima user. SSH now uses a
-    portless `podman exec` stdio relay to container loopback instead of adding
-    a mutable firewall exception.
-12. Podman's persistent local-volume `size` option requires root and supports
-    quota only on XFS, while the pinned Fedora VM stores its writable disk on
-    Btrfs. A Btrfs parent qgroup can be bypassed with uncharged nested
-    subvolumes, so runs use fixed-size ext4 filesystem images through a
-    fixed-policy helper instead of either mechanism.
-13. Container UID 1000 maps to subordinate host UID/GID 100999 in rootless
-    Podman. The storage helper derives those IDs from `/etc/subuid` and
-    `/etc/subgid`, and stage import runs inside `podman unshare`.
-14. On this host, Lima 2.2.0 repeatedly booted a stopped VZ VM without
-    restoring its SSH path, including with no run storage present. Native
-    `vzNAT` was tested and had the same failure, so it was not retained.
-    Fresh VM creation is reliable; stopped-VM restart remains an explicit
-    upstream/platform gap.
-
-When Codex runs inside a restricted filesystem sandbox, it may be unable to
-connect to `~/.lima/pisafe/ha.sock`; `limactl list` then falsely labels the
-instance `Broken`. Run the diagnostic with the needed host permission before
-acting on that status. Do not delete or recreate the VM based only on the
-sandboxed result.
+3. Missing rootless Podman subordinate IDs, and Podman's existing pause
+   namespace needing `podman system migrate` afterwards.
+4. Pasta's default link-local DNS forwarder being denied by the firewall; run
+   and build commands now specify public DNS explicitly.
+5. Plain-mode VM time drifting ~6.5 hours after host sleep; start/resume now
+   invokes the restricted chrony step helper.
+6. Fedora cloud-init granting the Lima user unrestricted passwordless sudo,
+   which would let a VM-user escape remove the firewall.
+7. Fedora Podman not supporting `podman cp --chown`; stage transfer uses
+   `podman unshare` extraction into quota-backed storage.
+8. Fedora Podman reporting image `Id` as bare 64-char hex while run specs
+   require `sha256:` form; the installer normalizes it.
+9. Fedora Podman rejecting `uid=`/`gid=` in `--tmpfs`; `/run` uses
+   `type=tmpfs,...,U=true`.
+10. A VM-loopback published SSH port could not cross the firewall, which denies
+    loopback to the unprivileged Lima user; SSH uses the portless `podman exec`
+    stdio relay instead of a mutable exception.
+11. Podman's local-volume `size` requiring root and XFS while the pinned Fedora
+    VM uses Btrfs, and Btrfs qgroups being bypassable with nested subvolumes;
+    hence fixed-size ext4 images through the fixed-policy helper.
+12. Container UID 1000 mapping to host 100999; the storage helper derives IDs
+    from `/etc/subuid` and `/etc/subgid`.
+13. Lima 2.2.0 repeatedly booting a stopped VZ VM without restoring SSH, with
+    `vzNAT` failing identically. Fresh creation is reliable; stopped-VM restart
+    remains an upstream/platform gap.
+14. The `gc` dry run proposing to prune the current image, because it was found
+    by resolving the recipe's tag and that lookup returned "nothing installed"
+    for every kind of failure. Pruning now reads the label each image carries;
+    the tag-resolving helper was deleted rather than repaired.
+15. Broker connections timing out because sshd's SYN-ACK replies carry the
+    client's ephemeral port and matched no accept rule in the then-stateless
+    output chain; all chains now accept established/related.
 
 ## Known gaps
 
 - No user-facing `connect` implementation exists.
-- `pisafe gc` reclaims runs and images. The design also asks it to report or
-  prune long-unused per-project caches and session stores; those do not exist
-  until Phase 2 introduces persistence, so there is nothing yet to sweep.
+- The dirty-baseline prompt the design describes — keep the baseline commit and
+  everything after it, or replay only the later commits onto the captured HEAD —
+  is not implemented; apply always imports the whole run history.
+- `gc` reclaims runs and images, but the per-project caches and session stores
+  the design also asks it to sweep do not exist until Phase 2.
 - Collection never reclaims an unimported run, even one a check could prove
   holds no commits, because `diff` sees the repository but not the run's home
-  directory. Old stopped runs are reported and must be discarded explicitly, so
-  their 10 GiB filesystems are reclaimed on the user's schedule, not by age.
-- A run leaves no record once it is reclaimed, so `pisafe list` shows only runs
-  that still own something. Which runs existed and when they were imported is
+  directory. Their 10 GiB filesystems are reclaimed on the user's schedule, by
+  explicit discard.
+- A run leaves no record once reclaimed, so `pisafe list` shows only runs that
+  still own something. Which runs existed and when they were imported is
   answerable from the `pisafe/<run>` branches and the reflog, not from pisafe.
 - Retention is measured against the Mac's clock with no grace for a manifest
-  whose timestamps are in the future; such a record is simply never collected.
+  whose timestamps are in the future; such a record is never collected.
 - `pisafe cp` refuses any symlink rather than recreating one that stays inside
   the copied tree, so a directory holding a single link cannot be copied whole.
-  Naming a narrower path is the only way around it today.
-- `pisafe diff` reports paths and line counts, never file content, so reviewing
-  what a run actually wrote still means importing it and using `git diff`, or
-  taking single files out once `cp` exists.
-- `pisafe zed` launches a connection that was explicitly saved once in Zed.
-  Fully automatic first-launch remains intentionally absent because Zed's CLI
-  URL cannot carry `-F` and PiSafe does not silently edit global SSH or Zed
-  settings.
-- Runs created before `prepare-apply` existed cannot be applied by their own
-  image, which is why apply uses the controller's current run image. That
-  image must still exist in the VM; a pruned image fails apply, as it fails
-  resume.
-- The dirty-baseline prompt the design describes — keep the baseline commit
-  and everything after it, or replay only the later commits onto the captured
-  HEAD — is not implemented. Apply always imports the whole run history,
-  baseline commit included.
-- A run's apply response is bounded at 1 MiB, so a run that leaves roughly
-  twenty thousand untracked files fails apply instead of reporting them.
-- Login, the Keychain round trip, and the real Codex handshake are
-  live-verified, but broker-side token refresh has only ever run against a
-  stub: the live session never crossed an access-token expiry. The first
-  long-lived broker will exercise it.
-- The OAuth flow and the embedded model catalog mirror the pinned Pi AI
-  0.82.0 client; both must be re-checked whenever the Pi pin moves, and the
-  subscription backend can change underneath them (inference then fails
-  closed and loudly).
+- `pisafe diff` reports paths and line counts, never content, so reviewing what
+  a run wrote means importing it or taking single files out with `cp`.
+- `pisafe zed` launches a connection saved once in Zed. Fully automatic first
+  launch is intentionally absent because Zed's CLI URL cannot carry `-F`.
+- Apply uses the controller's current run image, which must still exist in the
+  VM; a pruned image fails apply as it fails resume.
+- A run's apply response is bounded at 1 MiB, so a run leaving roughly twenty
+  thousand untracked files fails apply instead of reporting them.
+- Broker-side token refresh has only ever run against a stub: the live session
+  never crossed an access-token expiry. The first long-lived broker exercises it.
+- The OAuth flow and embedded catalog mirror the pinned Pi AI 0.82.0 client;
+  both must be re-checked whenever the pin moves, and the subscription backend
+  can change underneath them (inference then fails closed and loudly).
 - While no broker is connected, a process escaped to the unprivileged VM user
   could bind `192.0.2.1:18080` itself. It gains nothing beyond what that user
-  already has (it relays pasta traffic and can read run storage), and a real
-  broker then fails loudly at bind time instead of silently coexisting.
+  already has, and a real broker then fails loudly at bind time.
 - Firewall behavioral coverage still needs DNS-to-private answers, redirects,
-  raw UDP, `host.containers.internal`, and VM loopback attempts; the exact
-  broker exception is covered by passing gated live tests.
-- Security-profile drift is detected and fails closed, but automated
-  replacement/reconciliation is intentionally absent because deleting a VM is
-  destructive and must be an explicit lifecycle operation.
-- Stopped-VM recovery previously failed on this host: a cleanly stopped Lima
-  2.2.0 VZ VM booted without regaining SSH over either default user-mode
-  networking or `vzNAT`. A force-stop and start after the crash above did
-  regain SSH, over a vsock forwarder, with runs intact. One success is not yet
-  a reliable recovery path, but the failure is no longer reproducible.
-- A VM that crashes leaves `limactl list` reporting `Running` while the VZ
-  machine is in `error`; the real state is only visible in `ha.stderr.log`.
-  Nothing in pisafe detects this, so the first command to touch the VM fails
-  with an opaque SSH reset.
+  raw UDP, `host.containers.internal`, and VM loopback attempts.
+- Security-profile drift fails closed, but automated replacement is
+  intentionally absent because deleting a VM is destructive and must be an
+  explicit lifecycle operation.
+- Stopped-VM recovery previously failed on this host over both default user-mode
+  networking and `vzNAT`. A force-stop and start after the crash above did regain
+  SSH over a vsock forwarder with runs intact; one success is not yet a reliable
+  recovery path.
+- A crashed VM leaves `limactl list` reporting `Running` while the VZ machine is
+  in `error`, visible only in `ha.stderr.log`. Nothing in pisafe detects this, so
+  the first command to touch the VM fails with an opaque SSH reset.
 - Pi's top-level tarball is integrity-pinned, but a reproducible published
   image/digest workflow is still needed to freeze transitive npm resolution.
 
 ## Next implementation slice
 
-Every command the design enumerates for Phase 1 — run listing, resume, diff,
-apply, cp, discard, and seven-day GC — is now implemented, and live-verified
-except for the record removal noted above. What remains is named in the design
-but outside that list, so the next slice is a choice rather than a queue:
+Every Phase 1 command is implemented and live-verified except the record removal
+noted above. What remains is named in the design but outside that list, so the
+next slice is a choice rather than a queue:
 
-1. `pisafe connect <run>`: resume Pi or open a shell in a run, the one
-   supporting command in the design still missing.
-2. The dirty-baseline prompt: let apply keep the baseline commit and everything
-   after it, or replay only the later commits onto the captured HEAD, instead
-   of always importing the whole run history.
-3. A reproducible published image/digest workflow, so transitive npm resolution
-   inside the run image is frozen rather than resolved at build time.
+1. `pisafe connect <run>`: resume Pi or open a shell in a run.
+2. The dirty-baseline prompt for apply.
+3. A reproducible published image/digest workflow, freezing transitive npm
+   resolution inside the run image.
 
 Do not weaken the boundary for any of them.
 

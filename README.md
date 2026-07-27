@@ -1,142 +1,99 @@
 # pisafe
 
-`pisafe` is an implementation in progress of the isolation model described in
-[`pisafe-design.md`](pisafe-design.md).
+`pisafe` runs a coding agent (Pi) against your repository without giving it
+your repository, your Mac, or your credentials.
 
-The implementation now contains:
+Each run gets a staged copy of the current checkout inside a dedicated,
+mountless Lima VM, in a rootless Podman container reachable over Zed Remote
+SSH. The original checkout is never mounted and never modified: work comes
+back only when you ask for it, as a local `pisafe/RUN` branch. Internet egress
+is open, but the Mac, the LAN, and link-local/metadata addresses are denied by
+a static VM firewall, and no provider or GitHub credential ever enters a run —
+inference is relayed from a Mac-side broker through a revocable per-run
+capability.
 
-- a dependency-free Go controller;
-- `pisafe run` for creating an isolated run from the current repository,
-  `pisafe stop`/`resume` for preserving and reopening it, `pisafe diff` for
-  reporting what it changed without stopping it, `pisafe cp` for taking a
-  file or directory back out of it, `pisafe apply` for
-  importing its commits, exact-confirmation `pisafe discard`, `pisafe gc` for
-  the seven-day retention sweep, `pisafe list`
-  for durable records, `pisafe zed` for reopening a connection explicitly
-  saved in Zed, and `pisafe doctor` for prerequisites;
-- a split Git staging core: the Mac produces a bundle and tracked-state patch
-  for the superproject and for each initialized submodule, while
-  materialization happens after transfer inside the isolated environment;
-- the Git identity the user commits with in the source repository, resolved on
-  the Mac and installed in the run so an agent's commits are attributed to
-  them; a repository with none refuses to start a run;
-- tracked dirty-state baseline capture, plus explicitly selected untracked or
-  ignored inputs, which are validated, archived, and committed into that same
-  baseline while credential-shaped names require an unsafe override;
-- final tracked-state capture;
-- split apply preparation/import, with SHA-256 verification and a journaled,
-  idempotent compare-and-swap creation of a new `pisafe/<run>` branch in the
-  superproject and in each changed submodule, the plan recorded in the run
-  manifest before the first ref moves; and
-- tests proving workspace deletion and apply do not modify the source checkout.
+The isolation model is specified in [`pisafe-design.md`](pisafe-design.md).
+Implementation status, verification, and known gaps are in
+[`IMPLEMENTATION_PROGRESS.md`](IMPLEMENTATION_PROGRESS.md). Phase 1 is in
+progress: every command below exists and works.
 
-The Lima backend now also generates and manages a dedicated plain-mode Fedora
-VM with a pinned image digest, no host mounts, no forwarded agent or Podman
-socket, rootless Podman, disabled IPv6, and an nftables boundary covering both
-VM and container egress. The controller discovers the Mac's active IPv4
-on-link prefixes and verifies the VM's baked-in deny set at start/resume,
-failing closed if the Mac has changed networks.
+## Requirements
 
-The next boundary slice is also implemented internally:
+macOS on Apple silicon, Lima 2.2.0 or newer, and Go 1.26 to build. Run
+`./pisafe doctor` to check.
 
-- size- and SHA-256-verified Git artifact streams through Lima control SSH;
-- atomic Mac-side run manifests, cumulative active-time accounting, and
-  strict lifecycle transitions;
-- a pinned ARM64 run image containing Pi 0.82.0 and a Linux guest helper;
-- rootless Podman launch arguments enforcing a non-root user, read-only root,
-  dropped capabilities, `no-new-privileges`, public DNS, and CPU, memory, PID,
-  and temporary-filesystem limits; and
-- a controller transaction that imports the stage into private,
-  quota-limited storage,
-  materializes it inside the container, and rolls back partial creation;
-- content-addressed run-image installation that sends only the embedded
-  Containerfile and packaged static Linux helper and returns a validated
-  immutable image ID; and
-- a root-owned VM security-profile fingerprint checked on every start, so an
-  instance created from an older security definition fails closed; and
-- unique per-run Ed25519 client and host keys, a non-root loopback-only SSH
-  daemon, strict host-key pinning, and a portless ProxyCommand through Lima's
-  control SSH connection.
-
-Fresh-VM provisioning, restricted sudo, clock synchronization,
-security-profile drift detection, managed-image installation/reuse,
-user-facing repository materialization, and the Zed-compatible OpenSSH path
-into the exact Pi workspace are live-validated. `pisafe run` prints the exact
-OpenSSH command to paste once into Zed's Remote Projects dialog; it does not
-silently edit global SSH or Zed settings. Each run has a live-validated
-10 GiB fixed-capacity persistent filesystem and eight cumulative active hours
-enforced by Podman. Stop/resume and confirmed discard are live-validated.
-`pisafe apply RUN` stops the run, captures it in a throwaway network-less
-container, streams the verified bundles back, and creates `pisafe/RUN` in the
-superproject and each changed submodule without touching the checkout. It is
-live-validated against a run whose commits, submodule commit, uncommitted
-changes, and untracked leftovers all landed exactly where the design says.
-An imported run keeps its workspace until `pisafe discard` or the seven-day
-retention window reclaims it.
-`pisafe diff RUN` reports the run's commits, changed paths with line counts,
-and untracked leftovers from a throwaway container holding the workspace
-read-only, so it works on an active, stopped, or imported run without
-disturbing it. It reports names and counts, never file content: everything it
-names was written inside the run, so it is quoted rather than rendered.
-`pisafe cp RUN:PATH [DEST]` takes one file or directory back out through the
-same read-only container. Only regular files and directories are copied; a
-symlink or special file stops the copy naming its path, the Mac re-validates
-every archive entry and writes through a directory handle that no entry can
-escape, and the copy lands beside the destination and is moved into place only
-once it has all arrived. An existing destination is replaced only with
-`--force`, and is removed rather than written through.
-`pisafe gc [--dry-run]` reclaims what the seven-day retention window released:
-an imported run's workspace, storage, SSH key, and record all go together. What
-the run produced stays in the repository on its `pisafe/RUN` branch, which
-names the run without needing a record to say so. A run whose work was never
-imported is only reported, never reclaimed by age — `pisafe discard` remains
-the way to release it. Superseded managed run images are pruned, keeping the
-current recipe's image and any image a run can still start a container from.
-`pisafe broker` relays inference from the Mac into runs over a reverse SSH
-forward to `192.0.2.1:18080`, the firewall's single static exception; runs
-hold only a revocable per-run capability, never a provider credential.
-
-## Development
+## Build
 
 ```sh
-go test ./...
 go build -trimpath -buildvcs=false -o pisafe ./cmd/pisafe
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
   go build -trimpath -buildvcs=false \
   -o pisafe-guest-linux-arm64 ./cmd/pisafe-guest
-./pisafe doctor
-./pisafe list
-./pisafe run [--include PATH]... [--include-unsafe PATH]...
-./pisafe stop RUN
-./pisafe resume RUN
-./pisafe diff RUN
-./pisafe cp RUN:PATH [DEST] [--force]
-./pisafe apply RUN
-./pisafe discard RUN --confirm RUN
-./pisafe gc [--dry-run]
-./pisafe login chatgpt
-./pisafe broker
 ```
 
-The release layout places `pisafe-guest-linux-arm64` beside `pisafe`. During
-development, `PISAFE_GUEST_HELPER=/absolute/path/to/helper` may select the
-sidecar explicitly. The Containerfile is compiled into the controller.
+The release layout places `pisafe-guest-linux-arm64` beside `pisafe`; during
+development, `PISAFE_GUEST_HELPER=/absolute/path/to/helper` selects it
+explicitly. The run-image Containerfile is compiled into the controller.
 
-Pi inference works while `pisafe broker` runs on the Mac. Run
-`pisafe login chatgpt` once to store a ChatGPT Plus/Pro subscription login in
-the macOS Keychain; the broker refreshes and attaches those tokens itself,
-and no provider credential ever enters the VM or a run.
+## Use
 
-The gated live suite creates or reuses the dedicated `pisafe` VM and exercises
-the mount, rootless-container, and network boundaries:
+```sh
+pisafe login chatgpt         # once: stores a ChatGPT Plus/Pro login in the Keychain
+pisafe broker                # foreground; runs have no inference without it
+```
+
+```sh
+pisafe run [--include PATH]... [--include-unsafe PATH]...
+pisafe list
+pisafe zed RUN
+pisafe stop RUN
+pisafe resume RUN
+pisafe diff RUN
+pisafe cp RUN:PATH [DEST] [--force]
+pisafe apply RUN
+pisafe discard RUN --confirm RUN
+pisafe gc [--dry-run]
+pisafe doctor
+```
+
+`run` stages the current repository's tracked state, including uncommitted
+changes, as a baseline commit. Untracked and ignored files stay behind unless
+`--include` names them; a credential-shaped path additionally needs
+`--include-unsafe`, because everything in the run can read and exfiltrate it.
+The command prints a one-time `ssh -F` line to paste into Zed's Remote
+Projects dialog — pisafe never edits your global SSH or Zed settings.
+
+`diff` reports a run's commits, changed paths with line counts, and untracked
+leftovers, without stopping it and without printing file content. `cp` takes a
+single file or directory back out. `apply` stops the run and imports its
+history as `pisafe/RUN`, in the superproject and in each changed submodule,
+leaving your checkout, index, and current branch untouched.
+
+`discard` reclaims a run at any time; `gc` reclaims imported runs seven days
+after they were applied and prunes superseded run images. Both delete the run's
+record along with what it owned — the `pisafe/RUN` branch is what keeps the
+work. A run whose work was never imported is never reclaimed by age.
+
+Runs have no GitHub access: push, publish, and every authenticated mutation
+happen on the Mac after `apply`.
+
+## Development
+
+```sh
+go test -race -cover ./...
+go vet ./...
+```
+
+The live suite is gated because it creates or reuses the dedicated `pisafe` VM
+and may download images:
 
 ```sh
 PISAFE_LIVE_LIMA=1 go test -v ./internal/lima
 PISAFE_LIVE_LIMA=1 go test -v ./internal/runimage
 ```
 
-The end-to-end artifact/container test additionally requires the immutable ID
-of a locally built run image:
+The end-to-end artifact/container test additionally needs the immutable ID of
+a locally built run image:
 
 ```sh
 PISAFE_LIVE_LIMA=1 \
