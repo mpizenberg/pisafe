@@ -13,7 +13,7 @@ import (
 )
 
 var errUsage = errors.New(
-	"usage: pisafe <run|stop|resume|apply|discard|list|zed|login|broker|doctor|help>",
+	"usage: pisafe <run|stop|resume|diff|apply|discard|list|zed|login|broker|doctor|help>",
 )
 
 func Run(ctx context.Context, args []string, out io.Writer) error {
@@ -60,6 +60,11 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 			return errUsage
 		}
 		return runResume(ctx, args[1], out)
+	case "diff":
+		if len(args) != 2 {
+			return errUsage
+		}
+		return runDiff(ctx, args[1], out)
 	case "apply":
 		if len(args) != 2 {
 			return errUsage
@@ -95,6 +100,9 @@ Usage:
   pisafe stop RUN  Stop a run while preserving its workspace
   pisafe resume RUN
                    Resume a stopped run
+  pisafe diff RUN  Report what a run changed since it started, without
+                   stopping it. Commit subjects and file names come from the
+                   run, so they are shown quoted, never as file content.
   pisafe apply RUN
                    Import a run's commits as the local branch pisafe/RUN.
                    The run is stopped first and cannot be resumed afterwards;

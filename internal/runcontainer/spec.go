@@ -200,10 +200,40 @@ func (spec Spec) configureArgs(command string) ([]string, error) {
 }
 
 // PrepareApplyArgs captures a run's result in a throwaway container over the
-// run's persistent workspace. Apply needs no network, no home, and no part of
-// the run's wall-clock budget, so it gets none of them, and it works whether
-// or not the run container exists.
+// run's persistent workspace.
 func (spec Spec) PrepareApplyArgs(projectDirectory string) ([]string, error) {
+	args, err := spec.inspectionArgs("apply", projectDirectory, "")
+	if err != nil {
+		return nil, err
+	}
+	return append(
+		args,
+		"pisafe-guest", "prepare-apply",
+		containerWorkRoot+"/"+projectDirectory,
+		containerWorkRoot+"/"+applyPackage,
+	), nil
+}
+
+// DiffArgs reports what a run changed. The workspace is mounted read-only
+// because a report must not be able to alter what it reports, which also lets
+// it run against a container that is still working.
+func (spec Spec) DiffArgs(projectDirectory string) ([]string, error) {
+	args, err := spec.inspectionArgs("diff", projectDirectory, ",ro")
+	if err != nil {
+		return nil, err
+	}
+	return append(args, "pisafe-guest", "diff", containerWorkRoot+"/"+projectDirectory), nil
+}
+
+// inspectionArgs builds a throwaway container over the run's persistent
+// workspace, up to and including the image. Inspecting a run needs no network,
+// no home, and no part of its wall-clock budget, so it gets none of them, and
+// it works whether or not the run container exists.
+func (spec Spec) inspectionArgs(
+	kind string,
+	projectDirectory string,
+	mountOptions string,
+) ([]string, error) {
 	if err := spec.Validate(); err != nil {
 		return nil, err
 	}
@@ -217,7 +247,7 @@ func (spec Spec) PrepareApplyArgs(projectDirectory string) ([]string, error) {
 		"--interactive",
 		"--pull=never",
 		"--label", "io.pisafe.run=" + spec.RunID,
-		"--label", "io.pisafe.kind=apply",
+		"--label", "io.pisafe.kind=" + kind,
 		"--user", containerUser,
 		"--read-only",
 		"--cap-drop=all",
@@ -227,14 +257,12 @@ func (spec Spec) PrepareApplyArgs(projectDirectory string) ([]string, error) {
 		"--memory-swap", memory,
 		"--pids-limit", strconv.Itoa(spec.PIDs),
 		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=" + strconv.FormatInt(spec.TmpBytes, 10),
-		"--mount", "type=bind,src=" + spec.WorkspacePath() + ",dst=" + containerWorkRoot + ",nodev,nosuid",
+		"--mount", "type=bind,src=" + spec.WorkspacePath() +
+			",dst=" + containerWorkRoot + ",nodev,nosuid" + mountOptions,
 		"--workdir", containerWorkRoot,
 		"--env", "HOME=/tmp",
 		"--env", "GIT_TERMINAL_PROMPT=0",
 		spec.ImageID,
-		"pisafe-guest", "prepare-apply",
-		containerWorkRoot + "/" + projectDirectory,
-		containerWorkRoot + "/" + applyPackage,
 	}, nil
 }
 

@@ -131,6 +131,29 @@ func TestPrepareApplyArgsRunWithoutNetworkOrRunHome(t *testing.T) {
 	}
 }
 
+// A report must not be able to alter what it reports, so diff gets the
+// workspace read-only where apply, which commits, gets it writable.
+func TestDiffArgsMountTheWorkspaceReadOnly(t *testing.T) {
+	spec := DefaultSpec("run-123", testImageID)
+	args, err := spec.DiffArgs("project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, expected := range []string{
+		"--network=none",
+		"type=bind,src=/var/lib/pisafe/runs/run-123/workspace,dst=/work,nodev,nosuid,ro",
+		"pisafe-guest diff /work/project",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Errorf("diff args lack %q:\n%s", expected, joined)
+		}
+	}
+	if _, err := spec.DiffArgs("../project"); err == nil {
+		t.Fatal("unsafe project directory was accepted")
+	}
+}
+
 func TestSpecRejectsMutableImageAndUnsafeNames(t *testing.T) {
 	for _, spec := range []Spec{
 		DefaultSpec("../escape", testImageID),

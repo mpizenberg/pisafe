@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-07-26
+Last updated: 2026-07-27
 
 This file is the durable handoff for continuing `pisafe` from a fresh session.
 The design authority remains [`pisafe-design.md`](pisafe-design.md); this file
@@ -99,6 +99,18 @@ quota-backed VM storage. Do not add a local-workspace fallback.
   filesystem is mounted per VM boot, not per run, so a VM that restarted
   between the run and its apply presents an empty run root until the
   fixed-policy helper remounts it.
+- `pisafe diff RUN` reports what a run changed since it started: its commits,
+  the paths that differ from the state it began in with per-path line counts,
+  and the untracked files apply would leave behind, for the superproject and
+  each submodule. It measures from the baseline commit, so dirty state the user
+  carried in is not attributed to the agent, and the superproject ignores
+  submodule gitlinks so no change is reported twice. Every list is capped and
+  paired with its exact total.
+- Diff runs in a throwaway `--network=none` container that mounts the run's
+  workspace read-only, with Git's optional index locks disabled, so it works on
+  an active, stopped, or imported run without altering or blocking it. It
+  reports names and counts, never file content, and the controller quotes every
+  name and commit subject because a run wrote them.
 - Discard reclaims a run from every state that still owns resources, including
   `imported`. An imported run keeps its workspace, its 10 GiB filesystem, and
   its audit record of where it was imported until it is discarded.
@@ -406,15 +418,15 @@ Current package coverage at this milestone:
 
 ```text
 pisafe        0.0%
-pisafe-guest  63.3%
+pisafe-guest  64.0%
 broker        96.2%
 chatgpt       70.1%
-cli           25.8%
-gitstage      78.6%
+cli           30.0%
+gitstage      78.8%
 hostnet       50.0%
 lima          68.0%
-runcontainer  66.0%
-runctl        67.1%
+runcontainer  70.9%
+runctl        67.7%
 runid         92.3%
 runimage      74.6%
 runssh        68.0%
@@ -454,6 +466,17 @@ gitlink resolving to exactly the imported commit, an unchanged submodule
 getting no branch, journal replay as a no-op, a contested ref stopping for
 reconciliation instead of being overwritten, and rollback removing only the
 refs apply created.
+
+Diff is covered from both sides against real repositories: commits, an
+uncommitted edit, an untracked file, a deletion, and a binary path are each
+reported correctly; carried-in baseline work is excluded; a submodule reports
+its own work while the superproject does not repeat it; lists cap while totals
+stay exact; commit subjects are bounded; an escaping submodule path is refused;
+the guest command refuses a snapshot naming a Mac path and leaves the workspace
+byte-for-byte unchanged; the controller refuses a run with no workspace left,
+verifies storage before reading, and leaves an active run active; the container
+arguments mount the workspace read-only; and the rendered output quotes every
+run-authored name and subject, dropping no escape sequence into the terminal.
 
 The run's Git identity is covered from both sides: resolution prefers
 repository configuration over the global one and refuses an unconfigured Mac;
@@ -569,7 +592,7 @@ Run that end-to-end test with:
 
 ```sh
 PISAFE_LIVE_LIMA=1 \
-PISAFE_LIVE_RUN_IMAGE=sha256:d105734aeac542cc0857e27e673349e993be923e1d49fc9e9006723db0804a9d \
+PISAFE_LIVE_RUN_IMAGE=sha256:e015c7ab31c2abce6ae04587ec5f705e9fd562102bb390b571b7f392a99b637a \
 go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
 ```
 
@@ -581,14 +604,26 @@ profile
 It contains cached base/test images plus the current managed run image:
 
 ```text
-recipe digest: sha256:1a28b413ac1c63d23a21c6373d0c8e5a5843a38095b328938cd12310e2c7fba5
-image ID:      sha256:d105734aeac542cc0857e27e673349e993be923e1d49fc9e9006723db0804a9d
+recipe digest: sha256:042f6f42ed228f5502d4ae39f1d457a7001753c57656e11adbfba867dd9f8345
+image ID:      sha256:e015c7ab31c2abce6ae04587ec5f705e9fd562102bb390b571b7f392a99b637a
 ```
 
-The recipe digest last moved when the guest helper gained
-`configure-identity`. Each time it moves, the next run rebuilds the image and
-every later run and apply reuses it, which live-checks content-addressed
-reuse.
+The recipe digest last moved when the guest helper gained `diff`. Each time it
+moves, the next run rebuilds the image and every later run and apply reuses it,
+which live-checks content-addressed reuse. Five managed images now sit in the
+VM, one per recipe the helper has ever had; pruning superseded ones belongs to
+the GC slice.
+
+`pisafe diff` is live-verified against the real VM. A scratch repository with
+one dirty tracked file became a run; inside the run an agent commit, a further
+uncommitted edit, a staged binary file, and an untracked file were left behind.
+Diff on the still-active run reported one commit since the baseline, `+2/-0`
+for the edited file, `binary` for the binary one, and the untracked leftover,
+and did not report the dirty line the user carried in. The run stayed active,
+and its `git status` and HEAD were identical afterwards. The same run then
+reported identically while stopped and while imported, and `pisafe apply`
+still worked through the refactored throwaway-container arguments. Discard
+reclaimed the scratch run, leaving no `pisafe-*` mounts.
 
 The run Git identity is live-verified end to end. A scratch repository whose
 repository-local identity differed from the Mac's global one produced a run
@@ -730,7 +765,10 @@ sandboxed result.
 
 ## Known gaps
 
-- No user-facing `connect`, `diff`, `cp`, or `gc` implementation exists.
+- No user-facing `connect`, `cp`, or `gc` implementation exists.
+- `pisafe diff` reports paths and line counts, never file content, so reviewing
+  what a run actually wrote still means importing it and using `git diff`, or
+  taking single files out once `cp` exists.
 - `pisafe zed` launches a connection that was explicitly saved once in Zed.
   Fully automatic first-launch remains intentionally absent because Zed's CLI
   URL cannot carry `-F` and PiSafe does not silently edit global SSH or Zed
@@ -779,7 +817,7 @@ sandboxed result.
 
 Continue Phase 1 without weakening the boundary:
 
-1. Add `diff`, hardened `cp`, and seven-day GC.
+1. Add hardened `cp`, then seven-day GC.
 
 ## Useful references
 

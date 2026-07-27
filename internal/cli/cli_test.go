@@ -198,6 +198,48 @@ func TestDiscardRequiresExactRepeatedRunID(t *testing.T) {
 	}
 }
 
+// Everything in a diff was written inside the run, so nothing may reach the
+// terminal unquoted, and a truncated list must say so.
+func TestPrintRunDiffQuotesRunContentAndReportsTruncation(t *testing.T) {
+	var output bytes.Buffer
+	printRunDiff(&output, gitstage.RunDiff{
+		RunID: "diff-run",
+		Repositories: []gitstage.RepositoryDiff{{
+			Base:        strings.Repeat("a", 40),
+			Head:        strings.Repeat("b", 40),
+			Commits:     []gitstage.DiffCommit{{Commit: strings.Repeat("c", 40), Subject: "fix\x1b[31m"}},
+			CommitTotal: 3,
+			Files: []gitstage.DiffFile{
+				{Path: "src/main.go", Insertions: 12, Deletions: 4},
+				{Path: "logo.png", Insertions: -1, Deletions: -1},
+			},
+			FileTotal:      2,
+			Untracked:      []string{"scratch\nlog"},
+			UntrackedTotal: 1,
+		}, {
+			Path: "dependency",
+			Base: strings.Repeat("d", 40),
+			Head: strings.Repeat("d", 40),
+		}},
+	})
+	rendered := output.String()
+	for _, expected := range []string{
+		`"fix\x1b[31m"`,
+		"... and 2 more",
+		"+12/-4 \"src/main.go\"",
+		"binary \"logo.png\"",
+		`"scratch\nlog"`,
+		`Submodule: "dependency"`,
+	} {
+		if !strings.Contains(rendered, expected) {
+			t.Errorf("diff output lacks %q:\n%s", expected, rendered)
+		}
+	}
+	if strings.Contains(rendered, "\x1b") {
+		t.Fatalf("diff output carried an escape sequence:\n%q", rendered)
+	}
+}
+
 func TestParseInputSelectionSeparatesUnsafeApproval(t *testing.T) {
 	selection, err := parseInputSelection([]string{
 		"--include", "notes.txt",

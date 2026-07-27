@@ -60,20 +60,89 @@ func runResume(ctx context.Context, runID string, out io.Writer) error {
 	return nil
 }
 
+func runDiff(ctx context.Context, runID string, out io.Writer) error {
+	controller, imageID, err := prepareInspection(ctx)
+	if err != nil {
+		return err
+	}
+	diff, err := controller.Diff(ctx, runID, imageID)
+	if err != nil {
+		return err
+	}
+	printRunDiff(out, diff)
+	return nil
+}
+
+// printRunDiff renders a report a run produced, so every name and subject it
+// contains is quoted rather than written to the terminal as it stands.
+func printRunDiff(out io.Writer, diff gitstage.RunDiff) {
+	for _, repository := range diff.Repositories {
+		scope := "Repository"
+		if repository.Path != "" {
+			scope = "Submodule"
+		}
+		fmt.Fprintf(out, "%s: %s\n", scope, repositoryLabel(repository.Path))
+		fmt.Fprintf(
+			out,
+			"  Commits: %d since %s\n",
+			repository.CommitTotal,
+			shortCommit(repository.Base),
+		)
+		for _, commit := range repository.Commits {
+			fmt.Fprintf(out, "    %s %q\n", shortCommit(commit.Commit), commit.Subject)
+		}
+		printMore(out, len(repository.Commits), repository.CommitTotal)
+		fmt.Fprintf(out, "  Changed: %d file(s) against the run's starting state\n", repository.FileTotal)
+		for _, file := range repository.Files {
+			fmt.Fprintf(out, "    %s %q\n", changeCounts(file), file.Path)
+		}
+		printMore(out, len(repository.Files), repository.FileTotal)
+		if repository.UntrackedTotal == 0 {
+			continue
+		}
+		fmt.Fprintf(out, "  Untracked: %d file(s), which apply leaves behind\n", repository.UntrackedTotal)
+		for _, name := range repository.Untracked {
+			fmt.Fprintf(out, "    %q\n", name)
+		}
+		printMore(out, len(repository.Untracked), repository.UntrackedTotal)
+	}
+}
+
+func repositoryLabel(path string) string {
+	if path == "" {
+		return "superproject"
+	}
+	return fmt.Sprintf("%q", path)
+}
+
+func shortCommit(commit string) string {
+	if len(commit) <= 12 {
+		return commit
+	}
+	return commit[:12]
+}
+
+// changeCounts renders one path's line counts. Git reports no line count at all
+// for a binary file, which DiffFile carries as -1.
+func changeCounts(file gitstage.DiffFile) string {
+	if file.Insertions < 0 || file.Deletions < 0 {
+		return "binary"
+	}
+	return fmt.Sprintf("+%d/-%d", file.Insertions, file.Deletions)
+}
+
+func printMore(out io.Writer, shown, total int) {
+	if total > shown {
+		fmt.Fprintf(out, "    ... and %d more\n", total-shown)
+	}
+}
+
 func runApply(ctx context.Context, runID string, out io.Writer) error {
-	controller, err := prepareLifecycle(ctx)
+	controller, imageID, err := prepareInspection(ctx)
 	if err != nil {
 		return err
 	}
-	artifacts, err := packagedRunArtifacts()
-	if err != nil {
-		return err
-	}
-	image, err := runimage.NewInstaller(lima.NewTransport()).Ensure(ctx, artifacts)
-	if err != nil {
-		return fmt.Errorf("install managed run image: %w", err)
-	}
-	manifest, result, err := controller.Apply(ctx, runID, image.ImageID)
+	manifest, result, err := controller.Apply(ctx, runID, imageID)
 	if err != nil {
 		if errors.Is(err, gitstage.ErrApplyNeedsReconciliation) {
 			return fmt.Errorf(
@@ -133,6 +202,25 @@ func runDiscard(ctx context.Context, runID string, out io.Writer) error {
 	}
 	fmt.Fprintf(out, "Discarded %s; its container, workspace, home, and SSH key were removed.\n", runID)
 	return nil
+}
+
+// prepareInspection adds the current managed run image to the lifecycle
+// controller. Every command that reads a run's workspace from outside it needs
+// that image, because the guest helper inside it must match this controller.
+func prepareInspection(ctx context.Context) (runctl.Controller, string, error) {
+	controller, err := prepareLifecycle(ctx)
+	if err != nil {
+		return runctl.Controller{}, "", err
+	}
+	artifacts, err := packagedRunArtifacts()
+	if err != nil {
+		return runctl.Controller{}, "", err
+	}
+	image, err := runimage.NewInstaller(lima.NewTransport()).Ensure(ctx, artifacts)
+	if err != nil {
+		return runctl.Controller{}, "", fmt.Errorf("install managed run image: %w", err)
+	}
+	return controller, image.ImageID, nil
 }
 
 func prepareLifecycle(ctx context.Context) (runctl.Controller, error) {

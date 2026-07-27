@@ -7,7 +7,8 @@ The implementation now contains:
 
 - a dependency-free Go controller;
 - `pisafe run` for creating an isolated run from the current repository,
-  `pisafe stop`/`resume` for preserving and reopening it, `pisafe apply` for
+  `pisafe stop`/`resume` for preserving and reopening it, `pisafe diff` for
+  reporting what it changed without stopping it, `pisafe apply` for
   importing its commits, exact-confirmation `pisafe discard`, `pisafe list`
   for durable records, `pisafe zed` for reopening a connection explicitly
   saved in Zed, and `pisafe doctor` for prerequisites;
@@ -69,6 +70,11 @@ superproject and each changed submodule without touching the checkout. It is
 live-validated against a run whose commits, submodule commit, uncommitted
 changes, and untracked leftovers all landed exactly where the design says.
 An imported run keeps its workspace until `pisafe discard` reclaims it.
+`pisafe diff RUN` reports the run's commits, changed paths with line counts,
+and untracked leftovers from a throwaway container holding the workspace
+read-only, so it works on an active, stopped, or imported run without
+disturbing it. It reports names and counts, never file content: everything it
+names was written inside the run, so it is quoted rather than rendered.
 `pisafe broker` relays inference from the Mac into runs over a reverse SSH
 forward to `192.0.2.1:18080`, the firewall's single static exception; runs
 hold only a revocable per-run capability, never a provider credential.
@@ -86,6 +92,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
 ./pisafe run [--include PATH]... [--include-unsafe PATH]...
 ./pisafe stop RUN
 ./pisafe resume RUN
+./pisafe diff RUN
 ./pisafe apply RUN
 ./pisafe discard RUN --confirm RUN
 ./pisafe login chatgpt

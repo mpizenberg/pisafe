@@ -917,6 +917,22 @@ The first usable release should prove:
 - A repository with no configured identity refuses to start a run instead of
   falling back to a placeholder. A silent fallback would be discovered only in
   the imported history, when rewriting it is expensive.
+- `pisafe diff` reports commit subjects, paths, and line counts rather than
+  file content. Streaming the patch itself was rejected: everything in a run is
+  untrusted, and writing it to the terminal is the injection surface pisafe
+  exists to remove, while a sanitizer for it would be more code and still
+  weaker than importing the run and using `git diff`. Content-level review
+  therefore stays behind `apply`, and `cp` remains the way to take individual
+  files out.
+- `pisafe diff` measures from the run's baseline commit, not the source HEAD,
+  so dirty state the user carried in is not reported as the agent's work. The
+  cost is that a diff never shows those carried-in changes; they are already in
+  the user's own checkout.
+- Diff mounts the run's workspace read-only in a throwaway container and
+  disables Git's optional index locks, so it neither alters nor blocks a run
+  an agent is still working in. The alternative, executing in the live run
+  container, would have required the run to exist and could have contended
+  with the agent's own Git commands.
 
 ## Primary references
 

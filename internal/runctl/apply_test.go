@@ -231,6 +231,14 @@ func applyFixture(t *testing.T, runID string) (string, string, gitstage.Snapshot
 // stopped, with the snapshot the workspace was staged from.
 func stoppedRun(t *testing.T, store runstate.Store, snapshot gitstage.Snapshot) {
 	t.Helper()
+	activeRun(t, store, snapshot)
+	if _, err := store.Stop(snapshot.RunID, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func activeRun(t *testing.T, store runstate.Store, snapshot gitstage.Snapshot) {
+	t.Helper()
 	if _, err := store.Create(runstate.Manifest{
 		RunID:              snapshot.RunID,
 		Project:            "project",
@@ -254,9 +262,6 @@ func stoppedRun(t *testing.T, store runstate.Store, snapshot gitstage.Snapshot) 
 		ConfigFile:         "/state/ssh/" + snapshot.RunID + "/ssh.config",
 		HostKeyFingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 	}, snapshot.BaselineCommit, capability, started); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Stop(snapshot.RunID, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 }

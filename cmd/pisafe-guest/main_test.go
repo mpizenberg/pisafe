@@ -93,6 +93,76 @@ func TestMaterializeRejectsHostPathInSnapshot(t *testing.T) {
 	}
 }
 
+func TestDiffCommandReportsChangesAndLeavesTheWorkspaceAlone(t *testing.T) {
+	source := initGuestTestRepository(t)
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	snapshot, err := gitstage.Stage(
+		context.Background(),
+		gitstage.PrepareRequest{SourcePath: source, RunID: "diff-guest"},
+		workspace,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(workspace, "tracked.txt"), []byte("agent work\n"), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.SourceRoot = ""
+	snapshotJSON, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if err := run(
+		context.Background(),
+		[]string{"diff", workspace},
+		bytes.NewReader(snapshotJSON),
+		&output,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var diff gitstage.RunDiff
+	decoder := json.NewDecoder(bytes.NewReader(output.Bytes()))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&diff); err != nil {
+		t.Fatal(err)
+	}
+	if diff.RunID != "diff-guest" || len(diff.Repositories) != 1 {
+		t.Fatalf("diff = %#v", diff)
+	}
+	if files := diff.Repositories[0].Files; len(files) != 1 || files[0].Path != "tracked.txt" {
+		t.Fatalf("files = %#v", files)
+	}
+	// Reporting a run must not commit, stage, or otherwise disturb it.
+	if status := guestGit(t, workspace, "status", "--porcelain=v1"); status != "M tracked.txt" {
+		t.Fatalf("diff altered the workspace: %q", status)
+	}
+}
+
+func TestDiffCommandRejectsHostPathInSnapshot(t *testing.T) {
+	snapshot, err := json.Marshal(gitstage.Snapshot{
+		RunID:      "unsafe",
+		SourceRoot: "/Users/alice/project",
+		SourceHead: strings.Repeat("a", 40),
+		WorkRef:    "refs/heads/work/unsafe",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = run(
+		context.Background(),
+		[]string{"diff", t.TempDir()},
+		bytes.NewReader(snapshot),
+		&bytes.Buffer{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "host source path") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestPrepareApplyCommandReportsBundlesWithoutPaths(t *testing.T) {
 	source := initGuestTestRepository(t)
 	workspace := filepath.Join(t.TempDir(), "workspace")

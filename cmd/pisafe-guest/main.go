@@ -49,6 +49,11 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 			return usageError()
 		}
 		return prepareApply(ctx, args[1], args[2], in, out)
+	case "diff":
+		if len(args) != 2 {
+			return usageError()
+		}
+		return diffRun(ctx, args[1], in, out)
 	case "configure-ssh":
 		if len(args) != 1 {
 			return usageError()
@@ -83,6 +88,7 @@ func usageError() error {
 	return errors.New(
 		"usage: pisafe-guest <materialize <stage-directory> <workspace>" +
 			"|prepare-apply <workspace> <package-directory>" +
+			"|diff <workspace>" +
 			"|configure-ssh|configure-inference|configure-identity" +
 			"|serve-ssh|proxy-ssh>",
 	)
@@ -268,6 +274,20 @@ func prepareApply(
 		return err
 	}
 	return json.NewEncoder(out).Encode(prepared)
+}
+
+// diffRun reports what the run changed. It only reads the workspace, so it is
+// safe to run while an agent is working in it.
+func diffRun(ctx context.Context, workspacePath string, in io.Reader, out io.Writer) error {
+	snapshot, err := decodeSnapshot(in)
+	if err != nil {
+		return err
+	}
+	diff, err := gitstage.DiffRun(ctx, snapshot, filepath.Clean(workspacePath))
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(out).Encode(diff)
 }
 
 // decodeSnapshot reads the run description the controller sends across the

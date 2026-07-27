@@ -137,6 +137,21 @@ func (backend *fakeBackend) Execute(
 		output, err := json.Marshal(prepared)
 		return append(output, '\n'), err
 	}
+	if strings.Contains(strings.Join(args, " "), "pisafe-guest diff") {
+		var snapshot gitstage.Snapshot
+		if err := json.Unmarshal([]byte(input), &snapshot); err != nil {
+			return nil, err
+		}
+		if snapshot.SourceRoot != "" {
+			return nil, errors.New("diff request disclosed the Mac path")
+		}
+		diff, err := gitstage.DiffRun(ctx, snapshot, backend.applyWorkspace)
+		if err != nil {
+			return nil, err
+		}
+		output, err := json.Marshal(diff)
+		return append(output, '\n'), err
+	}
 	if strings.Contains(strings.Join(args, " "), "pisafe-guest materialize") {
 		materialized := testPrepared().Snapshot
 		materialized.SourceRoot = ""
