@@ -25,6 +25,10 @@ type PreparedApply struct {
 	Untracked    []string                 `json:"untracked,omitempty"`
 	BundleSHA256 string                   `json:"bundle_sha256,omitempty"`
 	Submodules   []PreparedApplySubmodule `json:"submodules,omitempty"`
+	// ReplayConflicts names the paths that stopped a requested replay. It is
+	// the whole answer when it is set: the run was left as the agent left it
+	// and there is nothing to import.
+	ReplayConflicts []string `json:"replay_conflicts,omitempty"`
 }
 
 // PreparedApplySubmodule carries one submodule's new history. Base is the
@@ -110,7 +114,11 @@ func PrepareApply(
 	snapshot Snapshot,
 	workspace string,
 	packageDir string,
+	choice BaselineChoice,
 ) (PreparedApply, error) {
+	if _, err := ParseBaselineChoice(string(choice)); err != nil {
+		return PreparedApply{}, err
+	}
 	if err := runid.Validate(snapshot.RunID); err != nil {
 		return PreparedApply{}, err
 	}
@@ -148,6 +156,21 @@ func PrepareApply(
 		return PreparedApply{}, fmt.Errorf("run history is not based on captured source HEAD")
 	}
 
+	bundleRef := applyBundleRef(snapshot, choice)
+	if choice == DropBaseline {
+		replayedTip, conflicts, err := replayWithoutBaseline(ctx, snapshot, workspace, packageDir)
+		if err != nil {
+			return PreparedApply{}, err
+		}
+		if len(conflicts) != 0 {
+			return PreparedApply{RunID: snapshot.RunID, ReplayConflicts: conflicts}, nil
+		}
+		// The bundle is a file of its own, so the ref has nothing left to keep
+		// reachable once it is written.
+		defer func() { _ = gitRun(ctx, workspace, nil, nil, "update-ref", "-d", bundleRef) }()
+		tip = replayedTip
+	}
+
 	prepared := PreparedApply{
 		RunID:       snapshot.RunID,
 		Tip:         tip,
@@ -162,7 +185,7 @@ func PrepareApply(
 		ctx,
 		workspace,
 		filepath.Join(packageDir, applyBundleName),
-		snapshot.WorkRef,
+		bundleRef,
 		snapshot.SourceHead,
 	)
 	if err != nil {
@@ -271,9 +294,21 @@ func ImportApply(
 	snapshot Snapshot,
 	prepared PreparedApply,
 	packageDir string,
+	choice BaselineChoice,
 ) (PlannedApply, error) {
 	if runid.Validate(snapshot.RunID) != nil || prepared.RunID != snapshot.RunID {
 		return PlannedApply{}, fmt.Errorf("apply package does not match run")
+	}
+	if _, err := ParseBaselineChoice(string(choice)); err != nil {
+		return PlannedApply{}, err
+	}
+	if len(prepared.ReplayConflicts) != 0 {
+		if choice != DropBaseline {
+			return PlannedApply{}, fmt.Errorf(
+				"apply package reports a replay that was not asked for",
+			)
+		}
+		return PlannedApply{}, &BaselineReplayConflict{Paths: prepared.ReplayConflicts}
 	}
 	sourceRoot, err := filepath.EvalSymlinks(snapshot.SourceRoot)
 	if err != nil {
@@ -348,12 +383,22 @@ func ImportApply(
 			sourceRoot,
 			temporaryRef,
 			targetRef,
-			snapshot.WorkRef,
+			applyBundleRef(snapshot, choice),
 			filepath.Join(packageDir, applyBundleName),
 			prepared.BundleSHA256,
 			prepared.Tip,
 		); err != nil {
 			return PlannedApply{}, err
+		}
+		if choice == DropBaseline {
+			if err := requireBaselineDropped(
+				ctx,
+				sourceRoot,
+				temporaryRef,
+				snapshot.BaselineCommit,
+			); err != nil {
+				return PlannedApply{}, err
+			}
 		}
 	} else if prepared.BundleSHA256 != "" {
 		return PlannedApply{}, fmt.Errorf("unchanged apply unexpectedly contains a bundle")
@@ -511,18 +556,23 @@ func stepIsComplete(ctx context.Context, step ApplyStep) (bool, error) {
 // Apply composes the isolated and host halves locally for tests. The
 // controller uses PrepareApply, ImportApply, and CommitApply separately with
 // an SSH transfer between them.
-func Apply(ctx context.Context, snapshot Snapshot, workspace string) (ApplyResult, error) {
+func Apply(
+	ctx context.Context,
+	snapshot Snapshot,
+	workspace string,
+	choice BaselineChoice,
+) (ApplyResult, error) {
 	packageDir, err := os.MkdirTemp("", "pisafe-apply-*")
 	if err != nil {
 		return ApplyResult{}, fmt.Errorf("reserve apply package path: %w", err)
 	}
 	defer os.RemoveAll(packageDir)
 
-	prepared, err := PrepareApply(ctx, snapshot, workspace, packageDir)
+	prepared, err := PrepareApply(ctx, snapshot, workspace, packageDir, choice)
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	planned, err := ImportApply(ctx, snapshot, prepared, packageDir)
+	planned, err := ImportApply(ctx, snapshot, prepared, packageDir, choice)
 	if err != nil {
 		return ApplyResult{}, err
 	}

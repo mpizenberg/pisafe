@@ -52,7 +52,7 @@ pisafe stop RUN
 pisafe resume RUN
 pisafe diff RUN
 pisafe cp RUN:PATH [DEST] [--force]
-pisafe apply RUN
+pisafe apply RUN [--keep-baseline|--drop-baseline]
 pisafe discard RUN --confirm RUN
 pisafe gc [--dry-run]
 pisafe doctor
@@ -74,6 +74,14 @@ leftovers, without stopping it and without printing file content. `cp` takes a
 single file or directory back out. `apply` stops the run and imports its
 history as `pisafe/RUN`, in the superproject and in each changed submodule,
 leaving your checkout, index, and current branch untouched.
+
+If the run started from an uncommitted working tree, pisafe committed that state
+for it, and `apply` asks once whether to import that commit too or to replay
+only the run's own commits onto the commit you were on. The replay happens
+inside the run; if the run's commits change lines the carried-in work changed,
+nothing is imported, the run is left exactly as it was, and you can keep the
+baseline instead or resolve it in the run and apply again. `--keep-baseline` and
+`--drop-baseline` answer in advance.
 
 `discard` reclaims a run at any time; `gc` reclaims imported runs seven days
 after they were applied and prunes superseded run images. Both delete the run's

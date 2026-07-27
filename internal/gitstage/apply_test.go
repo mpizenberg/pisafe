@@ -41,7 +41,7 @@ func TestApplyImportsSubmoduleHistoryAndReportsExpectedCommits(t *testing.T) {
 	mustWrite(t, filepath.Join(workspace, "tracked.txt"), "superproject work\n")
 
 	sourceBefore := runGit(t, source, "rev-parse", "HEAD")
-	result, err := Apply(ctx, snapshot, workspace)
+	result, err := Apply(ctx, snapshot, workspace, KeepBaseline)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestApplyLeavesUnchangedSubmodulesWithoutABranch(t *testing.T) {
 	source, workspace, snapshot := stageWithSubmodule(t, "quiet-submodule-run")
 	mustWrite(t, filepath.Join(workspace, "tracked.txt"), "superproject only\n")
 
-	result, err := Apply(ctx, snapshot, workspace)
+	result, err := Apply(ctx, snapshot, workspace, KeepBaseline)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,20 +202,20 @@ func TestImportApplyRefusesAPackageThatDisagreesWithTheRun(t *testing.T) {
 	mustWrite(t, filepath.Join(workspace, "tracked.txt"), "work\n")
 
 	packageDir := t.TempDir()
-	prepared, err := PrepareApply(ctx, snapshot, workspace, packageDir)
+	prepared, err := PrepareApply(ctx, snapshot, workspace, packageDir, KeepBaseline)
 	if err != nil {
 		t.Fatal(err)
 	}
 	dropped := prepared
 	dropped.Submodules = nil
-	if _, err := ImportApply(ctx, snapshot, dropped, packageDir); err == nil ||
+	if _, err := ImportApply(ctx, snapshot, dropped, packageDir, KeepBaseline); err == nil ||
 		!strings.Contains(err.Error(), "staged submodules") {
 		t.Fatalf("dropped submodule err = %v", err)
 	}
 
 	renamed := prepared
 	renamed.Submodules = []PreparedApplySubmodule{{Path: "elsewhere"}}
-	if _, err := ImportApply(ctx, snapshot, renamed, packageDir); err == nil ||
+	if _, err := ImportApply(ctx, snapshot, renamed, packageDir, KeepBaseline); err == nil ||
 		!strings.Contains(err.Error(), "staged submodules") {
 		t.Fatalf("renamed submodule err = %v", err)
 	}
@@ -229,7 +229,7 @@ func TestPreparedApplyNamesOnlyTheBundlesItProduced(t *testing.T) {
 	runGit(t, submoduleWorkspace, "commit", "-qm", "submodule change")
 
 	packageDir := t.TempDir()
-	prepared, err := PrepareApply(context.Background(), snapshot, workspace, packageDir)
+	prepared, err := PrepareApply(context.Background(), snapshot, workspace, packageDir, KeepBaseline)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,6 +256,7 @@ func TestPreparedApplyNamesOnlyTheBundlesItProduced(t *testing.T) {
 		quietSnapshot,
 		quietWorkspace,
 		t.TempDir(),
+		KeepBaseline,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -268,11 +269,11 @@ func TestPreparedApplyNamesOnlyTheBundlesItProduced(t *testing.T) {
 func planApply(t *testing.T, snapshot Snapshot, workspace string) PlannedApply {
 	t.Helper()
 	packageDir := t.TempDir()
-	prepared, err := PrepareApply(context.Background(), snapshot, workspace, packageDir)
+	prepared, err := PrepareApply(context.Background(), snapshot, workspace, packageDir, KeepBaseline)
 	if err != nil {
 		t.Fatal(err)
 	}
-	planned, err := ImportApply(context.Background(), snapshot, prepared, packageDir)
+	planned, err := ImportApply(context.Background(), snapshot, prepared, packageDir, KeepBaseline)
 	if err != nil {
 		t.Fatal(err)
 	}

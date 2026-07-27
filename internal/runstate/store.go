@@ -343,10 +343,14 @@ func (store Store) CompleteApply(runID string) (Manifest, error) {
 	return store.replace(manifest)
 }
 
+// Activate records the run as materialization actually produced it. Only the
+// baselines are taken from the materialized snapshot: every other field was
+// settled on the Mac before the run existed, and the run does not get to
+// restate it.
 func (store Store) Activate(
 	runID string,
 	connection SSHConnection,
-	baselineCommit string,
+	materialized gitstage.Snapshot,
 	capability string,
 	startedAt time.Time,
 ) (Manifest, error) {
@@ -364,8 +368,9 @@ func (store Store) Activate(
 	if err := validateSSHConnection(manifest.RunID, connection); err != nil {
 		return Manifest{}, err
 	}
-	if baselineCommit != "" && !gitObjectPattern.MatchString(baselineCommit) {
-		return Manifest{}, fmt.Errorf("invalid materialized baseline commit")
+	baselines, err := materializedBaselines(manifest.Snapshot, materialized)
+	if err != nil {
+		return Manifest{}, err
 	}
 	if !ValidInferenceCapability(capability) {
 		return Manifest{}, fmt.Errorf("activation requires an inference capability")
@@ -387,7 +392,8 @@ func (store Store) Activate(
 	deadline := startedAt.Add(time.Duration(manifest.ActiveLimitSeconds) * time.Second)
 	manifest.State = StateActive
 	manifest.SSH = &connection
-	manifest.Snapshot.BaselineCommit = baselineCommit
+	manifest.Snapshot.BaselineCommit = materialized.BaselineCommit
+	manifest.Snapshot.Submodules = baselines
 	manifest.ActiveStartedAt = &startedAt
 	manifest.ActiveDeadline = &deadline
 	manifest.InferenceCapability = capability
@@ -401,6 +407,39 @@ func (store Store) Activate(
 		return Manifest{}, err
 	}
 	return manifest, nil
+}
+
+// materializedBaselines returns the staged submodules carrying the baseline
+// commit each one actually got. Materialization may only fill those in: a
+// snapshot that renames a submodule or moves its head describes a different run.
+func materializedBaselines(
+	staged, materialized gitstage.Snapshot,
+) ([]gitstage.SubmoduleStage, error) {
+	if err := validateBaseline(materialized.BaselineCommit); err != nil {
+		return nil, err
+	}
+	if len(materialized.Submodules) != len(staged.Submodules) {
+		return nil, fmt.Errorf("materialized snapshot does not match the staged submodules")
+	}
+	recorded := append([]gitstage.SubmoduleStage(nil), staged.Submodules...)
+	for index := range recorded {
+		if materialized.Submodules[index].Path != recorded[index].Path ||
+			materialized.Submodules[index].Head != recorded[index].Head {
+			return nil, fmt.Errorf("materialized snapshot does not match the staged submodules")
+		}
+		if err := validateBaseline(materialized.Submodules[index].BaselineCommit); err != nil {
+			return nil, err
+		}
+		recorded[index].BaselineCommit = materialized.Submodules[index].BaselineCommit
+	}
+	return recorded, nil
+}
+
+func validateBaseline(commit string) error {
+	if commit != "" && !gitObjectPattern.MatchString(commit) {
+		return fmt.Errorf("invalid materialized baseline commit")
+	}
+	return nil
 }
 
 // RecordError preserves a failed operation without inventing a lifecycle

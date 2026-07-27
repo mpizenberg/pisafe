@@ -11,12 +11,13 @@ implemented, what has been verified against a real VM, and what comes next.
 
 Phase 1 is in progress. Every command the design enumerates for it exists:
 `run`, `list`, `connect`, `stop`, `resume`, `diff`, `cp`, `apply`, `discard`,
-`gc`, `zed`, `login`, `broker`, `doctor`. Built in ten slices: the controller
+`gc`, `zed`, `login`, `broker`, `doctor`. Built in eleven slices: the controller
 and Git isolation core; the Lima VM backend and firewall; SSH transport, run
 records, run image and container contract; per-run SSH credentials; user-facing
 run creation; stop/resume/discard and quota-backed storage; the reverse
 inference relay; ChatGPT subscription login; getting work back out (`diff`,
-`cp`, `gc`); and terminal access without an editor (`connect`).
+`cp`, `gc`); terminal access without an editor (`connect`); and the
+keep-or-replay choice about a run's carried-in baseline commit.
 
 `pisafe run` uses the tested mountless path and materializes inside private
 quota-backed VM storage. **Do not add a local-workspace fallback.**
@@ -60,9 +61,10 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
 
 ### Commands over the boundary
 
-- `pisafe apply RUN` stops an active run, captures it with
-  `pisafe-guest prepare-apply` in a throwaway `--network=none` container mounted
-  only on the workspace, streams each bundle back bounded and SHA-256 verified,
+- `pisafe apply RUN [--keep-baseline|--drop-baseline]` stops an active run,
+  captures it with `pisafe-guest prepare-apply` in a throwaway `--network=none`
+  container mounted only on the workspace, streams each bundle back bounded and
+  SHA-256 verified,
   imports into temporary refs, records the plan in the manifest, and only then
   moves refs. A recorded plan is replayed rather than redone, so apply on a run
   that already has one never touches the run. The run becomes `imported` only
@@ -70,6 +72,17 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   applied again. Apply runs the controller's *current* image, and verifies the
   run's storage first (a fixed-capacity filesystem is mounted per VM boot, not
   per run).
+- A run whose history starts with a baseline commit is asked about once, before
+  anything is captured: import it with everything after it, or replay only the
+  run's own commits onto the captured HEAD. The replay is a `git rebase --onto`
+  in a throwaway worktree inside the run, published under
+  `refs/pisafe/replay/<run>` and torn down with the bundle, so the run's branch,
+  working tree, and baseline are the same afterwards either way. A conflict
+  reports the paths, imports nothing, records no failure, and names the three
+  ways forward. The Mac then proves the baseline really is absent from what
+  arrived rather than trusting the run. The drop is refused when a submodule
+  carried uncommitted work of its own, because every superproject commit records
+  where its submodules stood.
 - `pisafe diff RUN` reports commits, per-path line counts, and untracked
   leftovers for the superproject and each submodule, measured from the baseline
   commit so carried-in dirty state is not attributed to the agent. Every list is
@@ -256,7 +269,9 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
 - `internal/runstate` writes version-4, mode-0600 JSON manifests atomically
   under the user config directory (or `PISAFE_STATE_DIR`), enforcing
   `creating → active → stopped → active|imported` and binding one capability to
-  exactly the active state. There is no terminal state: reclaiming a run removes
+  exactly the active state. Activation records the baseline commit each
+  repository actually got, superproject and submodules alike, and refuses a
+  materialized snapshot that describes different submodules. There is no terminal state: reclaiming a run removes
   its record, and only an active run's record is refused, because it is the one
   route back to a running container. Failed creation stays visibly `creating`
   with `last_error`.
@@ -298,14 +313,14 @@ git diff --check
 Package coverage at this milestone:
 
 ```text
-pisafe        0.0%    runcontainer  72.6%
-pisafe-guest  64.4%   runcopy       80.3%
-broker        96.2%   runctl        70.1%
+pisafe        0.0%    runcontainer  73.4%
+pisafe-guest  64.8%   runcopy       80.3%
+broker        96.2%   runctl        70.3%
 chatgpt       70.1%   runid         92.3%
-cli           39.3%   runimage      76.8%
-gitstage      78.8%   runssh        68.0%
+cli           43.3%   runimage      76.8%
+gitstage      79.1%   runssh        68.0%
 hostnet       50.0%   runstart      80.9%
-lima          67.0%   runstate      74.4%
+lima          67.0%   runstate      75.5%
 ```
 
 What the unit and integration suites cover, mostly against real repositories
@@ -359,6 +374,19 @@ with a fake VM boundary:
   covers the label filter, Podman's bare hex ID, an unlabelled image surviving,
   the current recipe recognized without a lookup, a missing recipe digest
   refused, and an in-use image reported without stopping the sweep.
+- **Baseline choice**: a clean drop importing only the run's own commits with
+  the carried-in edit absent; a conflict naming the path, leaving the run's
+  branch, HEAD, and working tree untouched, after which keeping the baseline
+  succeeds; refusal of a run with no baseline and of one whose submodule carries
+  its own; an import that asked for the drop refused because the history still
+  contained the baseline; choice parsing on both sides of the boundary; and,
+  through the controller, the choice reaching the run's argv and a conflict
+  leaving the record stopped, unmarked, and still applicable. The CLI's own
+  tests cover the question being asked exactly where an answer still changes
+  the outcome: a repeated prompt after an unusable answer, an EOF naming the
+  flags, no question at all when there is nothing to decide, and each refusal.
+  The store's test covers activation filling submodule baselines in and
+  refusing a snapshot that renames or moves one.
 - **connect**: the exact SSH argument vector for Pi and for a shell, with a
   workspace path that needs quoting for the remote shell; option parsing;
   and every inactive run refused before anything launches, whether asked
@@ -375,7 +403,7 @@ with a fake VM boundary:
 ```sh
 PISAFE_LIVE_LIMA=1 go test -v ./internal/lima
 PISAFE_LIVE_LIMA=1 go test -v ./internal/runimage
-PISAFE_LIVE_LIMA=1 PISAFE_LIVE_RUN_IMAGE=sha256:9f35706d10ca0bdab7d398d225b5a4e6968dbbc5c3d81dc005a42193e1741904 \
+PISAFE_LIVE_LIMA=1 PISAFE_LIVE_RUN_IMAGE=sha256:dd0e8f0704cd7f97460607cf55b195af34c76f525e5d69e15a3c31a56575808b \
   go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
 ```
 
@@ -432,6 +460,19 @@ Verified against a real ARM64 VM:
   whole-workspace requests were refused Mac-side; a directory holding a symlink
   to `/etc/passwd` was refused naming `"linked/escape"`. The run stayed active
   and unchanged.
+- **Baseline choice**, on three scratch repositories with isolated Mac state:
+  a run carrying an uncommitted edit answered `drop` at the prompt (after one
+  unusable answer) imported `initial → agent commit → final capture` with the
+  carried-in edit absent from the branch and the agent's uncommitted work
+  present, while the run's own history kept its baseline and no replay ref
+  survived, and the source checkout stayed on `main` still dirty. A second run
+  whose commit built on the carried-in line was refused by name — `"shared.txt"`
+  — with no import branch created, the record left `stopped` and unmarked, and
+  `--keep-baseline` then importing the run's history unchanged at exactly the
+  tip the run already had. A third run with an initialized submodule dirty in
+  both repositories recorded both baselines in its manifest, reported no agent
+  work in either repository, refused `--drop-baseline` before touching the VM,
+  and printed the note instead of a prompt on the plain apply.
 - **connect**: `pisafe connect --shell` landed in `/work/connect-demo` as UID
   1000, on the run's own branch, with `pi` resolving to `/usr/local/bin/pi` and
   `pi --version` reporting 0.82.0; `pisafe connect` with no flag ran `pi`
@@ -485,8 +526,8 @@ A persistent Lima instance named `pisafe` was left running with security profile
 holding cached base/test images plus the current managed run image:
 
 ```text
-recipe digest: sha256:4c9af575787dd6f329704dc2f720628038c76442300f9e08c38d3fc62e3002d1
-image ID:      sha256:9f35706d10ca0bdab7d398d225b5a4e6968dbbc5c3d81dc005a42193e1741904
+recipe digest: sha256:214e7b0c2231cd2a1811e2cfb43cb8f0758a4b0438060953ef44106206f6b33f
+image ID:      sha256:dd0e8f0704cd7f97460607cf55b195af34c76f525e5d69e15a3c31a56575808b
 ```
 
 Each time the recipe moves, the next run rebuilds and every later run reuses it,
@@ -549,9 +590,16 @@ These explain why parts of the code look the way they do:
 - `pisafe connect` hands over the terminal and reports nothing afterwards, so a
   session that ends because the run hit its wall-clock limit looks the same as
   one the user quit.
-- The dirty-baseline prompt the design describes — keep the baseline commit and
-  everything after it, or replay only the later commits onto the captured HEAD —
-  is not implemented; apply always imports the whole run history.
+- A run whose submodule carried uncommitted work of its own can only import its
+  baseline, never replay without it: separating the two histories would mean
+  rewriting the run's commits to follow the submodule's new commit IDs.
+- The replay checks out the run's tree a second time inside run storage for the
+  duration of the rebase, so a repository large enough to fill the run's 10 GiB
+  filesystem fails the replay. It fails safely — nothing is imported and the run
+  is untouched — but the message is a disk error rather than an explanation.
+- Runs created before activation recorded submodule baselines have none in their
+  manifest, so `diff` measures their submodules from the staged head and the
+  drop would be offered where it should not be. No such run exists on this host.
 - `gc` reclaims runs and images, but the per-project caches and session stores
   the design also asks it to sweep do not exist until Phase 2.
 - Collection never reclaims an unimported run, even one a check could prove
@@ -599,12 +647,13 @@ These explain why parts of the code look the way they do:
 ## Next implementation slice
 
 Every Phase 1 command is implemented and live-verified except the record removal
-noted above. What remains is named in the design but outside that list, so the
-next slice is a choice rather than a queue:
+noted above. One thing named in the design remains outside that list:
 
-1. The dirty-baseline prompt for apply.
-2. A reproducible published image/digest workflow, freezing transitive npm
+1. A reproducible published image/digest workflow, freezing transitive npm
    resolution inside the run image.
+
+Two verification debts are also open: re-running the live `gc` sweep against a
+reclaimed run, and the firewall behaviours listed under Known gaps.
 
 Do not weaken the boundary for any of them.
 

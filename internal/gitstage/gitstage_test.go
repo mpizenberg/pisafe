@@ -106,7 +106,7 @@ func TestApplyCreatesBranchWithoutChangingCheckout(t *testing.T) {
 	mustWrite(t, filepath.Join(workspace, "tracked.txt"), "agent result\n")
 	mustWrite(t, filepath.Join(workspace, "not-imported.txt"), "needs confirmation\n")
 
-	result, err := Apply(ctx, snapshot, workspace)
+	result, err := Apply(ctx, snapshot, workspace, KeepBaseline)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestApplyCreatesBranchWithoutChangingCheckout(t *testing.T) {
 		t.Fatalf("working status changed:\nbefore %q\nafter  %q", statusBefore, statusAfter)
 	}
 
-	_, err = Apply(ctx, snapshot, workspace)
+	_, err = Apply(ctx, snapshot, workspace, KeepBaseline)
 	if !errors.Is(err, ErrBranchExists) {
 		t.Fatalf("second apply error = %v, want ErrBranchExists", err)
 	}
@@ -154,7 +154,7 @@ func TestImportRejectsTamperedApplyBundle(t *testing.T) {
 	mustWrite(t, filepath.Join(workspace, "tracked.txt"), "agent result\n")
 
 	packageDir := t.TempDir()
-	prepared, err := PrepareApply(ctx, snapshot, workspace, packageDir)
+	prepared, err := PrepareApply(ctx, snapshot, workspace, packageDir, KeepBaseline)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestImportRejectsTamperedApplyBundle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = ImportApply(ctx, snapshot, prepared, packageDir)
+	_, err = ImportApply(ctx, snapshot, prepared, packageDir, KeepBaseline)
 	if err == nil || !strings.Contains(err.Error(), "hash mismatch") {
 		t.Fatalf("ImportApply error = %v, want hash mismatch", err)
 	}

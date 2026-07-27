@@ -24,7 +24,7 @@ func TestStoreLifecycleAndList(t *testing.T) {
 		t.Fatalf("created = %#v", created)
 	}
 	now = now.Add(time.Minute)
-	active, err := store.Activate("run-one", testSSHConnection(root, "run-one"), "", testCapability(), time.Time{})
+	active, err := store.Activate("run-one", testSSHConnection(root, "run-one"), gitstage.Snapshot{}, testCapability(), time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestStoreRejectsInvalidTransitions(t *testing.T) {
 	if _, err := store.Activate(
 		"run-one",
 		testSSHConnection(root, "run-one"),
-		"",
+		gitstage.Snapshot{},
 		testCapability(),
 		time.Time{},
 	); err != nil {
@@ -130,7 +130,7 @@ func TestStoreRecordsAndClearsOperationError(t *testing.T) {
 	active, err := store.Activate(
 		"run-one",
 		testSSHConnection(store.root, "run-one"),
-		"",
+		gitstage.Snapshot{},
 		testCapability(),
 		time.Time{},
 	)
@@ -152,7 +152,7 @@ func TestStoreActivatesWithRunScopedSSHConnection(t *testing.T) {
 	active, err := store.Activate(
 		"run-one",
 		connection,
-		strings.Repeat("a", 40),
+		gitstage.Snapshot{BaselineCommit: strings.Repeat("a", 40)},
 		testCapability(),
 		time.Time{},
 	)
@@ -181,7 +181,7 @@ func TestStoreRejectsMismatchedSSHConnection(t *testing.T) {
 	}
 	if _, err := store.Activate("run-one", SSHConnection{
 		Alias: "pisafe-other",
-	}, "", testCapability(), time.Time{}); err == nil {
+	}, gitstage.Snapshot{}, testCapability(), time.Time{}); err == nil {
 		t.Fatal("mismatched SSH connection was accepted")
 	}
 }
@@ -195,7 +195,7 @@ func TestStoreRejectsInvalidMaterializedBaseline(t *testing.T) {
 	if _, err := store.Activate(
 		"run-one",
 		testSSHConnection(root, "run-one"),
-		"not-a-git-object",
+		gitstage.Snapshot{BaselineCommit: "not-a-git-object"},
 		testCapability(),
 		time.Time{},
 	); err == nil {
@@ -211,7 +211,7 @@ func TestStoreAccountsCumulativeActiveWallClock(t *testing.T) {
 	if _, err := store.Create(testManifest("run-one")); err != nil {
 		t.Fatal(err)
 	}
-	active, err := store.Activate("run-one", testSSHConnection(root, "run-one"), "", testCapability(), time.Time{})
+	active, err := store.Activate("run-one", testSSHConnection(root, "run-one"), gitstage.Snapshot{}, testCapability(), time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func TestStoreIssuesRotatesAndRevokesInferenceCapability(t *testing.T) {
 	if _, err := store.Activate(
 		"run-one",
 		testSSHConnection(root, "run-one"),
-		"",
+		gitstage.Snapshot{},
 		"not-a-capability",
 		time.Time{},
 	); err == nil {
@@ -256,7 +256,7 @@ func TestStoreIssuesRotatesAndRevokesInferenceCapability(t *testing.T) {
 	active, err := store.Activate(
 		"run-one",
 		testSSHConnection(root, "run-one"),
-		"",
+		gitstage.Snapshot{},
 		first,
 		time.Time{},
 	)
@@ -436,7 +436,7 @@ func stoppedTestRun(t *testing.T, store Store, root, runID string) Manifest {
 	if _, err := store.Activate(
 		runID,
 		testSSHConnection(root, runID),
-		"",
+		gitstage.Snapshot{},
 		testCapability(),
 		time.Time{},
 	); err != nil {
@@ -488,5 +488,67 @@ func testSSHConnection(root string, runID string) SSHConnection {
 		KnownHostsFile:     filepath.Join(root, "known_hosts"),
 		ConfigFile:         filepath.Join(root, "ssh.config"),
 		HostKeyFingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+	}
+}
+
+// Only materialization knows which repositories needed a baseline commit, so
+// activation is where the record stops describing an intention and starts
+// describing the run.
+func TestStoreRecordsMaterializedSubmoduleBaselines(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	manifest := testManifest("run-one")
+	manifest.Snapshot.Submodules = []gitstage.SubmoduleStage{
+		{Path: "dependency", Head: strings.Repeat("c", 40)},
+	}
+	if _, err := store.Create(manifest); err != nil {
+		t.Fatal(err)
+	}
+	materialized := manifest.Snapshot
+	materialized.BaselineCommit = strings.Repeat("a", 40)
+	materialized.Submodules = []gitstage.SubmoduleStage{
+		{
+			Path:           "dependency",
+			Head:           strings.Repeat("c", 40),
+			BaselineCommit: strings.Repeat("d", 40),
+		},
+	}
+	active, err := store.Activate(
+		"run-one",
+		testSSHConnection(root, "run-one"),
+		materialized,
+		testCapability(),
+		time.Time{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.Snapshot.Submodules[0].BaselineCommit != strings.Repeat("d", 40) {
+		t.Fatalf("submodules = %#v", active.Snapshot.Submodules)
+	}
+
+	// Materialization fills baselines in; it does not get to describe a
+	// different set of submodules.
+	for _, wrong := range [][]gitstage.SubmoduleStage{
+		{},
+		{{Path: "other", Head: strings.Repeat("c", 40)}},
+		{{Path: "dependency", Head: strings.Repeat("e", 40)}},
+		{{Path: "dependency", Head: strings.Repeat("c", 40), BaselineCommit: "not-a-git-object"}},
+	} {
+		store := NewStore(t.TempDir())
+		if _, err := store.Create(manifest); err != nil {
+			t.Fatal(err)
+		}
+		wrongSnapshot := manifest.Snapshot
+		wrongSnapshot.Submodules = wrong
+		if _, err := store.Activate(
+			"run-one",
+			testSSHConnection(root, "run-one"),
+			wrongSnapshot,
+			testCapability(),
+			time.Time{},
+		); err == nil {
+			t.Fatalf("activation accepted submodules %#v", wrong)
+		}
 	}
 }

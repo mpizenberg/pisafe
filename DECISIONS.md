@@ -170,6 +170,37 @@ history holds them. New entries are appended in full.
   repository with no configured identity refuses to start a run rather than
   falling back to a placeholder, which would be discovered only in the imported
   history when rewriting it is expensive.
+- The keep-or-drop question about a run's baseline commit is asked
+  interactively, unlike every other choice pisafe puts behind a flag. A run is
+  imported once and cannot be applied again, so a default would settle the
+  question for a user who never learned it was asked.
+  `--keep-baseline`/`--drop-baseline` answer it in advance for scripts and for
+  the second attempt after a conflict.
+- The replay runs `git rebase --onto` in a throwaway worktree beside the run's
+  package directory, publishes its result under `refs/pisafe/replay/<run>`, and
+  deletes that ref once the bundle is written. Rebasing the run's own branch
+  would have been simpler but destroys the alternative: an apply that then fails
+  for any other reason would leave the user with no baseline left to keep. The
+  cost is a second checkout inside run storage for the duration of the replay.
+- A replay stopped by a conflict is reported as an answer, not a failed apply:
+  the run keeps its state, no `last_error` is recorded, and the user is pointed
+  at the three ways forward the design names — keep the baseline, resolve it in
+  the run, or do nothing.
+- The drop is refused outright when a submodule carried uncommitted work of its
+  own, rather than dropping only the superproject's baseline or rewriting the
+  run's commits to follow the submodule's new commit IDs. Every superproject
+  commit records where its submodules stood, so the two histories cannot be
+  separated without rewriting one of them; a partial drop would be a silent
+  half-answer. Lifting this needs commit rewriting with a gitlink map, which is
+  additive.
+- The Mac verifies the drop instead of trusting the run's word for it: the
+  baseline commit exists only inside the run, so a source repository that knows
+  it after the fetch learned it from the bundle that just arrived, and apply
+  stops.
+- Activation records the baseline commit each submodule actually got, not just
+  the superproject's. The materialized snapshot always carried them and the
+  manifest always had the field; discarding them made `pisafe diff` report a
+  user's carried-in submodule changes as the agent's work.
 
 ## Getting work out
 

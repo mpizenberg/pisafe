@@ -27,7 +27,7 @@ func TestApplyImportsAStoppedRunAndMarksItImported(t *testing.T) {
 	controller := New(backend, store, &fakeSSHStore{}, testInference{})
 	stoppedRun(t, store, snapshot)
 
-	manifest, result, err := controller.Apply(ctx, snapshot.RunID, testImage)
+	manifest, result, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.KeepBaseline)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestApplyImportsAStoppedRunAndMarksItImported(t *testing.T) {
 	}
 
 	// An imported run is not applied twice.
-	if _, _, err := controller.Apply(ctx, snapshot.RunID, testImage); err == nil ||
+	if _, _, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.KeepBaseline); err == nil ||
 		!strings.Contains(err.Error(), "already imported") {
 		t.Fatalf("second apply error = %v", err)
 	}
@@ -82,7 +82,7 @@ func TestImportedRunStillReclaimsItsStorage(t *testing.T) {
 	controller := New(backend, store, &fakeSSHStore{}, testInference{})
 	stoppedRun(t, store, snapshot)
 
-	if _, _, err := controller.Apply(ctx, snapshot.RunID, testImage); err != nil {
+	if _, _, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.KeepBaseline); err != nil {
 		t.Fatal(err)
 	}
 	if err := controller.Discard(ctx, snapshot.RunID); err != nil {
@@ -106,7 +106,7 @@ func TestApplyMountsRunStorageBeforeCapturingIt(t *testing.T) {
 	controller := New(backend, store, &fakeSSHStore{}, testInference{})
 	stoppedRun(t, store, snapshot)
 
-	if _, _, err := controller.Apply(ctx, snapshot.RunID, testImage); err == nil ||
+	if _, _, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.KeepBaseline); err == nil ||
 		!strings.Contains(err.Error(), "verify storage") {
 		t.Fatalf("error = %v", err)
 	}
@@ -126,11 +126,11 @@ func TestApplyFinishesARecordedPlanWithoutRecapturingTheRun(t *testing.T) {
 	// Stand where an interrupted apply left off: the plan is recorded and its
 	// objects are imported, but no user-visible ref has moved.
 	packageDir := t.TempDir()
-	prepared, err := gitstage.PrepareApply(ctx, snapshot, workspace, packageDir)
+	prepared, err := gitstage.PrepareApply(ctx, snapshot, workspace, packageDir, gitstage.KeepBaseline)
 	if err != nil {
 		t.Fatal(err)
 	}
-	planned, err := gitstage.ImportApply(ctx, snapshot, prepared, packageDir)
+	planned, err := gitstage.ImportApply(ctx, snapshot, prepared, packageDir, gitstage.KeepBaseline)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestApplyFinishesARecordedPlanWithoutRecapturingTheRun(t *testing.T) {
 	// The run is gone: any attempt to capture it again must fail the test.
 	backend := &fakeBackend{failAt: "podman"}
 	controller := New(backend, store, &fakeSSHStore{}, testInference{})
-	manifest, result, err := controller.Apply(ctx, snapshot.RunID, testImage)
+	manifest, result, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.KeepBaseline)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,7 @@ func TestApplyKeepsThePlanWhenARefIsContested(t *testing.T) {
 	stoppedRun(t, store, snapshot)
 	sourceGit(t, source, "update-ref", "refs/heads/pisafe/contested-run", snapshot.SourceHead)
 
-	_, _, err := controller.Apply(ctx, snapshot.RunID, testImage)
+	_, _, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.KeepBaseline)
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("error = %v", err)
 	}
@@ -261,7 +261,7 @@ func activeRun(t *testing.T, store runstate.Store, snapshot gitstage.Snapshot) {
 		KnownHostsFile:     "/state/ssh/" + snapshot.RunID + "/known_hosts",
 		ConfigFile:         "/state/ssh/" + snapshot.RunID + "/ssh.config",
 		HostKeyFingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-	}, snapshot.BaselineCommit, capability, started); err != nil {
+	}, gitstage.Snapshot{BaselineCommit: snapshot.BaselineCommit}, capability, started); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -288,5 +288,110 @@ func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The choice about the baseline is made on the Mac and carried out inside the
+// run, so the controller has to hand it over and then check what came back.
+func TestApplyDropsTheBaselineWhenTheRunIsAskedTo(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	sourceGit(t, source, "init", "-q", "--initial-branch=main")
+	sourceGit(t, source, "config", "user.name", "Test User")
+	sourceGit(t, source, "config", "user.email", "test@example.invalid")
+	sourceGit(t, source, "config", "commit.gpgsign", "false")
+	writeFile(t, filepath.Join(source, "tracked.txt"), "initial\n")
+	sourceGit(t, source, "add", "tracked.txt")
+	sourceGit(t, source, "commit", "-qm", "initial")
+	writeFile(t, filepath.Join(source, "tracked.txt"), "carried-in edit\n")
+
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	snapshot, err := gitstage.Stage(
+		ctx,
+		gitstage.PrepareRequest{SourcePath: source, RunID: "drop-run"},
+		workspace,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.BaselineCommit == "" {
+		t.Fatal("dirty source produced no baseline commit")
+	}
+	writeFile(t, filepath.Join(workspace, "agent.txt"), "agent work\n")
+	sourceGit(t, workspace, "add", "agent.txt")
+	sourceGit(t, workspace, "commit", "-qm", "agent commit")
+
+	backend := &fakeBackend{
+		applyWorkspace: workspace,
+		applyPackage:   filepath.Join(t.TempDir(), "package"),
+	}
+	store := runstate.NewStore(t.TempDir())
+	controller := New(backend, store, &fakeSSHStore{}, testInference{})
+	stoppedRun(t, store, snapshot)
+
+	_, result, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.DropBaseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(callsString(backend.calls), "prepare-apply drop") {
+		t.Fatalf("the run was not told to drop the baseline:\n%s", callsString(backend.calls))
+	}
+	if got := sourceGit(t, source, "show", result.Branch+":tracked.txt"); got != "initial" {
+		t.Fatalf("imported tracked.txt = %q", got)
+	}
+	if got := sourceGit(t, source, "log", "--format=%s", snapshot.SourceHead+".."+result.Branch); got != "agent commit" {
+		t.Fatalf("imported commits = %q", got)
+	}
+}
+
+// A replay the run could not finish is an answer, not a broken run: nothing is
+// imported, nothing is recorded as a failure, and the run stays applicable.
+func TestApplyReportsAReplayConflictWithoutMarkingTheRunBroken(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	sourceGit(t, source, "init", "-q", "--initial-branch=main")
+	sourceGit(t, source, "config", "user.name", "Test User")
+	sourceGit(t, source, "config", "user.email", "test@example.invalid")
+	sourceGit(t, source, "config", "commit.gpgsign", "false")
+	writeFile(t, filepath.Join(source, "tracked.txt"), "initial\n")
+	sourceGit(t, source, "add", "tracked.txt")
+	sourceGit(t, source, "commit", "-qm", "initial")
+	writeFile(t, filepath.Join(source, "tracked.txt"), "carried-in edit\n")
+
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	snapshot, err := gitstage.Stage(
+		ctx,
+		gitstage.PrepareRequest{SourcePath: source, RunID: "conflict-run"},
+		workspace,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(workspace, "tracked.txt"), "carried-in edit, refined\n")
+	sourceGit(t, workspace, "commit", "-qam", "agent commit")
+
+	backend := &fakeBackend{
+		applyWorkspace: workspace,
+		applyPackage:   filepath.Join(t.TempDir(), "package"),
+	}
+	store := runstate.NewStore(t.TempDir())
+	controller := New(backend, store, &fakeSSHStore{}, testInference{})
+	stoppedRun(t, store, snapshot)
+
+	_, _, err = controller.Apply(ctx, snapshot.RunID, testImage, gitstage.DropBaseline)
+	conflict := &gitstage.BaselineReplayConflict{}
+	if !errors.As(err, &conflict) {
+		t.Fatalf("error = %v", err)
+	}
+	manifest, err := store.Get(snapshot.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.State != runstate.StateStopped || manifest.LastError != "" ||
+		manifest.Apply != nil {
+		t.Fatalf("manifest = %#v", manifest)
+	}
+	if _, _, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.KeepBaseline); err != nil {
+		t.Fatalf("keeping the baseline after a conflict: %v", err)
 	}
 }

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -135,61 +134,6 @@ func printMore(out io.Writer, shown, total int) {
 	if total > shown {
 		fmt.Fprintf(out, "    ... and %d more\n", total-shown)
 	}
-}
-
-func runApply(ctx context.Context, runID string, out io.Writer) error {
-	controller, imageID, err := prepareInspection(ctx)
-	if err != nil {
-		return err
-	}
-	manifest, result, err := controller.Apply(ctx, runID, imageID)
-	if err != nil {
-		if errors.Is(err, gitstage.ErrApplyNeedsReconciliation) {
-			return fmt.Errorf(
-				"%w\nThe recorded plan is kept: rerun pisafe apply %s once the ref is resolved",
-				err,
-				runID,
-			)
-		}
-		return err
-	}
-	printApplyResult(out, manifest, result)
-	return nil
-}
-
-func printApplyResult(out io.Writer, manifest runstate.Manifest, result gitstage.ApplyResult) {
-	fmt.Fprintf(out, "Imported:  %s\nTip:       %s\n", result.Branch, result.Tip)
-	for _, submodule := range result.Submodules {
-		if submodule.Branch == "" {
-			fmt.Fprintf(out, "Submodule: %s unchanged\n", submodule.Path)
-			continue
-		}
-		fmt.Fprintf(
-			out,
-			"Submodule: %s imported as %s (%s)\n",
-			submodule.Path,
-			submodule.Branch,
-			submodule.Tip,
-		)
-	}
-	if result.FinalCommit != "" {
-		fmt.Fprintln(out, "Final:     uncommitted tracked changes became one labelled commit")
-	}
-	if len(result.Untracked) != 0 {
-		fmt.Fprintf(
-			out,
-			"Left:      %d untracked file(s) stayed in the run\n",
-			len(result.Untracked),
-		)
-		printNames(out, namedList{names: result.Untracked})
-	}
-	fmt.Fprintf(
-		out,
-		"Next:      git log %s\n           %s keeps its workspace until pisafe discard %s\n",
-		result.Branch,
-		manifest.RunID,
-		manifest.RunID,
-	)
 }
 
 func runDiscard(ctx context.Context, runID string, out io.Writer) error {

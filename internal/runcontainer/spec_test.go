@@ -3,6 +3,8 @@ package runcontainer
 import (
 	"strings"
 	"testing"
+
+	"github.com/mpizenberg/pisafe/internal/gitstage"
 )
 
 const testImageID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -95,7 +97,7 @@ func TestStorageAndMaterializeArgsAreRunScoped(t *testing.T) {
 
 func TestPrepareApplyArgsRunWithoutNetworkOrRunHome(t *testing.T) {
 	spec := DefaultSpec("run-123", testImageID)
-	args, err := spec.PrepareApplyArgs("project")
+	args, err := spec.PrepareApplyArgs("project", gitstage.KeepBaseline)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +112,7 @@ func TestPrepareApplyArgsRunWithoutNetworkOrRunHome(t *testing.T) {
 		"--security-opt=no-new-privileges",
 		"type=bind,src=/var/lib/pisafe/runs/run-123/workspace,dst=/work,nodev,nosuid",
 		testImageID,
-		"pisafe-guest prepare-apply /work/project /work/apply",
+		"pisafe-guest prepare-apply keep /work/project /work/apply",
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Errorf("apply args lack %q:\n%s", expected, joined)
@@ -126,8 +128,11 @@ func TestPrepareApplyArgsRunWithoutNetworkOrRunHome(t *testing.T) {
 			t.Errorf("apply args unexpectedly contain %q:\n%s", forbidden, joined)
 		}
 	}
-	if _, err := spec.PrepareApplyArgs("../project"); err == nil {
+	if _, err := spec.PrepareApplyArgs("../project", gitstage.KeepBaseline); err == nil {
 		t.Fatal("unsafe project directory was accepted")
+	}
+	if _, err := spec.PrepareApplyArgs("project", "replay"); err == nil {
+		t.Fatal("unknown baseline choice was accepted")
 	}
 }
 

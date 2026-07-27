@@ -18,11 +18,11 @@ func main() {
 		syscall.SIGTERM,
 	)
 	defer stop()
-	os.Exit(run(ctx, os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
-func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if err := cli.Run(ctx, args, stdout); err != nil {
+func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if err := cli.Run(ctx, args, stdin, stdout); err != nil {
 		fmt.Fprintf(stderr, "pisafe: %v\n", err)
 		return 1
 	}

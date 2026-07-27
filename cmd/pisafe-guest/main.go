@@ -46,10 +46,10 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 		}
 		return materialize(ctx, args[1], args[2], out)
 	case "prepare-apply":
-		if len(args) != 3 {
+		if len(args) != 4 {
 			return usageError()
 		}
-		return prepareApply(ctx, args[1], args[2], in, out)
+		return prepareApply(ctx, args[1], args[2], args[3], in, out)
 	case "diff":
 		if len(args) != 2 {
 			return usageError()
@@ -93,7 +93,7 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 func usageError() error {
 	return errors.New(
 		"usage: pisafe-guest <materialize <stage-directory> <workspace>" +
-			"|prepare-apply <workspace> <package-directory>" +
+			"|prepare-apply <keep|drop> <workspace> <package-directory>" +
 			"|diff <workspace>" +
 			"|export <workspace> <path>" +
 			"|configure-ssh|configure-inference|configure-identity" +
@@ -258,11 +258,16 @@ func materialize(
 // superseded, so a failed apply can simply be retried.
 func prepareApply(
 	ctx context.Context,
+	baseline string,
 	workspacePath string,
 	packagePath string,
 	in io.Reader,
 	out io.Writer,
 ) error {
+	choice, err := gitstage.ParseBaselineChoice(baseline)
+	if err != nil {
+		return err
+	}
 	snapshot, err := decodeSnapshot(in)
 	if err != nil {
 		return err
@@ -276,6 +281,7 @@ func prepareApply(
 		snapshot,
 		filepath.Clean(workspacePath),
 		packageDirectory,
+		choice,
 	)
 	if err != nil {
 		return err

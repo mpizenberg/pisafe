@@ -149,11 +149,16 @@ func (backend *fakeBackend) Execute(
 		if snapshot.SourceRoot != "" {
 			return nil, errors.New("apply request disclosed the Mac path")
 		}
+		choice, err := gitstage.ParseBaselineChoice(args[slices.Index(args, "prepare-apply")+1])
+		if err != nil {
+			return nil, err
+		}
 		prepared, err := gitstage.PrepareApply(
 			ctx,
 			snapshot,
 			backend.applyWorkspace,
 			backend.applyPackage,
+			choice,
 		)
 		if err != nil {
 			return nil, err
@@ -690,7 +695,7 @@ func activeManifest(t *testing.T, store runstate.Store) runstate.Manifest {
 			ConfigFile:         "/state/ssh/" + spec.RunID + "/ssh.config",
 			HostKeyFingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 		},
-		strings.Repeat("b", 40),
+		gitstage.Snapshot{BaselineCommit: strings.Repeat("b", 40)},
 		"pisafe-cap-"+strings.Repeat("ab", 32),
 		time.Time{},
 	)

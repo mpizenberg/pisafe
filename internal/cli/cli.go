@@ -16,7 +16,7 @@ var errUsage = errors.New(
 	"usage: pisafe <run|connect|stop|resume|diff|cp|apply|discard|gc|list|zed|login|broker|doctor|help>",
 )
 
-func Run(ctx context.Context, args []string, out io.Writer) error {
+func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
 	if len(args) == 0 {
 		printHelp(out)
 		return nil
@@ -70,10 +70,7 @@ func Run(ctx context.Context, args []string, out io.Writer) error {
 	case "cp":
 		return runCopy(ctx, args[1:], out)
 	case "apply":
-		if len(args) != 2 {
-			return errUsage
-		}
-		return runApply(ctx, args[1], out)
+		return runApply(ctx, args[1:], in, out)
 	case "discard":
 		if len(args) != 4 || args[2] != "--confirm" {
 			return fmt.Errorf(
@@ -116,10 +113,13 @@ Usage:
                    Copy one file or directory out of a run. Only regular
                    files and directories are copied; an existing DEST is
                    replaced only with --force.
-  pisafe apply RUN
+  pisafe apply RUN [--keep-baseline|--drop-baseline]
                    Import a run's commits as the local branch pisafe/RUN.
                    The run is stopped first and cannot be resumed afterwards;
                    your checkout, index, and current branch are not touched.
+                   A run that started from an uncommitted working tree asks
+                   whether to import that commit too or replay only the run's
+                   own commits without it.
   pisafe discard RUN --confirm RUN
                    Permanently delete one exact run workspace
   pisafe gc [--dry-run]
@@ -180,15 +180,19 @@ func runList(out io.Writer) error {
 	return nil
 }
 
-// activeRun returns a run an editor or terminal can reach right now. Every
-// route into a running container needs the same three facts: the run is
-// active, its wall-clock budget is not spent, and it has an SSH endpoint.
-func activeRun(runID string) (runstate.Manifest, error) {
+func runRecord(runID string) (runstate.Manifest, error) {
 	root, err := runstate.DefaultRoot()
 	if err != nil {
 		return runstate.Manifest{}, err
 	}
-	manifest, err := runstate.NewStore(root).Get(runID)
+	return runstate.NewStore(root).Get(runID)
+}
+
+// activeRun returns a run an editor or terminal can reach right now. Every
+// route into a running container needs the same three facts: the run is
+// active, its wall-clock budget is not spent, and it has an SSH endpoint.
+func activeRun(runID string) (runstate.Manifest, error) {
+	manifest, err := runRecord(runID)
 	if err != nil {
 		return runstate.Manifest{}, err
 	}

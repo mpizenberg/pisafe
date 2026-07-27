@@ -252,7 +252,7 @@ func TestPrepareApplyCommandReportsBundlesWithoutPaths(t *testing.T) {
 	var output bytes.Buffer
 	if err := run(
 		context.Background(),
-		[]string{"prepare-apply", workspace, packageDirectory},
+		[]string{"prepare-apply", "keep", workspace, packageDirectory},
 		bytes.NewReader(snapshotJSON),
 		&output,
 	); err != nil {
@@ -295,11 +295,22 @@ func TestPrepareApplyRejectsHostPathInSnapshot(t *testing.T) {
 	}
 	err = run(
 		context.Background(),
-		[]string{"prepare-apply", t.TempDir(), filepath.Join(t.TempDir(), "apply")},
+		[]string{"prepare-apply", "keep", t.TempDir(), filepath.Join(t.TempDir(), "apply")},
 		bytes.NewReader(snapshot),
 		&bytes.Buffer{},
 	)
 	if err == nil || !strings.Contains(err.Error(), "host source path") {
+		t.Fatalf("error = %v", err)
+	}
+
+	// The baseline choice is settled before the run is even read.
+	err = run(
+		context.Background(),
+		[]string{"prepare-apply", "replay", t.TempDir(), filepath.Join(t.TempDir(), "apply")},
+		bytes.NewReader(snapshot),
+		&bytes.Buffer{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "baseline choice") {
 		t.Fatalf("error = %v", err)
 	}
 }

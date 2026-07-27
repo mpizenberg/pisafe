@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 
+	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/runcopy"
 	"github.com/mpizenberg/pisafe/internal/runid"
 )
@@ -202,7 +203,13 @@ func (spec Spec) configureArgs(command string) ([]string, error) {
 
 // PrepareApplyArgs captures a run's result in a throwaway container over the
 // run's persistent workspace.
-func (spec Spec) PrepareApplyArgs(projectDirectory string) ([]string, error) {
+func (spec Spec) PrepareApplyArgs(
+	projectDirectory string,
+	baseline gitstage.BaselineChoice,
+) ([]string, error) {
+	if _, err := gitstage.ParseBaselineChoice(string(baseline)); err != nil {
+		return nil, err
+	}
 	args, err := spec.inspectionArgs("apply", projectDirectory, "")
 	if err != nil {
 		return nil, err
@@ -210,6 +217,7 @@ func (spec Spec) PrepareApplyArgs(projectDirectory string) ([]string, error) {
 	return append(
 		args,
 		"pisafe-guest", "prepare-apply",
+		string(baseline),
 		containerWorkRoot+"/"+projectDirectory,
 		containerWorkRoot+"/"+applyPackage,
 	), nil

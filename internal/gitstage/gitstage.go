@@ -499,17 +499,19 @@ func splitNULBytes(data []byte) [][]byte {
 	return parts
 }
 
+// pisafeCommitConfig makes the commits pisafe itself writes independent of the
+// ambient Git configuration, which differs between the Mac and a run.
+var pisafeCommitConfig = []string{
+	"-c", "user.name=pisafe",
+	"-c", "user.email=pisafe@localhost.invalid",
+	"-c", "commit.gpgsign=false",
+}
+
 func commit(ctx context.Context, dir, message string) error {
-	return gitRun(
-		ctx,
-		dir,
-		nil,
-		nil,
-		"-c", "user.name=pisafe",
-		"-c", "user.email=pisafe@localhost.invalid",
-		"-c", "commit.gpgsign=false",
+	args := append(append([]string{}, pisafeCommitConfig...),
 		"commit", "--quiet", "--no-verify", "-m", message,
 	)
+	return gitRun(ctx, dir, nil, nil, args...)
 }
 
 func gitOutputBytes(ctx context.Context, dir string, args ...string) ([]byte, error) {

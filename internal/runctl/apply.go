@@ -25,6 +25,7 @@ func (controller Controller) Apply(
 	ctx context.Context,
 	runID string,
 	imageID string,
+	baseline gitstage.BaselineChoice,
 ) (runstate.Manifest, gitstage.ApplyResult, error) {
 	manifest, err := controller.store.Get(runID)
 	if err != nil {
@@ -57,8 +58,14 @@ func (controller Controller) Apply(
 		return controller.finishApply(ctx, *manifest.Apply)
 	}
 
-	planned, err := controller.importRun(ctx, manifest, imageID)
+	planned, err := controller.importRun(ctx, manifest, imageID, baseline)
 	if err != nil {
+		// A replay the run could not complete left it exactly as it was, so it
+		// is an answer to the question apply asked, not a failed apply.
+		conflict := &gitstage.BaselineReplayConflict{}
+		if errors.As(err, &conflict) {
+			return runstate.Manifest{}, gitstage.ApplyResult{}, err
+		}
 		return runstate.Manifest{}, gitstage.ApplyResult{},
 			controller.recordLifecycleError(runID, "apply", err)
 	}
@@ -101,6 +108,7 @@ func (controller Controller) importRun(
 	ctx context.Context,
 	manifest runstate.Manifest,
 	imageID string,
+	baseline gitstage.BaselineChoice,
 ) (gitstage.PlannedApply, error) {
 	// A run's storage is mounted per VM boot, not per run, so a VM that
 	// restarted between the run and its apply presents an empty run root.
@@ -109,7 +117,7 @@ func (controller Controller) importRun(
 	}
 	spec := runcontainer.DefaultSpec(manifest.RunID, imageID)
 	spec.WallSeconds = manifest.ActiveLimitSeconds
-	args, err := spec.PrepareApplyArgs(manifest.Project)
+	args, err := spec.PrepareApplyArgs(manifest.Project, baseline)
 	if err != nil {
 		return gitstage.PlannedApply{}, err
 	}
@@ -147,7 +155,7 @@ func (controller Controller) importRun(
 		}
 	}
 
-	planned, err := gitstage.ImportApply(ctx, manifest.Snapshot, prepared, packageDir)
+	planned, err := gitstage.ImportApply(ctx, manifest.Snapshot, prepared, packageDir, baseline)
 	if err != nil {
 		return gitstage.PlannedApply{}, err
 	}
