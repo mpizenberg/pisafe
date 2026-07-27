@@ -133,17 +133,16 @@ quota-backed VM storage. Do not add a local-workspace fallback.
   symlink cannot redirect the copy. An impossible destination is refused before
   the run is asked to produce anything.
 - `pisafe gc [--dry-run]` applies the seven-day retention window. An imported
-  run past it is expired: its container, storage, VM stage, and Mac-side SSH
-  key are reclaimed through the same idempotent path discard uses, and the
-  record keeps its branch and import timestamps. A discarded record naming no
-  branch is removed after the same week; one naming a branch is kept
-  indefinitely, so a `pisafe/<run>` branch never outlives its attribution.
+  run past it is reclaimed: its container, storage, VM stage, Mac-side SSH key,
+  and durable record all go through the same idempotent path discard uses. The
+  record is not kept, because the `pisafe/<run>` branch already names the run
+  that produced it.
 - Age alone never removes work that was never imported. A `creating`, `active`,
   or `stopped` run past the window is reported with the reason and left exactly
   as it was; `pisafe discard` remains the only way to release it.
-- Retention is measured from the timestamp of the event that finished the run —
-  `imported_at` or `discarded_at` — not from creation or last update, so a run
-  resumed for a month is never near expiry.
+- Retention is measured from `imported_at`, the timestamp of the event that
+  finished the run, not from creation or last update, so a run resumed for a
+  month is never near reclamation.
 - `gc` prunes superseded managed run images. The current recipe's image is
   recognized by the recipe label the image carries rather than by resolving the
   recipe's ID first, so a failed lookup can never be mistaken for a recipe with
@@ -153,9 +152,9 @@ quota-backed VM storage. Do not add a local-workspace fallback.
 - `--dry-run` reports the same sweep without removing anything, and a plan that
   cannot be built stops collection entirely rather than pruning against an
   incomplete keep set.
-- Discard reclaims a run from every state that still owns resources, including
-  `imported`. An imported run keeps its workspace, its 10 GiB filesystem, and
-  its audit record of where it was imported until it is discarded.
+- Discard reclaims a run from any state, including `imported`, and removes its
+  record with it. An imported run keeps its workspace and its 10 GiB filesystem
+  until discard or the retention window reclaims it.
 - A run commits as its user. `pisafe run` resolves the identity Git would use
   in the source repository, so repository-local and conditional configuration
   wins exactly as it does outside a run, and installs it once in the run's own
@@ -340,10 +339,10 @@ quota-backed VM storage. Do not add a local-workspace fallback.
   the Mac; runs authenticate with a `pisafe-cap-<64 hex>` capability minted
   from 32 bytes of `crypto/rand`.
 - Capabilities live only in the version-4 manifest: activation and resume
-  require a fresh one, stop and discard clear it, and a stored manifest is
-  invalid if an inactive state retains one. The broker re-reads the durable
-  records on every request, so a stopped, discarded, or wall-clock-exhausted
-  run is rejected immediately with the same uniform 401. Matching is
+  require a fresh one, stop clears it, and a stored manifest is invalid if an
+  inactive state retains one. The broker re-reads the durable records on every
+  request, so a run that has stopped, been reclaimed, or exhausted its
+  wall clock is rejected immediately with the same uniform 401. Matching is
   constant-time over SHA-256 digests.
 - The relay accepts exactly one method and path derived from the configured
   API (`POST /v1/messages`, `/v1/chat/completions`, `/v1/responses`, or
@@ -403,8 +402,10 @@ quota-backed VM storage. Do not add a local-workspace fallback.
 
 - `internal/runstate` writes version-4, mode-0600 JSON manifests atomically
   under the user config directory (or `PISAFE_STATE_DIR`).
-- It enforces `creating → active → stopped → active|imported|discarded|expired`,
-  and binds one inference capability to exactly the active state.
+- It enforces `creating → active → stopped → active|imported`, and binds one
+  inference capability to exactly the active state. There is no terminal state:
+  reclaiming a run removes its record, and only an active run's record is
+  refused, because it is the one route back to a running container.
 - Failed creation remains visibly `creating` with `last_error`; it is not
   silently deleted or mislabeled active.
 - `internal/runctl.StartPrepared` composes stage upload, private-storage import,
@@ -463,18 +464,18 @@ pisafe        0.0%
 pisafe-guest  64.1%
 broker        96.2%
 chatgpt       70.1%
-cli           36.3%
+cli           36.1%
 gitstage      78.8%
 hostnet       50.0%
 lima          67.0%
 runcontainer  72.6%
 runcopy       80.3%
-runctl        69.3%
+runctl        70.1%
 runid         92.3%
 runimage      76.8%
 runssh        68.0%
 runstart      80.9%
-runstate      74.8%
+runstate      74.4%
 ```
 
 The broker contract is covered directly: capability auth against durable
@@ -535,14 +536,13 @@ are covered, including quoting names a run chose.
 
 Collection is covered end to end against real repositories with a fake VM
 boundary: an imported run inside the window is untouched, the same run past it
-is expired with its container, storage, stage, and SSH key reclaimed and its
-branch and import timestamp intact, and reading its workspace afterwards is
-refused; a run whose work was never imported is only reported, whatever its
-age, keeps the image it can still start from, and sees no backend call at all;
-an old discarded record that attributes nothing is removed while one naming a
-branch survives. The store's own tests cover both transitions directly:
-expiry is refused from any state but imported and cannot happen twice, and a
-record is forgotten only when it is discarded and names no branch. Image
+is reclaimed with its container, storage, stage, SSH key, and record all gone,
+and every command that would read its workspace then refuses it as unknown; a
+run whose work was never imported is only reported, whatever its age, keeps the
+image it can still start from, and sees no backend call at all; a discarded run
+leaves a later sweep nothing to find. The store's own test covers the removal
+directly: a reclaimed record is deleted, disappears from listings, cannot be
+deleted twice, and an active run's record is refused. Image
 pruning is covered for the label filter, the bare hex ID Podman reports, an
 unlabelled image that must survive, the current recipe recognized by label
 without any lookup, a missing recipe digest refused, and an image still in use
@@ -729,20 +729,22 @@ directory, by aging the exact timestamps the retention policy reads:
 
 - a freshly imported run reported `Nothing to collect.`;
 - with `imported_at` moved back eight days, `--dry-run` named it and changed
-  nothing, and the sweep then expired it: no `pisafe-*` mount, loop device,
+  nothing, and the sweep then reclaimed it: no `pisafe-*` mount, loop device,
   container, or VM stage directory survived, the Mac-side SSH key directory was
-  empty, and the record read `expired` with its branch and import timestamp
-  intact while the `pisafe/<run>` branch still held the agent's commit;
-- `diff`, `cp`, and `resume` on that expired run were each refused by state
-  before touching the VM;
+  empty, and the `pisafe/<run>` branch still held the agent's commit;
+- `diff`, `cp`, and `resume` on that reclaimed run were each refused before
+  touching the VM;
 - a stopped run aged thirty days was reported as kept, not touched; its
   filesystem was still mounted afterwards and it resumed cleanly with its
   workspace intact;
-- discarding it and aging `discarded_at` nine days removed its record, while
-  the expired run's record, discarded and aged four hundred days, was still
-  kept because it names an imported branch; and
+- discarding a run removed everything it owned; and
 - the image sweep pruned exactly the six superseded managed images, keeping the
   current recipe's image and both unlabelled base images.
+
+That sweep ran when a reclaimed run still left an `expired` or `discarded`
+record behind. Removing the record instead changes only what the Mac writes
+after the VM-side reclamation the run above verified, and is covered by unit
+tests; the live sweep has not been re-run since.
 
 The dry run caught a defect before anything was removed: it proposed pruning
 the current image. The cause was that the current image was found by resolving
@@ -886,10 +888,13 @@ sandboxed result.
 - `pisafe gc` reclaims runs and images. The design also asks it to report or
   prune long-unused per-project caches and session stores; those do not exist
   until Phase 2 introduces persistence, so there is nothing yet to sweep.
-- Collection never expires an unimported run, even one a check could prove
+- Collection never reclaims an unimported run, even one a check could prove
   holds no commits, because `diff` sees the repository but not the run's home
   directory. Old stopped runs are reported and must be discarded explicitly, so
   their 10 GiB filesystems are reclaimed on the user's schedule, not by age.
+- A run leaves no record once it is reclaimed, so `pisafe list` shows only runs
+  that still own something. Which runs existed and when they were imported is
+  answerable from the `pisafe/<run>` branches and the reflog, not from pisafe.
 - Retention is measured against the Mac's clock with no grace for a manifest
   whose timestamps are in the future; such a record is simply never collected.
 - `pisafe cp` refuses any symlink rather than recreating one that stays inside
@@ -945,9 +950,9 @@ sandboxed result.
 ## Next implementation slice
 
 Every command the design enumerates for Phase 1 — run listing, resume, diff,
-apply, cp, discard, and seven-day GC — is now implemented and live-verified.
-What remains is named in the design but outside that list, so the next slice is
-a choice rather than a queue:
+apply, cp, discard, and seven-day GC — is now implemented, and live-verified
+except for the record removal noted above. What remains is named in the design
+but outside that list, so the next slice is a choice rather than a queue:
 
 1. `pisafe connect <run>`: resume Pi or open a shell in a run, the one
    supporting command in the design still missing.

@@ -11,7 +11,7 @@ import (
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
-func TestCollectExpiresAnImportedRunAndKeepsItsAttribution(t *testing.T) {
+func TestCollectReclaimsAnImportedRunRecordAndAll(t *testing.T) {
 	ctx := context.Background()
 	backend, store, controller, snapshot := importedRun(t, "gc-imported")
 	now := time.Now().UTC()
@@ -29,7 +29,7 @@ func TestCollectExpiresAnImportedRunAndKeepsItsAttribution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.Expired) != 1 || plan.Expired[0] != snapshot.RunID {
+	if len(plan.Reclaimed) != 1 || plan.Reclaimed[0] != snapshot.RunID {
 		t.Fatalf("plan = %#v", plan)
 	}
 	// An imported run cannot start a container, so it pins no image.
@@ -42,30 +42,24 @@ func TestCollectExpiresAnImportedRunAndKeepsItsAttribution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(done.Expired) != 1 || done.Expired[0] != snapshot.RunID {
+	if len(done.Reclaimed) != 1 || done.Reclaimed[0] != snapshot.RunID {
 		t.Fatalf("done = %#v", done)
 	}
 	reclaimed := callsString(backend.calls[before:])
 	for _, expected := range []string{"remove-storage", "remove-stage"} {
 		if !strings.Contains(reclaimed, expected) {
-			t.Errorf("expiry did not %s:\n%s", expected, reclaimed)
+			t.Errorf("collection did not %s:\n%s", expected, reclaimed)
 		}
 	}
 
-	manifest, err := store.Get(snapshot.RunID)
-	if err != nil {
-		t.Fatal(err)
+	// Nothing of the run is left to name, so every command refuses it before
+	// reaching the VM.
+	if _, err := store.Get(snapshot.RunID); err == nil {
+		t.Fatal("a reclaimed run kept its record")
 	}
-	if manifest.State != runstate.StateExpired {
-		t.Fatalf("state = %q", manifest.State)
-	}
-	if manifest.ImportedBranch != "pisafe/gc-imported" || manifest.ImportedAt == nil {
-		t.Fatalf("expired run lost its attribution: %#v", manifest)
-	}
-	// The workspace is gone, so reading it is refused rather than attempted.
 	if _, err := controller.Diff(ctx, snapshot.RunID, testImage); err == nil ||
-		!strings.Contains(err.Error(), "expired") {
-		t.Fatalf("diff of an expired run = %v", err)
+		!strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("diff of a reclaimed run = %v", err)
 	}
 }
 
@@ -109,47 +103,23 @@ func TestCollectNeverRemovesWorkThatWasNeverImported(t *testing.T) {
 	}
 }
 
-func TestCollectForgetsOldRecordsThatAttributeNothing(t *testing.T) {
+// A discarded run leaves nothing behind, so no later sweep has anything to
+// find: collection sees only what discard did not already release.
+func TestCollectHasNothingLeftToDoAfterDiscard(t *testing.T) {
 	ctx := context.Background()
-	_, store, controller, snapshot := importedRun(t, "gc-attributed")
-	if _, err := controller.Discard(ctx, snapshot.RunID); err != nil {
+	_, store, controller, snapshot := importedRun(t, "gc-discarded")
+	if err := controller.Discard(ctx, snapshot.RunID); err != nil {
 		t.Fatal(err)
 	}
-
-	plain := gitstage.Snapshot{
-		RunID:   "gc-plain",
-		WorkRef: "refs/heads/work/gc-plain",
+	if _, err := store.Get(snapshot.RunID); err == nil {
+		t.Fatal("a discarded run kept its record")
 	}
-	activeRun(t, store, plain)
-	if _, err := controller.Discard(ctx, plain.RunID); err != nil {
-		t.Fatal(err)
-	}
-
-	plan, err := controller.Plan(time.Now().UTC().Add(Retention + time.Hour))
+	plan, err := controller.Plan(time.Now().UTC().Add(10 * Retention))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.Forgotten) != 1 || plan.Forgotten[0] != plain.RunID {
+	if !plan.Empty() || len(plan.Kept) != 0 {
 		t.Fatalf("plan = %#v", plan)
-	}
-	done, err := controller.Collect(ctx, plan)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(done.Forgotten) != 1 {
-		t.Fatalf("done = %#v", done)
-	}
-	if _, err := store.Get(plain.RunID); err == nil {
-		t.Fatal("a forgotten record survived")
-	}
-	// The branch this run produced still names it, a week after its
-	// workspace was reclaimed.
-	attributed, err := store.Get(snapshot.RunID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if attributed.ImportedBranch != "pisafe/gc-attributed" {
-		t.Fatalf("attributed = %#v", attributed)
 	}
 }
 

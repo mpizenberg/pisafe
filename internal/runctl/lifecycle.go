@@ -166,43 +166,37 @@ func (controller Controller) Resume(
 	return resumed, nil
 }
 
-func (controller Controller) Discard(
-	ctx context.Context,
-	runID string,
-) (runstate.Manifest, error) {
+// Discard reclaims a run at the user's request. An active run is stopped first
+// so its elapsed time is accounted before the container goes.
+func (controller Controller) Discard(ctx context.Context, runID string) error {
 	manifest, err := controller.store.Get(runID)
 	if err != nil {
-		return runstate.Manifest{}, err
-	}
-	if manifest.State == runstate.StateDiscarded {
-		return manifest, nil
+		return err
 	}
 	if manifest.State == runstate.StateActive {
 		manifest, err = controller.Stop(ctx, runID)
 		if err != nil {
-			return runstate.Manifest{}, err
+			return err
 		}
 	}
-	if !runstate.Discardable(manifest.State) {
-		return runstate.Manifest{}, fmt.Errorf(
-			"run %q is %s and cannot be discarded",
-			runID,
-			manifest.State,
-		)
-	}
+	return controller.release(ctx, manifest, "discard")
+}
 
+// release reclaims what a run owns and then removes its record. The record
+// outlives the resources only while reclamation is incomplete, so a failure
+// always leaves something to retry against.
+func (controller Controller) release(
+	ctx context.Context,
+	manifest runstate.Manifest,
+	operation string,
+) error {
 	if err := controller.reclaim(ctx, manifest); err != nil {
-		return runstate.Manifest{}, controller.recordLifecycleError(runID, "discard", err)
+		return controller.recordLifecycleError(manifest.RunID, operation, err)
 	}
-	discarded, err := controller.store.Discard(runID)
-	if err != nil {
-		return runstate.Manifest{}, controller.recordLifecycleError(
-			runID,
-			"record discard",
-			err,
-		)
+	if err := controller.store.Forget(manifest.RunID); err != nil {
+		return controller.recordLifecycleError(manifest.RunID, "record "+operation, err)
 	}
-	return discarded, nil
+	return nil
 }
 
 // reclaim removes everything a run still owns, in the VM and on the Mac. Every

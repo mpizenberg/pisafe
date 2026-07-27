@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
@@ -107,16 +108,22 @@ func TestCopyOutRefusesEscapingPathsAndRunsWithNoWorkspace(t *testing.T) {
 		t.Fatalf("an unsafe copy reached the run: %#v", backend.calls)
 	}
 
-	if _, err := controller.Discard(ctx, snapshot.RunID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := controller.CopyOut(ctx, CopyRequest{
-		RunID:       snapshot.RunID,
-		ImageID:     testImage,
-		Path:        "dist",
-		Destination: filepath.Join(t.TempDir(), "out"),
-	}); err == nil || !strings.Contains(err.Error(), "no workspace to copy from") {
-		t.Fatalf("err = %v", err)
+	// A run whose creation never finished has nothing to copy out of, and a
+	// reclaimed one has no record to name at all.
+	unfinished := gitstage.Snapshot{RunID: "unfinished-copy-run", WorkRef: "refs/heads/work/unfinished"}
+	creatingRun(t, store, unfinished)
+	for runID, expected := range map[string]string{
+		unfinished.RunID:         "no workspace to copy from",
+		snapshot.RunID + "-gone": "does not exist",
+	} {
+		if _, err := controller.CopyOut(ctx, CopyRequest{
+			RunID:       runID,
+			ImageID:     testImage,
+			Path:        "dist",
+			Destination: filepath.Join(t.TempDir(), "out"),
+		}); err == nil || !strings.Contains(err.Error(), expected) {
+			t.Fatalf("copy out of %s = %v", runID, err)
+		}
 	}
 }
 

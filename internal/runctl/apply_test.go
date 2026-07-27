@@ -85,16 +85,11 @@ func TestImportedRunStillReclaimsItsStorage(t *testing.T) {
 	if _, _, err := controller.Apply(ctx, snapshot.RunID, testImage); err != nil {
 		t.Fatal(err)
 	}
-	discarded, err := controller.Discard(ctx, snapshot.RunID)
-	if err != nil {
+	if err := controller.Discard(ctx, snapshot.RunID); err != nil {
 		t.Fatal(err)
 	}
-	if discarded.State != runstate.StateDiscarded {
-		t.Fatalf("state = %q", discarded.State)
-	}
-	// The audit record keeps saying where the run went.
-	if discarded.ImportedBranch != "pisafe/reclaimed-run" {
-		t.Fatalf("discarded run forgot its imported branch: %#v", discarded)
+	if _, err := store.Get(snapshot.RunID); err == nil {
+		t.Fatal("a discarded run kept its record")
 	}
 	if joined := callsString(backend.calls); !strings.Contains(joined, "remove-storage") {
 		t.Fatalf("discard did not reclaim run storage:\n%s", joined)
@@ -237,7 +232,7 @@ func stoppedRun(t *testing.T, store runstate.Store, snapshot gitstage.Snapshot) 
 	}
 }
 
-func activeRun(t *testing.T, store runstate.Store, snapshot gitstage.Snapshot) {
+func creatingRun(t *testing.T, store runstate.Store, snapshot gitstage.Snapshot) {
 	t.Helper()
 	if _, err := store.Create(runstate.Manifest{
 		RunID:              snapshot.RunID,
@@ -250,6 +245,11 @@ func activeRun(t *testing.T, store runstate.Store, snapshot gitstage.Snapshot) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func activeRun(t *testing.T, store runstate.Store, snapshot gitstage.Snapshot) {
+	t.Helper()
+	creatingRun(t, store, snapshot)
 	capability, err := runstate.NewInferenceCapability()
 	if err != nil {
 		t.Fatal(err)

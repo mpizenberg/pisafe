@@ -40,8 +40,6 @@ type StateStore interface {
 	List() ([]runstate.Manifest, error)
 	Stop(string, time.Time) (runstate.Manifest, error)
 	Resume(string, string, time.Time) (runstate.Manifest, error)
-	Discard(string) (runstate.Manifest, error)
-	Expire(string) (runstate.Manifest, error)
 	Forget(string) error
 	BeginApply(string, gitstage.PlannedApply) (runstate.Manifest, error)
 	CompleteApply(string) (runstate.Manifest, error)

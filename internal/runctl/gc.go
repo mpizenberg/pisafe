@@ -3,25 +3,21 @@ package runctl
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
-// Retention is how long a finished run is kept. It starts when the run
-// finished, not when it was created, so a run resumed for a month is never
-// close to expiry.
+// Retention is how long an imported run is kept. It starts when the run was
+// imported, not when it was created, so a run resumed for a month is never
+// close to being reclaimed.
 const Retention = 7 * 24 * time.Hour
 
 // GCPlan is what collection would do, and afterwards what it did.
 type GCPlan struct {
-	// Expired are imported runs whose workspace the retention window
-	// released. Their branch and import record survive.
-	Expired []string
-	// Forgotten are discarded runs whose record no longer attributes
-	// anything and is removed outright.
-	Forgotten []string
+	// Reclaimed are imported runs the retention window released, workspace
+	// and record together. Their commits stay on the pisafe/<run> branch.
+	Reclaimed []string
 	// Kept are runs collection deliberately leaves alone, each with the
 	// reason a user needs in order to act on it.
 	Kept []KeptRun
@@ -31,7 +27,7 @@ type GCPlan struct {
 }
 
 func (plan GCPlan) Empty() bool {
-	return len(plan.Expired) == 0 && len(plan.Forgotten) == 0
+	return len(plan.Reclaimed) == 0
 }
 
 type KeptRun struct {
@@ -51,14 +47,10 @@ func (controller Controller) Plan(now time.Time) (GCPlan, error) {
 	for _, manifest := range manifests {
 		switch manifest.State {
 		case runstate.StateImported:
+			// An imported run cannot resume, so it pins no image; the commands
+			// that still read its workspace run the current one instead.
 			if manifest.ImportedAt != nil && now.Sub(*manifest.ImportedAt) >= Retention {
-				plan.Expired = append(plan.Expired, manifest.RunID)
-			}
-		case runstate.StateDiscarded:
-			if manifest.ImportedBranch == "" &&
-				manifest.DiscardedAt != nil &&
-				now.Sub(*manifest.DiscardedAt) >= Retention {
-				plan.Forgotten = append(plan.Forgotten, manifest.RunID)
+				plan.Reclaimed = append(plan.Reclaimed, manifest.RunID)
 			}
 		case runstate.StateCreating, runstate.StateActive, runstate.StateStopped:
 			// A run whose work was never imported is never removed by age.
@@ -90,31 +82,17 @@ func keptReason(state runstate.State) string {
 func (controller Controller) Collect(ctx context.Context, plan GCPlan) (GCPlan, error) {
 	done := GCPlan{Kept: plan.Kept, KeepImages: plan.KeepImages}
 	var failures []error
-	for _, runID := range plan.Expired {
+	for _, runID := range plan.Reclaimed {
 		manifest, err := controller.store.Get(runID)
 		if err != nil {
 			failures = append(failures, err)
 			continue
 		}
-		if err := controller.reclaim(ctx, manifest); err != nil {
-			failures = append(failures, controller.recordLifecycleError(runID, "expire", err))
+		if err := controller.release(ctx, manifest, "collect"); err != nil {
+			failures = append(failures, err)
 			continue
 		}
-		if _, err := controller.store.Expire(runID); err != nil {
-			failures = append(
-				failures,
-				controller.recordLifecycleError(runID, "record expiry", err),
-			)
-			continue
-		}
-		done.Expired = append(done.Expired, runID)
-	}
-	for _, runID := range plan.Forgotten {
-		if err := controller.store.Forget(runID); err != nil {
-			failures = append(failures, fmt.Errorf("forget run %q: %w", runID, err))
-			continue
-		}
-		done.Forgotten = append(done.Forgotten, runID)
+		done.Reclaimed = append(done.Reclaimed, runID)
 	}
 	return done, errors.Join(failures...)
 }

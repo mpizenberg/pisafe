@@ -71,7 +71,8 @@ container, streams the verified bundles back, and creates `pisafe/RUN` in the
 superproject and each changed submodule without touching the checkout. It is
 live-validated against a run whose commits, submodule commit, uncommitted
 changes, and untracked leftovers all landed exactly where the design says.
-An imported run keeps its workspace until `pisafe discard` reclaims it.
+An imported run keeps its workspace until `pisafe discard` or the seven-day
+retention window reclaims it.
 `pisafe diff RUN` reports the run's commits, changed paths with line counts,
 and untracked leftovers from a throwaway container holding the workspace
 read-only, so it works on an active, stopped, or imported run without
@@ -85,14 +86,12 @@ escape, and the copy lands beside the destination and is moved into place only
 once it has all arrived. An existing destination is replaced only with
 `--force`, and is removed rather than written through.
 `pisafe gc [--dry-run]` reclaims what the seven-day retention window released:
-an imported run's workspace, storage, and SSH key are removed and its record
-becomes `expired` while keeping the branch and import timestamps, so a
-`pisafe/RUN` branch stays attributable long after its workspace is gone. A
-discarded record that names no branch is removed after the same week; one that
-names a branch is kept indefinitely. A run whose work was never imported is
-only reported, never reclaimed by age — `pisafe discard` remains the way to
-release it. Superseded managed run images are pruned, keeping the current
-recipe's image and any image a run can still start a container from.
+an imported run's workspace, storage, SSH key, and record all go together. What
+the run produced stays in the repository on its `pisafe/RUN` branch, which
+names the run without needing a record to say so. A run whose work was never
+imported is only reported, never reclaimed by age — `pisafe discard` remains
+the way to release it. Superseded managed run images are pruned, keeping the
+current recipe's image and any image a run can still start a container from.
 `pisafe broker` relays inference from the Mac into runs over a reverse SSH
 forward to `192.0.2.1:18080`, the firewall's single static exception; runs
 hold only a revocable per-run capability, never a provider credential.

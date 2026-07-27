@@ -118,9 +118,10 @@ Usage:
   pisafe discard RUN --confirm RUN
                    Permanently delete one exact run workspace
   pisafe gc [--dry-run]
-                   Reclaim runs finished more than seven days ago and prune
-                   superseded run images. A run whose work was never imported
-                   is only reported; discard it explicitly.
+                   Reclaim imported runs older than seven days and prune
+                   superseded run images. Their pisafe/RUN branches keep the
+                   work. A run whose work was never imported is only reported;
+                   discard it explicitly.
   pisafe zed RUN   Open a configured run in Zed
   pisafe login chatgpt
                    Store a ChatGPT subscription login in the macOS Keychain

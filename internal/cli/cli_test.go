@@ -327,8 +327,7 @@ func TestParseInputSelectionSeparatesUnsafeApproval(t *testing.T) {
 
 func TestPrintCollectionSeparatesWhatWasDoneFromWhatWasKept(t *testing.T) {
 	plan := runctl.GCPlan{
-		Expired:   []string{"run-imported"},
-		Forgotten: []string{"run-discarded"},
+		Reclaimed: []string{"run-imported"},
 		Kept: []runctl.KeptRun{{
 			RunID:  "run-stopped",
 			Reason: "stopped with work that was never imported",
@@ -337,11 +336,9 @@ func TestPrintCollectionSeparatesWhatWasDoneFromWhatWasKept(t *testing.T) {
 	var done bytes.Buffer
 	printCollection(&done, plan, []string{"sha256:abc"}, false)
 	for _, expected := range []string{
-		"Expired:",
+		"Reclaimed:",
 		"run-imported",
-		"branch and import record kept",
-		"Forgot:",
-		"run-discarded",
+		"pisafe/RUN branches keep the work",
 		"Pruned:",
 		"sha256:abc",
 		"Kept:",
@@ -355,12 +352,12 @@ func TestPrintCollectionSeparatesWhatWasDoneFromWhatWasKept(t *testing.T) {
 	// A preview must never read as though anything was removed.
 	var preview bytes.Buffer
 	printCollection(&preview, plan, []string{"sha256:abc"}, true)
-	for _, expected := range []string{"Would expire:", "Would forget:", "Would prune:"} {
+	for _, expected := range []string{"Would reclaim:", "Would prune:"} {
 		if !strings.Contains(preview.String(), expected) {
 			t.Errorf("dry-run output lacks %q:\n%s", expected, preview.String())
 		}
 	}
-	for _, unexpected := range []string{"Expired:", "Forgot:", "Pruned:"} {
+	for _, unexpected := range []string{"Reclaimed:", "Pruned:"} {
 		if strings.Contains(preview.String(), unexpected) {
 			t.Errorf("dry-run output claims %q:\n%s", unexpected, preview.String())
 		}

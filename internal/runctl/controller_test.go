@@ -532,12 +532,14 @@ func TestDiscardCleansActiveAndFailedCreatingRuns(t *testing.T) {
 			}
 			ssh := &fakeSSHStore{}
 			controller := New(backend, store, ssh, testInference{})
-			discarded, err := controller.Discard(context.Background(), manifest.RunID)
-			if err != nil {
+			if err := controller.Discard(context.Background(), manifest.RunID); err != nil {
 				t.Fatal(err)
 			}
-			if discarded.State != runstate.StateDiscarded || !ssh.removed {
-				t.Fatalf("discarded = %#v, SSH removed = %t", discarded, ssh.removed)
+			if _, err := store.Get(manifest.RunID); err == nil {
+				t.Fatal("a discarded run kept its record")
+			}
+			if !ssh.removed {
+				t.Fatal("discard left the SSH key behind")
 			}
 			joined := callsString(backend.calls)
 			for _, expected := range []string{"remove-storage", "remove-stage"} {

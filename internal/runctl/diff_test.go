@@ -71,20 +71,27 @@ func TestDiffMountsRunStorageBeforeReadingIt(t *testing.T) {
 	}
 }
 
-func TestDiffRefusesARunWithNoWorkspaceLeft(t *testing.T) {
+func TestDiffRefusesARunWithNoWorkspace(t *testing.T) {
 	ctx := context.Background()
-	_, workspace, snapshot := applyFixture(t, "discarded-diff-run")
+	_, workspace, snapshot := applyFixture(t, "unfinished-diff-run")
 
 	backend := &fakeBackend{applyWorkspace: workspace}
 	store := runstate.NewStore(t.TempDir())
 	controller := New(backend, store, &fakeSSHStore{}, testInference{})
-	stoppedRun(t, store, snapshot)
-	if _, err := controller.Discard(ctx, snapshot.RunID); err != nil {
-		t.Fatal(err)
-	}
+	creatingRun(t, store, snapshot)
 
-	if _, err := controller.Diff(ctx, snapshot.RunID, testImage); err == nil ||
-		!strings.Contains(err.Error(), "no workspace to compare") {
-		t.Fatalf("error = %v", err)
+	// Creation never finished here, and a reclaimed run has no record at all.
+	// Neither reaches the VM.
+	for runID, expected := range map[string]string{
+		snapshot.RunID:           "no workspace to compare",
+		snapshot.RunID + "-gone": "does not exist",
+	} {
+		if _, err := controller.Diff(ctx, runID, testImage); err == nil ||
+			!strings.Contains(err.Error(), expected) {
+			t.Fatalf("diff of %s = %v", runID, err)
+		}
+	}
+	if len(backend.calls) != 0 {
+		t.Fatalf("a refused diff reached the run: %#v", backend.calls)
 	}
 }

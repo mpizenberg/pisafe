@@ -79,8 +79,8 @@ func TestStoreRejectsInvalidTransitions(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Discard("run-one"); err == nil ||
-		!strings.Contains(err.Error(), "invalid run transition") {
+	if _, err := store.BeginApply("run-one", testApplyPlan("run-one", root)); err == nil ||
+		!strings.Contains(err.Error(), "not stopped") {
 		t.Fatalf("error = %v", err)
 	}
 	if _, err := store.Resume("run-one", testCapability(), time.Now()); err == nil {
@@ -281,15 +281,12 @@ func TestStoreIssuesRotatesAndRevokesInferenceCapability(t *testing.T) {
 	if resumed.InferenceCapability != second {
 		t.Fatalf("resumed capability = %q", resumed.InferenceCapability)
 	}
-	if _, err := store.Stop("run-one", time.Time{}); err != nil {
-		t.Fatal(err)
-	}
-	discarded, err := store.Discard("run-one")
+	restopped, err := store.Stop("run-one", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if discarded.InferenceCapability != "" {
-		t.Fatal("discarded run retained its inference capability")
+	if restopped.InferenceCapability != "" {
+		t.Fatal("restopped run retained its inference capability")
 	}
 }
 
@@ -389,85 +386,41 @@ func TestStoreRejectsApplyPlansItCannotReplaySafely(t *testing.T) {
 	}
 }
 
-func TestStoreExpiresOnlyImportedRunsAndKeepsTheirAttribution(t *testing.T) {
+func TestStoreForgetsAReclaimedRunButNeverALiveOne(t *testing.T) {
 	root := t.TempDir()
 	store := NewStore(root)
-	stoppedTestRun(t, store, root, "run-expire")
+	stoppedTestRun(t, store, root, "run-live")
+	stoppedTestRun(t, store, root, "run-gone")
 
-	// Work that was never imported cannot be expired at all.
-	if _, err := store.Expire("run-expire"); err == nil ||
-		!strings.Contains(err.Error(), "invalid run transition") {
-		t.Fatalf("expiry of a stopped run = %v", err)
-	}
-
-	if _, err := store.BeginApply("run-expire", testApplyPlan("run-expire", root)); err != nil {
+	if _, err := store.Resume("run-live", testCapability(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	imported, err := store.CompleteApply("run-expire")
-	if err != nil {
-		t.Fatal(err)
-	}
-	expired, err := store.Expire("run-expire")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if expired.State != StateExpired {
-		t.Fatalf("expired = %#v", expired)
-	}
-	// The workspace is gone but the branch must still name the run it came
-	// from, so both import fields survive a fresh read.
-	reread, err := store.Get("run-expire")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reread.ImportedBranch != "pisafe/run-expire" ||
-		reread.ImportedAt == nil ||
-		!reread.ImportedAt.Equal(*imported.ImportedAt) {
-		t.Fatalf("reread = %#v", reread)
-	}
-	if _, err := store.Expire("run-expire"); err == nil {
-		t.Fatal("a run expired twice")
-	}
-}
-
-func TestStoreForgetsOnlyRecordsThatAttributeNothing(t *testing.T) {
-	root := t.TempDir()
-	store := NewStore(root)
-	stoppedTestRun(t, store, root, "run-plain")
-	stoppedTestRun(t, store, root, "run-branch")
-
-	// A run still holding resources keeps its record whatever its age.
-	if err := store.Forget("run-plain"); err == nil ||
-		!strings.Contains(err.Error(), "still owns resources") {
-		t.Fatalf("forgetting a stopped run = %v", err)
+	// The record is the only route back to a container that is still running.
+	if err := store.Forget("run-live"); err == nil ||
+		!strings.Contains(err.Error(), "must be stopped first") {
+		t.Fatalf("forgetting an active run = %v", err)
 	}
 
-	if _, err := store.BeginApply("run-branch", testApplyPlan("run-branch", root)); err != nil {
+	if _, err := store.BeginApply("run-gone", testApplyPlan("run-gone", root)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CompleteApply("run-branch"); err != nil {
+	if _, err := store.CompleteApply("run-gone"); err != nil {
 		t.Fatal(err)
 	}
-	for _, runID := range []string{"run-plain", "run-branch"} {
-		if _, err := store.Discard(runID); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := store.Forget("run-branch"); err == nil ||
-		!strings.Contains(err.Error(), "pisafe/run-branch") {
-		t.Fatalf("forgetting an imported run = %v", err)
-	}
-	if err := store.Forget("run-plain"); err != nil {
+	if err := store.Forget("run-gone"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "run-plain.json")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(root, "run-gone.json")); !os.IsNotExist(err) {
 		t.Fatalf("forgotten manifest survived: %v", err)
+	}
+	if err := store.Forget("run-gone"); err == nil {
+		t.Fatal("a run with no record was forgotten again")
 	}
 	runs, err := store.List()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(runs) != 1 || runs[0].RunID != "run-branch" {
+	if len(runs) != 1 || runs[0].RunID != "run-live" {
 		t.Fatalf("runs = %#v", runs)
 	}
 }

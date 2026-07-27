@@ -45,7 +45,8 @@ var forwardedRequestHeaders = []string{
 }
 
 // RunSource yields the current durable run records. The broker reads them on
-// every request so a stopped or discarded run is rejected immediately.
+// every request so a run that has stopped or been reclaimed is rejected
+// immediately.
 type RunSource interface {
 	List() ([]runstate.Manifest, error)
 }

@@ -59,24 +59,18 @@ func printCollection(out io.Writer, plan runctl.GCPlan, images []string, dryRun 
 		fmt.Fprintln(out, "Nothing to collect.")
 		return
 	}
-	expired, forgot, pruned := "Expired:", "Forgot:", "Pruned:"
+	reclaimed, pruned := "Reclaimed:", "Pruned:"
 	if dryRun {
-		expired, forgot, pruned = "Would expire:", "Would forget:", "Would prune:"
+		reclaimed, pruned = "Would reclaim:", "Would prune:"
 	}
 	printCollected(
 		out,
-		expired,
+		reclaimed,
 		fmt.Sprintf(
-			"%d imported run(s) done over seven days ago; branch and import record kept",
-			len(plan.Expired),
+			"%d imported run(s) done over seven days ago; their pisafe/RUN branches keep the work",
+			len(plan.Reclaimed),
 		),
-		plan.Expired,
-	)
-	printCollected(
-		out,
-		forgot,
-		fmt.Sprintf("%d discarded record(s) that attribute no branch", len(plan.Forgotten)),
-		plan.Forgotten,
+		plan.Reclaimed,
 	)
 	printCollected(
 		out,

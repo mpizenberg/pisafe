@@ -520,35 +520,41 @@ over the open network; no special handling is needed.
 Run states:
 
 ```text
-creating → active → stopped → imported | discarded | expired
+creating → active → stopped → imported → reclaimed
 ```
 
+- A run has a record for exactly as long as it owns something. Reclaiming it
+  removes the record with the resources, so there is no terminal state.
 - Active/stopped runs are resumable. Resuming issues a fresh short-lived
   broker capability rather than extending the old one.
 - Stopped time does not consume the eight-hour active budget. Podman kills a
   run independently when its current remaining budget expires; the next
   lifecycle command reconciles the durable record to stopped.
 - Successful `apply` marks a run imported but keeps it recoverable for seven
-  days.
-- `discard` deletes only after exact run confirmation.
-- `pisafe gc` removes imported/discarded runs older than seven days, and
-  reports or prunes long-unused per-project caches and session stores, which
-  otherwise grow without bound.
-- Never expire a run with unimported commits merely because it is old. Warn and
-  require explicit discard.
-- Keep branch/import metadata after workspace deletion so an imported branch
-  remains attributable to its source run.
+  days: the workspace still holds untracked leftovers the branch never took.
+- `discard` reclaims at any point, after exact run confirmation.
+- `pisafe gc` reclaims imported runs older than seven days, and reports or
+  prunes long-unused per-project caches and session stores, which otherwise
+  grow without bound.
+- Never reclaim a run with unimported commits merely because it is old. Warn
+  and require explicit discard.
+- An imported branch is named `pisafe/<run>`, so it stays attributable to its
+  source run with no record to keep.
 
-## Audit record
+## Run record
 
-For each run, retain:
+While a run exists, its record holds:
 
 - Run ID, project identity, captured source HEAD, and timestamps.
 - Exact image, Pi, extension, and tool versions.
 - Baseline and final commit IDs.
 - Files explicitly included beyond the tracked tree, by name.
 - Git bundle hash and imported branch name.
-- Cleanup/discard event.
+
+Nothing is retained once the run is reclaimed. What it produced is already in
+the user's repository, on a branch named after the run, with the base commit as
+its parent and the author it committed as — so a surviving record would only
+restate what git holds.
 
 Do not log prompts, source contents, HTTP bodies, environment variables, OAuth
 tokens, or package secrets by default.
@@ -950,24 +956,26 @@ The first usable release should prove:
   answering an interactive prompt. The CLI has no stdin channel and a prompt
   would break every non-terminal use; `discard`'s explicit confirmation is the
   precedent.
-- Collection expires only imported runs. The alternative this document's
-  lifecycle diagram suggests — expiring an old stopped run once a check proves
-  it holds no unimported commits — was not taken: `diff` can prove the
+- Collection reclaims only imported runs. The alternative this document's
+  lifecycle diagram suggests — reclaiming an old stopped run once a check
+  proves it holds no unimported commits — was not taken: `diff` can prove the
   repository is unchanged but sees nothing of the run's home directory, so
   "no commits" is not "nothing to lose", and an irreversible delete of work the
   user never imported is the one mistake that cannot be undone. Old unimported
   runs are reported instead, and `discard` remains the way to reclaim them.
-  Reversing this is additive: the check would gate an expiry that already
+  Reversing this is additive: the check would gate a reclamation that already
   exists.
-- A run reclaimed by the retention window becomes `expired`, not `discarded`,
-  which moves that state to `imported → expired` rather than the diagram's
-  `stopped → expired`. The audit record then distinguishes what the user threw
-  away from what age reclaimed, and the state is otherwise unused.
-- A record naming an imported branch is never removed, whatever its age, while
-  a discarded record that attributes nothing is removed after seven days. The
-  alternative — removing every finished record on the same schedule — would
-  break the design's requirement that an imported branch stay attributable to
-  its source run, since the branch outlives the workspace indefinitely.
+- A run's record lives exactly as long as the run owns something. Both terminal
+  states are gone: `discard` and `gc` remove the record with the resources,
+  where an earlier increment kept an `expired` or `discarded` record forever to
+  satisfy this document's "keep branch/import metadata after workspace
+  deletion". That requirement is already met by the branch's own name —
+  `pisafe/<run>` contains the run ID — so the kept record restated the branch,
+  the base commit, the author, and the included files, all of which git holds.
+  The one fact it added, when the import happened, is in the reflog for 90 days
+  and is not worth a permanent file. Reversing this means reintroducing a
+  terminal state and re-deriving records that were deleted, so it is costly for
+  runs already collected; the branches themselves are unaffected either way.
 - Image pruning keeps the current recipe by reading the recipe label each image
   carries, rather than by first resolving the recipe's image ID. Resolving it
   cannot distinguish "no image for this recipe" from "the lookup failed", and

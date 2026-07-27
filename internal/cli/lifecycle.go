@@ -197,10 +197,14 @@ func runDiscard(ctx context.Context, runID string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if _, err := controller.Discard(ctx, runID); err != nil {
+	if err := controller.Discard(ctx, runID); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "Discarded %s; its container, workspace, home, and SSH key were removed.\n", runID)
+	fmt.Fprintf(
+		out,
+		"Discarded %s; its container, workspace, home, SSH key, and record were removed.\n",
+		runID,
+	)
 	return nil
 }
 

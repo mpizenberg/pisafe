@@ -1,4 +1,4 @@
-// Package runstate persists the Mac-side audit and lifecycle record for runs.
+// Package runstate persists the Mac-side lifecycle record for runs.
 package runstate
 
 import (
@@ -44,25 +44,16 @@ func ValidInferenceCapability(capability string) bool {
 
 type State string
 
+// A run has a record for exactly as long as it owns something. Reclaiming it
+// removes the record with the resources, so there is no terminal state: what an
+// imported run produced survives as the pisafe/<run> branch in the user's own
+// repository, which needs no record to stay attributable.
 const (
-	StateCreating  State = "creating"
-	StateActive    State = "active"
-	StateStopped   State = "stopped"
-	StateImported  State = "imported"
-	StateDiscarded State = "discarded"
-	StateExpired   State = "expired"
+	StateCreating State = "creating"
+	StateActive   State = "active"
+	StateStopped  State = "stopped"
+	StateImported State = "imported"
 )
-
-// Discardable reports whether a run still owns resources discard reclaims.
-// Every state but active does: an active run is stopped first so its elapsed
-// time is accounted, and a discarded one owns nothing.
-func Discardable(state State) bool {
-	switch state {
-	case StateCreating, StateStopped, StateImported, StateExpired:
-		return true
-	}
-	return false
-}
 
 type Manifest struct {
 	Version             int               `json:"version"`
@@ -87,7 +78,6 @@ type Manifest struct {
 	UpdatedAt            time.Time              `json:"updated_at"`
 	StoppedAt            *time.Time             `json:"stopped_at,omitempty"`
 	ImportedAt           *time.Time             `json:"imported_at,omitempty"`
-	DiscardedAt          *time.Time             `json:"discarded_at,omitempty"`
 	ImportedBranch       string                 `json:"imported_branch,omitempty"`
 	LastError            string                 `json:"last_error,omitempty"`
 }
@@ -281,47 +271,16 @@ func (store Store) Resume(runID string, capability string, startedAt time.Time) 
 	return store.replace(manifest)
 }
 
-// Expire records that the retention window, rather than the user, reclaimed a
-// run. Only an imported run can expire: its commits already live in the user's
-// repository, so age alone never removes work that was never imported. The
-// branch and import timestamps stay, so an imported branch remains
-// attributable after its workspace is gone.
-func (store Store) Expire(runID string) (Manifest, error) {
-	manifest, err := store.Get(runID)
-	if err != nil {
-		return Manifest{}, err
-	}
-	if manifest.State != StateImported {
-		return Manifest{}, fmt.Errorf(
-			"invalid run transition %q → %q",
-			manifest.State,
-			StateExpired,
-		)
-	}
-	manifest.State = StateExpired
-	manifest.LastError = ""
-	manifest.UpdatedAt = store.now().UTC()
-	return store.replace(manifest)
-}
-
-// Forget removes the durable record of a run that owns nothing and attributes
-// nothing. A record naming an imported branch is refused, so every
-// pisafe/<run> branch in the user's repository keeps naming the run that
-// produced it.
+// Forget removes a run's record once everything it owned has been reclaimed.
+// An active run is refused: its record is the only route back to a container
+// that is still running.
 func (store Store) Forget(runID string) error {
 	manifest, err := store.Get(runID)
 	if err != nil {
 		return err
 	}
-	if manifest.State != StateDiscarded {
-		return fmt.Errorf("run %q is %s and still owns resources", runID, manifest.State)
-	}
-	if manifest.ImportedBranch != "" {
-		return fmt.Errorf(
-			"run %q is what %s was imported from and is kept",
-			runID,
-			manifest.ImportedBranch,
-		)
+	if manifest.State == StateActive {
+		return fmt.Errorf("run %q is active and must be stopped first", runID)
 	}
 	path, err := store.manifestPath(runID)
 	if err != nil {
@@ -331,29 +290,6 @@ func (store Store) Forget(runID string) error {
 		return fmt.Errorf("remove run manifest: %w", err)
 	}
 	return store.syncRoot()
-}
-
-func (store Store) Discard(runID string) (Manifest, error) {
-	manifest, err := store.Get(runID)
-	if err != nil {
-		return Manifest{}, err
-	}
-	if !Discardable(manifest.State) {
-		return Manifest{}, fmt.Errorf(
-			"invalid run transition %q → %q",
-			manifest.State,
-			StateDiscarded,
-		)
-	}
-	now := store.now().UTC()
-	manifest.State = StateDiscarded
-	manifest.ActiveStartedAt = nil
-	manifest.ActiveDeadline = nil
-	manifest.InferenceCapability = ""
-	manifest.LastError = ""
-	manifest.UpdatedAt = now
-	manifest.DiscardedAt = &now
-	return store.replace(manifest)
 }
 
 // BeginApply records a verified import plan before any user-visible ref moves.
@@ -661,16 +597,12 @@ func validateStoredManifest(manifest Manifest, expectedRunID string) error {
 		if !manifest.ActiveDeadline.Equal(expected) {
 			return fmt.Errorf("active run has an inconsistent wall-clock deadline")
 		}
-	case StateStopped, StateImported, StateExpired:
+	case StateStopped, StateImported:
 		if manifest.SSH == nil {
 			return fmt.Errorf("run state %q requires an SSH connection", manifest.State)
 		}
 		if manifest.ActiveStartedAt != nil || manifest.ActiveDeadline != nil {
 			return fmt.Errorf("inactive run retains active wall-clock timestamps")
-		}
-	case StateDiscarded:
-		if manifest.ActiveStartedAt != nil || manifest.ActiveDeadline != nil {
-			return fmt.Errorf("discarded run retains active wall-clock timestamps")
 		}
 	default:
 		return fmt.Errorf("invalid stored run state %q", manifest.State)
