@@ -5,6 +5,7 @@ package runcontainer
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
@@ -34,32 +35,76 @@ const (
 	containerSessionRoot = "/sessions"
 	guestStorageRoot     = "/var/lib/pisafe/runs"
 	guestProjectRoot     = "/var/lib/pisafe/projects"
+
+	// cacheNamespace holds one directory of immutable snapshots per declared
+	// cache. sessionsNamespace is the one shared directory that is not a cache:
+	// it has no key and no invalidation, because a transcript's name is a
+	// session ID and nothing is implied by its presence.
+	cacheNamespace    = "cache"
+	sessionsNamespace = "sessions"
 )
 
-// projectLayers is what runs of one project share. A layer is one directory in
-// the project filesystem, one upper and work pair in the run filesystem, and
-// one path in the container, all filed under the same name.
-var projectLayers = []struct{ name, destination string }{
-	{name: "cache", destination: containerCacheRoot},
-	{name: "sessions", destination: containerSessionRoot},
+// ProjectNamespaces is for the privileged helper, which allocates these two
+// directories in a project filesystem and nothing below them. What lives below
+// depends on the repository, which the helper must never learn about.
+func ProjectNamespaces() []string {
+	return []string{cacheNamespace, sessionsNamespace}
 }
 
-// ProjectLayerNames is for the privileged helper, which allocates a directory
-// per layer in both filesystems and knows nothing else about them.
-func ProjectLayerNames() []string {
-	names := make([]string, 0, len(projectLayers))
-	for _, layer := range projectLayers {
-		names = append(names, layer.name)
+var (
+	imageIDPattern         = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
+	cacheKeyPattern        = regexp.MustCompile(`^[a-f0-9]{16}$`)
+	environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+)
+
+// CacheMount is one cache the repository declared, resolved for one run. Key
+// is what this run's inputs hash to; Snapshot is what it actually starts from,
+// which is Key when the project has published that generation, an older
+// generation when it has not, and nothing when the namespace is empty.
+type CacheMount struct {
+	Name     string   `json:"name"`
+	Env      []string `json:"env"`
+	Key      string   `json:"key"`
+	Snapshot string   `json:"snapshot,omitempty"`
+}
+
+func (cache CacheMount) Validate() error {
+	if err := runid.Validate(cache.Name); err != nil {
+		return fmt.Errorf("invalid cache name %q", cache.Name)
 	}
-	return names
+	if !cacheKeyPattern.MatchString(cache.Key) {
+		return fmt.Errorf("cache %q has an invalid key %q", cache.Name, cache.Key)
+	}
+	if cache.Snapshot != "" && !cacheKeyPattern.MatchString(cache.Snapshot) {
+		return fmt.Errorf("cache %q has an invalid snapshot %q", cache.Name, cache.Snapshot)
+	}
+	return ValidateCacheEnvironment(cache.Env)
 }
 
-var imageIDPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
+// ValidateCacheEnvironment refuses a variable pisafe sets itself. Rebinding
+// one of them would move the session directory, the home, or npm's log path
+// into state the project shares between runs. Every other name is permitted:
+// what a cache carries into a later run of the same repository is the
+// repository's own business.
+func ValidateCacheEnvironment(names []string) error {
+	for _, name := range names {
+		if !environmentNamePattern.MatchString(name) {
+			return fmt.Errorf("invalid environment variable name %q", name)
+		}
+		if slices.ContainsFunc(runEnvironment, func(variable [2]string) bool {
+			return variable[0] == name
+		}) {
+			return fmt.Errorf("a cache may not rebind %s", name)
+		}
+	}
+	return nil
+}
 
 type Spec struct {
 	RunID       string
 	ProjectKey  string
 	ImageID     string
+	Caches      []CacheMount
 	CPUs        string
 	MemoryBytes int64
 	PIDs        int
@@ -89,6 +134,16 @@ func (spec Spec) Validate() error {
 	}
 	if !imageIDPattern.MatchString(spec.ImageID) {
 		return fmt.Errorf("image must be an immutable sha256 ID")
+	}
+	seen := make(map[string]bool, len(spec.Caches))
+	for _, cache := range spec.Caches {
+		if err := cache.Validate(); err != nil {
+			return err
+		}
+		if seen[cache.Name] {
+			return fmt.Errorf("cache %q is declared twice", cache.Name)
+		}
+		seen[cache.Name] = true
 	}
 	if spec.CPUs == "" {
 		return fmt.Errorf("CPU limit is required")
@@ -124,9 +179,28 @@ func (spec Spec) HomePath() string {
 	return spec.StoragePath() + "/home"
 }
 
-// ProjectOverlay is one shared layer as the run sees it. Lower belongs to the
-// project and is never written; Upper and Work belong to the run alone, which
-// is what keeps one run's writes out of every other run of the project.
+func (spec Spec) ProjectPath() string {
+	return guestProjectRoot + "/" + spec.ProjectKey
+}
+
+// CacheNamespacePath is where every published generation of one declared cache
+// lives. The directory is the restore prefix: falling back means taking the
+// newest entry in it.
+func (spec Spec) CacheNamespacePath(name string) string {
+	return spec.ProjectPath() + "/" + cacheNamespace + "/" + name
+}
+
+// overlayRoot is the run-private half of one overlay. pisafe creates these
+// itself, because the set of cache names comes from the repository and so is
+// unknown when the run filesystem is allocated.
+func (spec Spec) overlayRoot(namespace string) string {
+	return spec.StoragePath() + "/overlay/" + namespace
+}
+
+// ProjectOverlay is one shared layer as the run sees it. Lower is immutable
+// and never written: a published snapshot when the project has one, an empty
+// run-local directory when it does not. Upper and Work belong to the run
+// alone, which is what keeps one run's writes out of every other run.
 type ProjectOverlay struct {
 	Destination string
 	Lower       string
@@ -135,16 +209,42 @@ type ProjectOverlay struct {
 }
 
 func (spec Spec) ProjectOverlays() []ProjectOverlay {
-	overlays := make([]ProjectOverlay, 0, len(projectLayers))
-	for _, layer := range projectLayers {
+	sessions := spec.overlayRoot(sessionsNamespace)
+	overlays := []ProjectOverlay{{
+		Destination: containerSessionRoot,
+		Lower:       spec.ProjectPath() + "/" + sessionsNamespace,
+		Upper:       sessions + "/upper",
+		Work:        sessions + "/work",
+	}}
+	for _, cache := range spec.Caches {
+		private := spec.overlayRoot(cacheNamespace + "/" + cache.Name)
+		lower := private + "/lower"
+		if cache.Snapshot != "" {
+			lower = spec.CacheNamespacePath(cache.Name) + "/" + cache.Snapshot
+		}
 		overlays = append(overlays, ProjectOverlay{
-			Destination: layer.destination,
-			Lower:       guestProjectRoot + "/" + spec.ProjectKey + "/" + layer.name,
-			Upper:       spec.StoragePath() + "/overlay/" + layer.name + "/upper",
-			Work:        spec.StoragePath() + "/overlay/" + layer.name + "/work",
+			Destination: containerCacheRoot + "/" + cache.Name,
+			Lower:       lower,
+			Upper:       private + "/upper",
+			Work:        private + "/work",
 		})
 	}
 	return overlays
+}
+
+// runEnvironment is what pisafe sets in every run, and so is exactly what a
+// repository may not rebind through a declared cache.
+var runEnvironment = [][2]string{
+	{"HOME", containerHome},
+	{"GIT_TERMINAL_PROMPT", "0"},
+	{"PI_CODING_AGENT_DIR", containerHome + "/.pi/agent"},
+	{"PI_CODING_AGENT_SESSION_DIR", containerSessionRoot},
+	{"PI_SKIP_VERSION_CHECK", "1"},
+	// npm defaults its logs and update stamp into the cache directory, so a
+	// project sharing an npm cache would publish per-run state that grows
+	// without bound and is useful to no later run.
+	{"npm_config_logs_dir", containerHome + "/.npm/_logs"},
+	{"npm_config_update_notifier", "false"},
 }
 
 // volume renders the only spelling Podman accepts for a rootless overlay.
@@ -189,19 +289,16 @@ func (spec Spec) RunArgs() ([]string, error) {
 	for _, overlay := range spec.ProjectOverlays() {
 		args = append(args, "--volume", overlay.volume())
 	}
+	args = append(args, "--workdir", containerWorkRoot)
+	for _, variable := range runEnvironment {
+		args = append(args, "--env", variable[0]+"="+variable[1])
+	}
+	for _, cache := range spec.Caches {
+		for _, name := range cache.Env {
+			args = append(args, "--env", name+"="+containerCacheRoot+"/"+cache.Name)
+		}
+	}
 	return append(args,
-		"--workdir", containerWorkRoot,
-		"--env", "HOME="+containerHome,
-		"--env", "GIT_TERMINAL_PROMPT=0",
-		"--env", "PI_CODING_AGENT_DIR="+containerHome+"/.pi/agent",
-		"--env", "PI_CODING_AGENT_SESSION_DIR="+containerSessionRoot,
-		"--env", "PI_SKIP_VERSION_CHECK=1",
-		"--env", "npm_config_cache="+containerCacheRoot+"/npm",
-		// Logs and the update check write per-run state that grows without
-		// bound and is useful to no later run, so they stay out of the layer
-		// runs share.
-		"--env", "npm_config_logs_dir="+containerHome+"/.npm/_logs",
-		"--env", "npm_config_update_notifier=false",
 		spec.ImageID,
 		"pisafe-guest", "serve-ssh",
 	), nil

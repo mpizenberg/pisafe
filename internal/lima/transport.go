@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/runcontainer"
 	"github.com/mpizenberg/pisafe/internal/runid"
 	"github.com/mpizenberg/pisafe/internal/runssh"
 )
@@ -85,6 +86,51 @@ exec podman unshare cat "$workspace/apply/$2"
 workspace="/var/lib/pisafe/runs/$1/workspace"
 test -d "$workspace"
 podman unshare rm -rf -- "$workspace/apply"
+`
+
+	// selectSnapshotsScript reads one line per requested cache: the exact key
+	// when that generation exists, the newest generation when it does not, and
+	// nothing when the namespace has never been published to. It only reads,
+	// so it can run while other runs of the project are live.
+	selectSnapshotsScript = `set -eu
+exec podman unshare sh -ceu '
+set -eu
+namespace=/var/lib/pisafe/projects/$1/cache
+shift
+while [ "$#" -gt 0 ]; do
+	directory=$namespace/$1
+	key=$2
+	shift 2
+	if [ -d "$directory/$key" ]; then
+		printf %s\\n "$key"
+	else
+		newest=$(ls -1t "$directory" 2>/dev/null | head -n 1 || true)
+		printf %s\\n "$newest"
+	fi
+done
+' pisafe-select "$@"
+`
+
+	// prepareOverlaysScript builds the run-private half of every overlay. Both
+	// the mode and the ownership are what the container needs to write through
+	// its overlay, and are what the privileged helper would have applied had
+	// the set of names been knowable when it allocated the filesystem.
+	prepareOverlaysScript = `set -eu
+exec podman unshare sh -ceu '
+set -eu
+overlay=/var/lib/pisafe/runs/$1/overlay
+shift
+test -d "$overlay"
+create() {
+	install -d -m 0700 -o 1000 -g 1000 "$@"
+}
+create "$overlay/sessions" "$overlay/sessions/upper" "$overlay/sessions/work"
+while [ "$#" -gt 0 ]; do
+	create "$overlay/cache" "$overlay/cache/$1"
+	create "$overlay/cache/$1/upper" "$overlay/cache/$1/work" "$overlay/cache/$1/lower"
+	shift
+done
+' pisafe-overlays "$@"
 `
 )
 
@@ -279,6 +325,78 @@ func (transport Transport) RemoveRunStorage(ctx context.Context, runID string) e
 // it, so no run may assume it is creating it.
 func (transport Transport) EnsureProjectStorage(ctx context.Context, projectKey string) error {
 	return transport.storage(ctx, "ensure", "project", projectKey)
+}
+
+// SelectCacheSnapshots names the generation each declared cache starts from.
+// Falling back to the newest generation in a namespace is what keeps a changed
+// lockfile from costing a cold fetch: the tool restores the previous
+// generation and fetches only the delta.
+func (transport Transport) SelectCacheSnapshots(
+	ctx context.Context,
+	projectKey string,
+	caches []runcontainer.CacheMount,
+) ([]runcontainer.CacheMount, error) {
+	if len(caches) == 0 {
+		return nil, nil
+	}
+	if err := runid.Validate(projectKey); err != nil {
+		return nil, err
+	}
+	arguments := []string{projectKey}
+	for _, cache := range caches {
+		if err := cache.Validate(); err != nil {
+			return nil, err
+		}
+		arguments = append(arguments, cache.Name, cache.Key)
+	}
+	output, err := transport.shellScript(ctx, nil, selectSnapshotsScript, arguments...)
+	if err != nil {
+		return nil, fmt.Errorf("select project cache snapshots: %w", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(output), "\n"), "\n")
+	if len(lines) != len(caches) {
+		return nil, fmt.Errorf(
+			"project cache selection returned %d snapshots for %d caches",
+			len(lines),
+			len(caches),
+		)
+	}
+	selected := make([]runcontainer.CacheMount, 0, len(caches))
+	for index, cache := range caches {
+		cache.Snapshot = strings.TrimSpace(lines[index])
+		// The name came from a directory listing rather than from pisafe, so it
+		// is checked before it becomes half of a mount argument.
+		if err := cache.Validate(); err != nil {
+			return nil, err
+		}
+		selected = append(selected, cache)
+	}
+	return selected, nil
+}
+
+// PrepareRunOverlays creates the upper, work, and cold-start lower directories
+// the run's overlays need. They sit inside directories the privileged helper
+// already owns to the mapped UID, so the set of cache names — which comes from
+// the repository — never reaches the helper.
+func (transport Transport) PrepareRunOverlays(
+	ctx context.Context,
+	runID string,
+	caches []runcontainer.CacheMount,
+) error {
+	if err := runid.Validate(runID); err != nil {
+		return err
+	}
+	arguments := []string{runID}
+	for _, cache := range caches {
+		if err := cache.Validate(); err != nil {
+			return err
+		}
+		arguments = append(arguments, cache.Name)
+	}
+	if _, err := transport.shellScript(ctx, nil, prepareOverlaysScript, arguments...); err != nil {
+		return fmt.Errorf("prepare run overlay directories: %w", err)
+	}
+	return nil
 }
 
 func (transport Transport) storage(ctx context.Context, action, scope, id string) error {

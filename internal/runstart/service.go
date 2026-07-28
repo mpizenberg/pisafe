@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/projectconfig"
+	"github.com/mpizenberg/pisafe/internal/runcontainer"
 	"github.com/mpizenberg/pisafe/internal/runid"
 	"github.com/mpizenberg/pisafe/internal/runimage"
 	"github.com/mpizenberg/pisafe/internal/runstate"
@@ -31,6 +33,7 @@ type Controller interface {
 		runid.Project,
 		string,
 		gitstage.Identity,
+		[]runcontainer.CacheMount,
 	) (runstate.Manifest, error)
 }
 
@@ -99,6 +102,12 @@ func (service Service) Start(
 	if err != nil {
 		return Result{}, err
 	}
+	// A malformed declaration stops the run before the slow boundary and image
+	// work, like an unselectable input does.
+	declared, err := projectconfig.Load(root)
+	if err != nil {
+		return Result{}, err
+	}
 	runID, err := service.newRunID(project.Directory, service.now())
 	if err != nil {
 		return Result{}, err
@@ -119,6 +128,10 @@ func (service Service) Start(
 	image, err := service.installer.Ensure(ctx, service.artifacts)
 	if err != nil {
 		return Result{}, fmt.Errorf("install managed run image: %w", err)
+	}
+	caches, err := declared.Mounts(root, image.ImageID)
+	if err != nil {
+		return Result{}, err
 	}
 
 	temporary, err := os.MkdirTemp("", "pisafe-stage-*")
@@ -141,6 +154,7 @@ func (service Service) Start(
 		project,
 		image.ImageID,
 		identity,
+		caches,
 	)
 	if err != nil {
 		return Result{}, err

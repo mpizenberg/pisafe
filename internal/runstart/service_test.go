@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/projectconfig"
+	"github.com/mpizenberg/pisafe/internal/runcontainer"
 	"github.com/mpizenberg/pisafe/internal/runid"
 	"github.com/mpizenberg/pisafe/internal/runimage"
 	"github.com/mpizenberg/pisafe/internal/runstate"
@@ -49,6 +52,7 @@ type fakeController struct {
 	project  runid.Project
 	imageID  string
 	identity gitstage.Identity
+	caches   []runcontainer.CacheMount
 }
 
 func (controller *fakeController) StartPrepared(
@@ -57,11 +61,13 @@ func (controller *fakeController) StartPrepared(
 	project runid.Project,
 	imageID string,
 	identity gitstage.Identity,
+	caches []runcontainer.CacheMount,
 ) (runstate.Manifest, error) {
 	controller.prepared = prepared
 	controller.project = project
 	controller.imageID = imageID
 	controller.identity = identity
+	controller.caches = caches
 	return runstate.Manifest{
 		RunID:      prepared.Snapshot.RunID,
 		Project:    project.Directory,
@@ -75,7 +81,19 @@ func (controller *fakeController) StartPrepared(
 	}, nil
 }
 
+// testRoot creates a real repository root, because the configuration a
+// repository declares for itself is read from the checkout.
+func testRoot(t *testing.T, name string) string {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
 func TestStartComposesBoundaryImageStageAndController(t *testing.T) {
+	root := testRoot(t, "My Project")
 	boundary := &fakeBoundary{}
 	installer := &fakeInstaller{}
 	controller := &fakeController{}
@@ -91,7 +109,7 @@ func TestStartComposesBoundaryImageStageAndController(t *testing.T) {
 		return project + "-run", nil
 	}
 	service.repositoryRoot = func(context.Context, string) (string, error) {
-		return "/Users/alice/My Project", nil
+		return root, nil
 	}
 	service.resolveIdentity = func(context.Context, string) (gitstage.Identity, error) {
 		return testIdentity, nil
@@ -106,7 +124,7 @@ func TestStartComposesBoundaryImageStageAndController(t *testing.T) {
 		_ context.Context,
 		request gitstage.PrepareRequest,
 	) (gitstage.PreparedStage, error) {
-		if request.SourcePath != "/Users/alice/My Project" {
+		if request.SourcePath != root {
 			t.Fatalf("root = %q", request.SourcePath)
 		}
 		if filepath.Base(request.PackageDir) != "package" {
@@ -159,7 +177,7 @@ func TestStartRefusesAnUnattributableRunBeforeTouchingTheBoundary(t *testing.T) 
 	installer := &fakeInstaller{}
 	service := New(boundary, installer, &fakeController{}, runimage.Artifacts{})
 	service.repositoryRoot = func(context.Context, string) (string, error) {
-		return "/Users/alice/project", nil
+		return testRoot(t, "project"), nil
 	}
 	service.resolveIdentity = func(context.Context, string) (gitstage.Identity, error) {
 		return gitstage.Identity{}, gitstage.ErrNoIdentity
@@ -183,7 +201,7 @@ func TestStartReportsSelectedInputsAndDropsThemFromExclusions(t *testing.T) {
 		return project + "-run", nil
 	}
 	service.repositoryRoot = func(context.Context, string) (string, error) {
-		return "/Users/alice/project", nil
+		return testRoot(t, "project"), nil
 	}
 	service.resolveIdentity = func(context.Context, string) (gitstage.Identity, error) {
 		return testIdentity, nil
@@ -244,7 +262,7 @@ func TestStartRejectsBadSelectionBeforeTouchingTheBoundary(t *testing.T) {
 		return project + "-run", nil
 	}
 	service.repositoryRoot = func(context.Context, string) (string, error) {
-		return "/Users/alice/project", nil
+		return testRoot(t, "project"), nil
 	}
 	service.resolveIdentity = func(context.Context, string) (gitstage.Identity, error) {
 		return testIdentity, nil
@@ -271,5 +289,95 @@ func TestStartRejectsBadSelectionBeforeTouchingTheBoundary(t *testing.T) {
 	}
 	if boundary.called || installer.called {
 		t.Fatal("a rejected selection still prepared the VM")
+	}
+}
+
+// TestStartCarriesDeclaredCachesToTheController checks the one path by which a
+// repository can influence what a run mounts, end to end on the Mac side.
+func TestStartCarriesDeclaredCachesToTheController(t *testing.T) {
+	root := testRoot(t, "project")
+	if err := os.MkdirAll(filepath.Join(root, ".config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(root, projectconfig.RelativePath),
+		[]byte(`{"caches":[{"name":"npm","env":["npm_config_cache"],"key":["package-lock.json"]}]}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "package-lock.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	controller := &fakeController{}
+	service := New(&fakeBoundary{}, &fakeInstaller{}, controller, runimage.Artifacts{})
+	service.repositoryRoot = func(context.Context, string) (string, error) { return root, nil }
+	service.resolveIdentity = func(context.Context, string) (gitstage.Identity, error) {
+		return testIdentity, nil
+	}
+	service.listExcluded = func(context.Context, string) (gitstage.ExcludedInputs, error) {
+		return gitstage.ExcludedInputs{}, nil
+	}
+	service.prepare = func(
+		_ context.Context,
+		request gitstage.PrepareRequest,
+	) (gitstage.PreparedStage, error) {
+		return gitstage.PreparedStage{
+			Snapshot: gitstage.Snapshot{RunID: request.RunID},
+		}, nil
+	}
+
+	if _, err := service.Start(
+		context.Background(),
+		".",
+		nil,
+		gitstage.InputSelection{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(controller.caches) != 1 {
+		t.Fatalf("caches = %#v", controller.caches)
+	}
+	cache := controller.caches[0]
+	if cache.Name != "npm" || strings.Join(cache.Env, ",") != "npm_config_cache" {
+		t.Fatalf("cache = %#v", cache)
+	}
+	// The selection is still the VM's to make; what reaches the controller is
+	// the key this run's inputs hash to and nothing resolved yet.
+	if cache.Snapshot != "" {
+		t.Fatalf("snapshot was resolved on the Mac: %#v", cache)
+	}
+	if err := cache.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestStartRefusesAMalformedDeclarationBeforeTouchingTheBoundary keeps a
+// hostile or broken config from costing VM and image work.
+func TestStartRefusesAMalformedDeclarationBeforeTouchingTheBoundary(t *testing.T) {
+	root := testRoot(t, "project")
+	if err := os.MkdirAll(filepath.Join(root, ".config"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(root, projectconfig.RelativePath),
+		[]byte(`{"caches":[{"name":"npm","env":["HOME"],"key":[]}]}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	boundary := &fakeBoundary{}
+	installer := &fakeInstaller{}
+	service := New(boundary, installer, &fakeController{}, runimage.Artifacts{})
+	service.repositoryRoot = func(context.Context, string) (string, error) { return root, nil }
+	service.resolveIdentity = func(context.Context, string) (gitstage.Identity, error) {
+		return testIdentity, nil
+	}
+
+	if _, err := service.Start(context.Background(), ".", nil, gitstage.InputSelection{}); err == nil {
+		t.Fatal("a cache rebinding HOME was accepted")
+	}
+	if boundary.called || installer.called {
+		t.Fatal("a malformed declaration still prepared the VM")
 	}
 }

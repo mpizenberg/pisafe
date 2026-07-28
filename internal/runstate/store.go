@@ -17,10 +17,11 @@ import (
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/runcontainer"
 	"github.com/mpizenberg/pisafe/internal/runid"
 )
 
-const manifestVersion = 5
+const manifestVersion = 6
 
 var (
 	gitObjectPattern  = regexp.MustCompile(`^(?:[a-f0-9]{40}|[a-f0-9]{64})$`)
@@ -67,6 +68,11 @@ type Manifest struct {
 	Workspace           string            `json:"workspace,omitempty"`
 	SSH                 *SSHConnection    `json:"ssh,omitempty"`
 	InferenceCapability string            `json:"inference_capability,omitempty"`
+	// Caches records which snapshot each declared cache was resolved to. A
+	// resume must stack the run's existing upper back onto the same lower it
+	// recorded its whiteouts against, so the selection is made once and kept
+	// rather than made again from a project store that has moved on.
+	Caches []runcontainer.CacheMount `json:"caches,omitempty"`
 	// Apply is the plan of an import that has been verified but whose refs
 	// may not all have moved yet. It exists only between BeginApply and
 	// CompleteApply, and is what makes an interrupted apply replayable.

@@ -45,7 +45,7 @@ func RenderConfig(options ConfigOptions) ([]byte, error) {
 		return nil, err
 	}
 	securityProfile := securityProfileDigest(prefixes)
-	layers := strings.Join(runcontainer.ProjectLayerNames(), " ")
+	namespaces := strings.Join(runcontainer.ProjectNamespaces(), " ")
 
 	replacements := strings.NewReplacer(
 		"@@CPUS@@", fmt.Sprintf("%d", options.CPUs),
@@ -56,7 +56,7 @@ func RenderConfig(options ConfigOptions) ([]byte, error) {
 		"@@SECURITY_PROFILE_DIGEST@@", securityProfile,
 		"@@RUN_STORAGE_BYTES@@", strconv.FormatInt(runcontainer.DefaultPersistent, 10),
 		"@@PROJECT_STORAGE_BYTES@@", strconv.FormatInt(runcontainer.DefaultProject, 10),
-		"@@PROJECT_LAYERS@@", layers,
+		"@@PROJECT_NAMESPACES@@", namespaces,
 		"@@BROKER_ADDRESS@@", BrokerAddress,
 		"@@BROKER_PORT@@", strconv.Itoa(BrokerPort),
 	)
@@ -65,7 +65,7 @@ func RenderConfig(options ConfigOptions) ([]byte, error) {
 
 // securityProfileDigest changes whenever the generated VM definition, its
 // immutable host-network deny set, its persistent storage quotas, or the set
-// of layers runs share change. The template is hashed before substitution, so
+// of namespaces runs share change. The template is hashed before substitution, so
 // every value substituted into it has to be hashed here too. VM sizing is
 // deliberately excluded because it does not weaken a run boundary.
 func securityProfileDigest(prefixes []string) string {
@@ -79,7 +79,7 @@ func securityProfileDigest(prefixes []string) string {
 	_, _ = digest.Write([]byte{0})
 	_, _ = digest.Write([]byte(strconv.FormatInt(runcontainer.DefaultProject, 10)))
 	_, _ = digest.Write([]byte{0})
-	_, _ = digest.Write([]byte(strings.Join(runcontainer.ProjectLayerNames(), "\n")))
+	_, _ = digest.Write([]byte(strings.Join(runcontainer.ProjectNamespaces(), "\n")))
 	return "sha256:" + hex.EncodeToString(digest.Sum(nil))
 }
 
@@ -307,26 +307,23 @@ provision:
     [[ "${#storage_id}" -le 64 ]]
     [[ "$storage_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
 
-    # A run filesystem holds the container's two bind mounts plus the private
-    # upper layers it stacks over shared project state. A project filesystem
-    # holds only lower layers, which every run of that project reads and no run
-    # writes.
-    layers=(@@PROJECT_LAYERS@@)
+    # A run filesystem holds the container's two bind mounts plus the root of
+    # the private upper layers it stacks over shared project state. A project
+    # filesystem holds only the two shared namespaces. What lives below either
+    # root depends on the repository, which this helper never learns: the
+    # unprivileged user owns both and builds them itself.
     case "$scope" in
       run)
         storage_root=/var/lib/pisafe/runs
         image_root=/var/lib/pisafe/run-images
         storage_bytes=@@RUN_STORAGE_BYTES@@
         directories=(workspace home overlay)
-        for layer in "${layers[@]}"; do
-          directories+=("overlay/$layer" "overlay/$layer/upper" "overlay/$layer/work")
-        done
         ;;
       project)
         storage_root=/var/lib/pisafe/projects
         image_root=/var/lib/pisafe/project-images
         storage_bytes=@@PROJECT_STORAGE_BYTES@@
-        directories=("${layers[@]}")
+        directories=(@@PROJECT_NAMESPACES@@)
         ;;
       *) exit 64 ;;
     esac

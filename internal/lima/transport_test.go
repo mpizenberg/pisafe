@@ -8,11 +8,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/runcontainer"
 )
 
 func TestTransportCreateStageStreamsVerifiedArtifacts(t *testing.T) {
@@ -347,6 +349,59 @@ func TestUploadArtifactRejectsNamesOutsideTheStageContract(t *testing.T) {
 		err := transport.uploadArtifact(context.Background(), "safe-run", name, "", []byte("x"))
 		if err == nil || !strings.Contains(err.Error(), "unsupported stage artifact") {
 			t.Errorf("uploadArtifact(%q) error = %v", name, err)
+		}
+	}
+}
+
+func TestSelectCacheSnapshotsPairsEveryCacheWithItsGeneration(t *testing.T) {
+	runner := &fakeRunner{outputs: [][]byte{
+		[]byte("0123456789abcdef\n\nfedcba9876543210\n"),
+	}}
+	transport := Transport{instance: InstanceName, runner: runner}
+	requested := []runcontainer.CacheMount{
+		{Name: "npm", Env: []string{"npm_config_cache"}, Key: "0123456789abcdef"},
+		{Name: "cargo", Env: []string{"CARGO_HOME"}, Key: "1111111111111111"},
+		{Name: "go", Env: []string{"GOMODCACHE"}, Key: "2222222222222222"},
+	}
+
+	selected, err := transport.SelectCacheSnapshots(context.Background(), "project-3f9c2a1b", requested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An exact hit, an empty namespace, and a fallback to an older generation
+	// are the three outcomes, and each must land on its own cache.
+	for index, want := range []string{"0123456789abcdef", "", "fedcba9876543210"} {
+		if selected[index].Snapshot != want {
+			t.Errorf("%s = %q, want %q", selected[index].Name, selected[index].Snapshot, want)
+		}
+	}
+	arguments := runner.calls[0].args
+	if !slices.Contains(arguments, "project-3f9c2a1b") || !slices.Contains(arguments, "cargo") {
+		t.Fatalf("selection command = %v", arguments)
+	}
+}
+
+// TestSelectCacheSnapshotsRefusesAnUnexpectedListing keeps a directory name
+// the VM produced from becoming half of a mount argument unchecked.
+func TestSelectCacheSnapshotsRefusesAnUnexpectedListing(t *testing.T) {
+	requested := []runcontainer.CacheMount{
+		{Name: "npm", Env: []string{"npm_config_cache"}, Key: "0123456789abcdef"},
+	}
+	for name, output := range map[string]string{
+		"climbing directory": "../../../etc\n",
+		"unkeyed directory":  "not-a-key\n",
+		"extra lines":        "0123456789abcdef\nfedcba9876543210\n",
+	} {
+		transport := Transport{
+			instance: InstanceName,
+			runner:   &fakeRunner{outputs: [][]byte{[]byte(output)}},
+		}
+		if _, err := transport.SelectCacheSnapshots(
+			context.Background(),
+			"project-3f9c2a1b",
+			requested,
+		); err == nil {
+			t.Errorf("%s was accepted", name)
 		}
 	}
 }

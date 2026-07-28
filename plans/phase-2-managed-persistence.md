@@ -142,10 +142,15 @@ repository root, read from the checkout on the Mac at run start:
 pisafe chooses the mount point (`/cache/<name>`), sets each listed variable to
 it, and computes the key from the listed files plus the run image ID. The
 schema is deliberately **inert**: no commands, no shell, no paths of pisafe's
-own choosing. This file is the first repo-supplied input pisafe parses on the
-host, and on an untrusted clone it is attacker-controlled, so the worst a
-hostile config may achieve is a useless cache key or a full project image —
-both contained, both fixed by a reset.
+own choosing. Unknown fields are refused rather than ignored, the declared key
+files are opened through a root a symlink cannot escape, and no cache may bind
+a variable pisafe sets itself. This file is the first repo-supplied input
+pisafe parses on the host, and on an untrusted clone it is
+attacker-controlled, so the worst a hostile config may achieve is a useless
+cache key or a full project image — both contained, both fixed by a reset.
+
+A repository that declares nothing gets no `/cache` mount at all, and no tool
+is redirected anywhere: sharing is opt-in per project, per namespace.
 
 ### Layout
 
@@ -184,12 +189,13 @@ anything.
       `TestLiveProjectLayersAreSharedToReadAndPrivateToWrite` — two concurrent
       runs read the seeded project state and neither sees the other's writes.
       Commit `1c5ec79`.
-- [ ] **3. Declared caches and snapshot restore.** Parse `.config/pisafe.json`,
+- [x] **3. Declared caches and snapshot restore.** Parse `.config/pisafe.json`,
       compute each namespace's key, select a snapshot by exact key then by
       newest-in-namespace, and mount one overlay per declared cache with uppers
-      pisafe creates itself. Nothing publishes yet. Live test: a seeded
-      snapshot is restored at its exact key; a key with no exact match falls
-      back to the newest; a project with no config gets no cache mount at all.
+      pisafe creates itself. Nothing publishes yet. Live test:
+      `TestLiveCacheSnapshotsAreSelectedByKeyThenRecency` — an empty namespace
+      selects nothing, either seeded generation is found at its exact key, and
+      an unknown key falls back to the newest.
 - [ ] **4. Publishing and eviction.** Materialize the merged view into a new
       immutable snapshot at run end, keep the newest few per namespace, and add
       the reset that makes disposability real. Live test: a run's fetches are
@@ -271,6 +277,37 @@ this document is the current truth, not an audit trail. These fold into
   trade was declined. Reversibility: changing the format later means migrating
   every repository that adopted it, so this is the expensive decision on this
   page.
+- **A declared cache may not bind a variable pisafe sets itself.** The
+  rejected set is derived from the run's own environment rather than listed
+  twice, so the two cannot drift. An allowlist of known-good cache variables
+  was not taken, and neither was a denylist of process-semantics variables like
+  `PATH` or `LD_PRELOAD`: what a cache carries into a later run of the *same*
+  repository is that repository's business, and it is already true of any
+  cache holding executable content. What is pisafe's business is that the
+  session directory, the home, and npm's log path stay where pisafe put them,
+  and that is exactly the set now refused.
+- **The declared key files are read through `os.Root`.** The paths come from
+  the repository and are opened on the Mac, so a symlink out of the checkout
+  would let a declaration hash arbitrary host files. They are also rejected
+  lexically first, so the failure names the declaration rather than the
+  filesystem. A missing key file hashes as absent rather than failing: a
+  repository with no lockfile yet has no dependencies yet, which is a state and
+  not an error.
+- **Snapshot selection is a project-store read, preparation is a run-store
+  write, and they are separate calls.** Doing both in one call was the first
+  shape and it forced the run filesystem to exist before the selection could be
+  recorded in the manifest. Splitting them lets selection happen before the run
+  is recorded at all, which is what makes the resolved snapshot part of the
+  manifest rather than something reconstructed later.
+- **The resolved snapshot is recorded in the manifest, and resume reuses it
+  rather than selecting again.** A resumed run stacks its existing upper — with
+  the whiteouts it recorded against one lower — so re-selecting could stack it
+  on a newer generation that never contained the files those whiteouts delete.
+  The manifest version moved to 6 and older records are rejected, not migrated,
+  as before.
+- **`EnsureProjectStorage` moved ahead of the manifest record.** It is the one
+  allocation that is deliberately never rolled back, so it has nothing to gain
+  from happening inside the rollback window, and selection needs it.
 - **The config schema is inert.** Key inputs are literal relative paths whose
   contents pisafe hashes; there is no command execution, no shell, and no
   caller-chosen mount path. This matters because the file arrives from the
@@ -353,11 +390,13 @@ this document is the current truth, not an audit trail. These fold into
 
 ## Open questions
 
-- **Whether the declarable environment variables need an allowlist.** `CARGO_HOME`
-  is the case: it moves the registry cache but also installed binaries and
-  credentials. A project declaring it shares those across its own runs only, so
-  no boundary breaks — but a compromised run would then read what an earlier one
-  left. Documenting the footgun and permitting it is the current lean.
+- **Whether the declarable environment variables need an allowlist.** Slice 3
+  refused only what pisafe sets itself, which leaves `CARGO_HOME` declarable:
+  it moves the registry cache but also installed binaries and credentials. A
+  project declaring it shares those across its own runs only, so no boundary
+  breaks — but a compromised run would then read what an earlier one left. This
+  stays open because the answer is a documentation question as much as a code
+  one: nothing tells a repository which variables are a bad idea.
 - **How many snapshots to keep per namespace, and what reset covers.** A whole
   project, one namespace, or one snapshot. Slice 4 has to pick a default; the
   right number probably wants real usage.

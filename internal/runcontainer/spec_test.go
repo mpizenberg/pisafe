@@ -205,6 +205,12 @@ func TestSpecRejectsMutableImageAndUnsafeNames(t *testing.T) {
 
 func TestSharedLayersKeepTheProjectSideReadOnlyToTheRun(t *testing.T) {
 	spec := DefaultSpec("run-123", testProjectKey, testImageID)
+	spec.Caches = []CacheMount{{
+		Name:     "npm",
+		Env:      []string{"npm_config_cache"},
+		Key:      "0123456789abcdef",
+		Snapshot: "fedcba9876543210",
+	}}
 	args, err := spec.RunArgs()
 	if err != nil {
 		t.Fatal(err)
@@ -213,9 +219,9 @@ func TestSharedLayersKeepTheProjectSideReadOnlyToTheRun(t *testing.T) {
 	// The lower layer is the project's and the upper is the run's, which is
 	// what stops one run's install or transcript from reaching another's.
 	for _, expected := range []string{
-		"--volume /var/lib/pisafe/projects/project-3f9c2a1b/cache:/cache:O," +
-			"upperdir=/var/lib/pisafe/runs/run-123/overlay/cache/upper," +
-			"workdir=/var/lib/pisafe/runs/run-123/overlay/cache/work",
+		"--volume /var/lib/pisafe/projects/project-3f9c2a1b/cache/npm/fedcba9876543210:/cache/npm:O," +
+			"upperdir=/var/lib/pisafe/runs/run-123/overlay/cache/npm/upper," +
+			"workdir=/var/lib/pisafe/runs/run-123/overlay/cache/npm/work",
 		"--volume /var/lib/pisafe/projects/project-3f9c2a1b/sessions:/sessions:O," +
 			"upperdir=/var/lib/pisafe/runs/run-123/overlay/sessions/upper," +
 			"workdir=/var/lib/pisafe/runs/run-123/overlay/sessions/work",
@@ -243,6 +249,67 @@ func TestSharedLayersKeepTheProjectSideReadOnlyToTheRun(t *testing.T) {
 		if strings.Contains(strings.Join(args, " "), "/var/lib/pisafe/projects") {
 			t.Errorf("inspection container mounts project state:\n%s", strings.Join(args, " "))
 		}
+	}
+}
+
+// TestUndeclaredCachesShareNothing is the property that makes the mechanism
+// safe by default: a repository that declares nothing gets no shared cache at
+// all, and no tool is redirected anywhere.
+func TestUndeclaredCachesShareNothing(t *testing.T) {
+	args, err := DefaultSpec("run-123", testProjectKey, testImageID).RunArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "/cache") {
+		t.Errorf("a project declaring no cache still got one:\n%s", joined)
+	}
+	if count := strings.Count(joined, "--volume"); count != 1 {
+		t.Errorf("%d shared mounts without a declared cache, want only sessions", count)
+	}
+}
+
+// TestColdCacheStartsFromRunLocalEmptiness keeps a first run off the project
+// store entirely: with nothing published there is nothing to mount, and the
+// overlay's lower is an empty directory of the run's own.
+func TestColdCacheStartsFromRunLocalEmptiness(t *testing.T) {
+	spec := DefaultSpec("run-123", testProjectKey, testImageID)
+	spec.Caches = []CacheMount{{Name: "npm", Env: []string{"npm_config_cache"}, Key: "0123456789abcdef"}}
+	args, err := spec.RunArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := "--volume /var/lib/pisafe/runs/run-123/overlay/cache/npm/lower:/cache/npm:O," +
+		"upperdir=/var/lib/pisafe/runs/run-123/overlay/cache/npm/upper," +
+		"workdir=/var/lib/pisafe/runs/run-123/overlay/cache/npm/work"
+	if joined := strings.Join(args, " "); !strings.Contains(joined, expected) {
+		t.Errorf("run args lack %q:\n%s", expected, joined)
+	}
+}
+
+// TestSpecRefusesCachesItCannotAddressOrTrust covers what arrives from the
+// repository and from a directory listing rather than from pisafe.
+func TestSpecRefusesCachesItCannotAddressOrTrust(t *testing.T) {
+	valid := CacheMount{Name: "npm", Env: []string{"npm_config_cache"}, Key: "0123456789abcdef"}
+	rejected := map[string]CacheMount{
+		"climbing name":     {Name: "../escape", Env: valid.Env, Key: valid.Key},
+		"nested name":       {Name: "npm/sub", Env: valid.Env, Key: valid.Key},
+		"unkeyed":           {Name: "npm", Env: valid.Env},
+		"climbing snapshot": {Name: "npm", Env: valid.Env, Key: valid.Key, Snapshot: "../../etc"},
+		"reserved variable": {Name: "npm", Env: []string{"PI_CODING_AGENT_SESSION_DIR"}, Key: valid.Key},
+		"shell variable":    {Name: "npm", Env: []string{"a=b; rm -rf /"}, Key: valid.Key},
+	}
+	for name, cache := range rejected {
+		spec := DefaultSpec("run-123", testProjectKey, testImageID)
+		spec.Caches = []CacheMount{cache}
+		if _, err := spec.RunArgs(); err == nil {
+			t.Errorf("%s cache was accepted", name)
+		}
+	}
+	spec := DefaultSpec("run-123", testProjectKey, testImageID)
+	spec.Caches = []CacheMount{valid, valid}
+	if _, err := spec.RunArgs(); err == nil {
+		t.Error("two caches sharing one namespace were accepted")
 	}
 }
 

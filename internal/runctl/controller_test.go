@@ -37,6 +37,7 @@ type fakeBackend struct {
 	calls       []backendCall
 	failAt      string
 	failAfterAt string
+	snapshot    string
 	container   *containerInspection
 	// applyWorkspace and applyPackage stand in for the run's storage: the
 	// capture runs against a real workspace and leaves real bundles behind.
@@ -95,6 +96,35 @@ func (backend *fakeBackend) EnsureProjectStorage(_ context.Context, _ string) er
 	backend.calls = append(backend.calls, backendCall{kind: "ensure-project-storage"})
 	if backend.failAt == "ensure-project-storage" {
 		return errors.New("ensure project storage failed")
+	}
+	return nil
+}
+
+func (backend *fakeBackend) SelectCacheSnapshots(
+	_ context.Context,
+	_ string,
+	caches []runcontainer.CacheMount,
+) ([]runcontainer.CacheMount, error) {
+	backend.calls = append(backend.calls, backendCall{kind: "select-snapshots"})
+	if backend.failAt == "select-snapshots" {
+		return nil, errors.New("select snapshots failed")
+	}
+	selected := make([]runcontainer.CacheMount, 0, len(caches))
+	for _, cache := range caches {
+		cache.Snapshot = backend.snapshot
+		selected = append(selected, cache)
+	}
+	return selected, nil
+}
+
+func (backend *fakeBackend) PrepareRunOverlays(
+	_ context.Context,
+	_ string,
+	_ []runcontainer.CacheMount,
+) error {
+	backend.calls = append(backend.calls, backendCall{kind: "prepare-overlays"})
+	if backend.failAt == "prepare-overlays" {
+		return errors.New("prepare overlays failed")
 	}
 	return nil
 }
@@ -307,6 +337,7 @@ func TestStartPreparedActivatesOnlyAfterMaterialization(t *testing.T) {
 		testProject,
 		testImage,
 		testIdentity,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -372,6 +403,7 @@ func TestStartPreparedRollsBackAndRecordsFailure(t *testing.T) {
 		testProject,
 		testImage,
 		testIdentity,
+		nil,
 	)
 	if err == nil || !strings.Contains(err.Error(), "materialize staged repository") {
 		t.Fatalf("error = %v", err)
@@ -410,6 +442,7 @@ func TestStartPreparedCleansStorageAfterAmbiguousCreateFailure(t *testing.T) {
 		testProject,
 		testImage,
 		testIdentity,
+		nil,
 	); err == nil {
 		t.Fatal("StartPrepared unexpectedly succeeded")
 	}

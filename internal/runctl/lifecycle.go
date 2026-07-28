@@ -231,6 +231,7 @@ func (controller Controller) reclaim(
 func specForManifest(manifest runstate.Manifest, imageID string) runcontainer.Spec {
 	spec := runcontainer.DefaultSpec(manifest.RunID, manifest.ProjectKey, imageID)
 	spec.WallSeconds = manifest.ActiveLimitSeconds
+	spec.Caches = manifest.Caches
 	return spec
 }
 

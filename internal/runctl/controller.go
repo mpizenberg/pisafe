@@ -25,6 +25,12 @@ type Backend interface {
 	CreateRunStorage(context.Context, string) error
 	VerifyRunStorage(context.Context, string) error
 	EnsureProjectStorage(context.Context, string) error
+	SelectCacheSnapshots(
+		context.Context,
+		string,
+		[]runcontainer.CacheMount,
+	) ([]runcontainer.CacheMount, error)
+	PrepareRunOverlays(context.Context, string, []runcontainer.CacheMount) error
 	ImportStage(context.Context, string) error
 	Execute(context.Context, io.Reader, ...string) ([]byte, error)
 	StreamExecute(context.Context, io.Writer, ...string) error
@@ -85,8 +91,10 @@ func (controller Controller) StartPrepared(
 	project runid.Project,
 	imageID string,
 	identity gitstage.Identity,
+	caches []runcontainer.CacheMount,
 ) (_ runstate.Manifest, returnErr error) {
 	spec := runcontainer.DefaultSpec(prepared.Snapshot.RunID, project.Key, imageID)
+	spec.Caches = caches
 	if err := spec.Validate(); err != nil {
 		return runstate.Manifest{}, err
 	}
@@ -97,6 +105,18 @@ func (controller Controller) StartPrepared(
 		return runstate.Manifest{}, err
 	}
 
+	// The project filesystem is not rolled back with a failed run. It is shared
+	// with every other run of the project and outlives all of them, so it is
+	// ensured before the run has anything to roll back.
+	if err := controller.backend.EnsureProjectStorage(ctx, spec.ProjectKey); err != nil {
+		return runstate.Manifest{}, err
+	}
+	selected, err := controller.backend.SelectCacheSnapshots(ctx, spec.ProjectKey, spec.Caches)
+	if err != nil {
+		return runstate.Manifest{}, err
+	}
+	spec.Caches = selected
+
 	manifest, err := controller.store.Create(runstate.Manifest{
 		RunID:              prepared.Snapshot.RunID,
 		Project:            project.Directory,
@@ -105,6 +125,7 @@ func (controller Controller) StartPrepared(
 		Image:              imageID,
 		Container:          spec.ContainerName(),
 		Workspace:          "/work/" + project.Directory,
+		Caches:             spec.Caches,
 		ActiveLimitSeconds: spec.WallSeconds,
 	})
 	if err != nil {
@@ -154,14 +175,11 @@ func (controller Controller) StartPrepared(
 		return runstate.Manifest{}, fmt.Errorf("stream stage into VM: %w", err)
 	}
 
-	// The project filesystem is not rolled back with a failed run. It is shared
-	// with every other run of the project and outlives all of them.
-	if err := controller.backend.EnsureProjectStorage(ctx, spec.ProjectKey); err != nil {
-		return runstate.Manifest{}, err
-	}
-
 	storageAllocated = true
 	if err := controller.backend.CreateRunStorage(ctx, spec.RunID); err != nil {
+		return runstate.Manifest{}, err
+	}
+	if err := controller.backend.PrepareRunOverlays(ctx, spec.RunID, spec.Caches); err != nil {
 		return runstate.Manifest{}, err
 	}
 	if err := controller.backend.ImportStage(ctx, spec.RunID); err != nil {

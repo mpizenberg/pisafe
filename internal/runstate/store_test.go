@@ -1,6 +1,7 @@
 package runstate
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -102,7 +103,7 @@ func TestStoreRejectsDuplicateAndCorruptManifest(t *testing.T) {
 	}
 	if err := os.WriteFile(
 		filepath.Join(root, "bad.json"),
-		[]byte(`{"version":5,"run_id":"other"}`),
+		fmt.Appendf(nil, `{"version":%d,"run_id":"other"}`, manifestVersion),
 		0o600,
 	); err != nil {
 		t.Fatal(err)
