@@ -44,15 +44,18 @@ func TestRenderConfigContainsSecurityBoundary(t *testing.T) {
 		"/etc/pisafe/security-profile",
 		"sha256:",
 		"pisafe-clock-step",
-		"pisafe-run-storage",
+		"pisafe-storage",
 		"mkfs.ext4 -q -F -m 0",
 		"mount -o loop,nodev,nosuid",
 		`if [[ -e "$run_root" || -L "$run_root" ]]`,
 		`if [[ -e "$image" || -L "$image" ]]`,
-		`"0:0:600:10737418240"`,
+		`storage_bytes=10737418240`,
+		"overlay/cache/upper",
 		`storage_uid="$((subuid_start + 999))"`,
 		"/var/lib/pisafe/runs",
 		"/var/lib/pisafe/run-images",
+		"/var/lib/pisafe/projects",
+		"/var/lib/pisafe/project-images",
 		`sed -i "\|^${pisafe_user} .*NOPASSWD:ALL|d"`,
 		`gpasswd --delete "${pisafe_user}" wheel`,
 	}
@@ -74,7 +77,7 @@ func TestRenderConfigContainsSecurityBoundary(t *testing.T) {
 		t.Error("config retains an unreplaced template value")
 	}
 	trapIndex := strings.Index(text, "trap 'cleanup_partial || true' ERR")
-	truncateIndex := strings.Index(text, `truncate -s 10737418240 "$image"`)
+	truncateIndex := strings.Index(text, `truncate -s "$storage_bytes" "$image"`)
 	if trapIndex < 0 || truncateIndex < 0 || trapIndex > truncateIndex {
 		t.Error("storage cleanup trap is not installed before image allocation")
 	}

@@ -15,21 +15,23 @@ import (
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/runcontainer"
+	"github.com/mpizenberg/pisafe/internal/runid"
 	"github.com/mpizenberg/pisafe/internal/runssh"
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
 type Backend interface {
 	CreateStage(context.Context, gitstage.PreparedStage) (string, error)
-	CreateStorage(context.Context, string) error
-	VerifyStorage(context.Context, string) error
+	CreateRunStorage(context.Context, string) error
+	VerifyRunStorage(context.Context, string) error
+	EnsureProjectStorage(context.Context, string) error
 	ImportStage(context.Context, string) error
 	Execute(context.Context, io.Reader, ...string) ([]byte, error)
 	StreamExecute(context.Context, io.Writer, ...string) error
 	FetchApplyArtifact(context.Context, string, gitstage.ApplyArtifact, string) error
 	RemoveApplyPackage(context.Context, string) error
 	RemoveRun(context.Context, string) error
-	RemoveStorage(context.Context, string) error
+	RemoveRunStorage(context.Context, string) error
 	SSHGateway(context.Context) (runssh.Gateway, error)
 }
 
@@ -80,28 +82,29 @@ func New(
 func (controller Controller) StartPrepared(
 	ctx context.Context,
 	prepared gitstage.PreparedStage,
-	projectDirectory string,
+	project runid.Project,
 	imageID string,
 	identity gitstage.Identity,
 ) (_ runstate.Manifest, returnErr error) {
-	spec := runcontainer.DefaultSpec(prepared.Snapshot.RunID, imageID)
+	spec := runcontainer.DefaultSpec(prepared.Snapshot.RunID, project.Key, imageID)
 	if err := spec.Validate(); err != nil {
 		return runstate.Manifest{}, err
 	}
 	if err := identity.Validate(); err != nil {
 		return runstate.Manifest{}, err
 	}
-	if _, err := spec.MaterializeArgs(projectDirectory); err != nil {
+	if _, err := spec.MaterializeArgs(project.Directory); err != nil {
 		return runstate.Manifest{}, err
 	}
 
 	manifest, err := controller.store.Create(runstate.Manifest{
 		RunID:              prepared.Snapshot.RunID,
-		Project:            projectDirectory,
+		Project:            project.Directory,
+		ProjectKey:         project.Key,
 		Snapshot:           prepared.Snapshot,
 		Image:              imageID,
 		Container:          spec.ContainerName(),
-		Workspace:          "/work/" + projectDirectory,
+		Workspace:          "/work/" + project.Directory,
 		ActiveLimitSeconds: spec.WallSeconds,
 	})
 	if err != nil {
@@ -151,8 +154,14 @@ func (controller Controller) StartPrepared(
 		return runstate.Manifest{}, fmt.Errorf("stream stage into VM: %w", err)
 	}
 
+	// The project filesystem is not rolled back with a failed run. It is shared
+	// with every other run of the project and outlives all of them.
+	if err := controller.backend.EnsureProjectStorage(ctx, spec.ProjectKey); err != nil {
+		return runstate.Manifest{}, err
+	}
+
 	storageAllocated = true
-	if err := controller.backend.CreateStorage(ctx, spec.RunID); err != nil {
+	if err := controller.backend.CreateRunStorage(ctx, spec.RunID); err != nil {
 		return runstate.Manifest{}, err
 	}
 	if err := controller.backend.ImportStage(ctx, spec.RunID); err != nil {
@@ -202,7 +211,7 @@ func (controller Controller) StartPrepared(
 		return runstate.Manifest{}, fmt.Errorf("finalize run SSH connection: %w", err)
 	}
 
-	materializeArgs, err := spec.MaterializeArgs(projectDirectory)
+	materializeArgs, err := spec.MaterializeArgs(project.Directory)
 	if err != nil {
 		return runstate.Manifest{}, err
 	}
@@ -392,7 +401,7 @@ func (controller Controller) rollback(
 		}
 	}
 	if storageAllocated {
-		if err := controller.backend.RemoveStorage(ctx, spec.RunID); err != nil {
+		if err := controller.backend.RemoveRunStorage(ctx, spec.RunID); err != nil {
 			failures = append(failures, fmt.Errorf("remove failed storage: %w", err))
 		}
 	}

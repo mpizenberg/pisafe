@@ -51,8 +51,8 @@ func TestProjectSlug(t *testing.T) {
 		strings.Repeat("a", 64) + "-tail": strings.Repeat("a", 32),
 	}
 	for input, expected := range tests {
-		if actual := ProjectSlug(input); actual != expected {
-			t.Errorf("ProjectSlug(%q) = %q, want %q", input, actual, expected)
+		if actual := projectSlug(input); actual != expected {
+			t.Errorf("projectSlug(%q) = %q, want %q", input, actual, expected)
 		}
 	}
 }
@@ -61,4 +61,44 @@ type errorReader struct{}
 
 func (errorReader) Read([]byte) (int, error) {
 	return 0, errors.New("failed")
+}
+
+func TestNewProjectSeparatesCheckoutsSharingADirectoryName(t *testing.T) {
+	first, err := NewProject("/Users/alice/work/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewProject("/Users/alice/fork/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Directory != "api" || second.Directory != "api" {
+		t.Fatalf("directories = %q, %q", first.Directory, second.Directory)
+	}
+	if first.Key == second.Key {
+		t.Fatalf("two checkouts share the key %q", first.Key)
+	}
+	// The key is what a filesystem is named after, so it has to survive the
+	// same validation a run ID does.
+	for _, project := range []Project{first, second} {
+		if err := Validate(project.Key); err != nil {
+			t.Fatalf("Validate(%q): %v", project.Key, err)
+		}
+		if !strings.HasPrefix(project.Key, "api-") || len(project.Key) != len("api-")+8 {
+			t.Fatalf("key = %q", project.Key)
+		}
+	}
+	repeated, err := NewProject("/Users/alice/work/api/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeated.Key != first.Key {
+		t.Fatalf("key = %q, want the stable %q", repeated.Key, first.Key)
+	}
+}
+
+func TestNewProjectRefusesARootItCannotAddress(t *testing.T) {
+	if _, err := NewProject("work/api"); err == nil {
+		t.Fatal("a relative repository root was accepted")
+	}
 }

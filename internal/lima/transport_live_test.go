@@ -15,6 +15,11 @@ import (
 	"github.com/mpizenberg/pisafe/internal/runssh"
 )
 
+// liveProjectKey is the project every live run in this package belongs to. It
+// is shaped like a real key so the shared filesystem it names is the same kind
+// of object a run creates.
+const liveProjectKey = "live-0000live"
+
 func TestLiveSSHStageAndContainerMaterialize(t *testing.T) {
 	if os.Getenv("PISAFE_LIVE_LIMA") != "1" {
 		t.Skip("set PISAFE_LIVE_LIMA=1 to run persistent Lima integration tests")
@@ -49,8 +54,11 @@ func TestLiveSSHStageAndContainerMaterialize(t *testing.T) {
 		}
 	}()
 
-	spec := runcontainer.DefaultSpec(runID, imageID)
-	if err := transport.CreateStorage(ctx, runID); err != nil {
+	spec := runcontainer.DefaultSpec(runID, liveProjectKey, imageID)
+	if err := transport.EnsureProjectStorage(ctx, liveProjectKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := transport.CreateRunStorage(ctx, runID); err != nil {
 		t.Fatal(err)
 	}
 	defer cleanupLiveContainer(t, transport, spec)
@@ -283,7 +291,7 @@ func cleanupLiveContainer(t *testing.T, transport Transport, spec runcontainer.S
 		nil,
 		"podman", "rm", "--force", spec.ContainerName(),
 	)
-	storageErr := transport.RemoveStorage(ctx, spec.RunID)
+	storageErr := transport.RemoveRunStorage(ctx, spec.RunID)
 	if containerErr != nil {
 		t.Errorf("remove live container: %v", containerErr)
 	}

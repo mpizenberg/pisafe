@@ -259,46 +259,38 @@ func (transport Transport) RemoveRun(ctx context.Context, runID string) error {
 	return nil
 }
 
-// CreateStorage allocates one root-owned, fixed-capacity filesystem. The
-// privileged helper accepts only validated run IDs and a fixed size policy.
-func (transport Transport) CreateStorage(ctx context.Context, runID string) error {
-	if err := runid.Validate(runID); err != nil {
-		return err
-	}
-	if _, err := transport.Execute(
-		ctx,
-		nil,
-		"sudo", "/usr/local/sbin/pisafe-run-storage", "create", runID,
-	); err != nil {
-		return fmt.Errorf("create quota-limited run storage: %w", err)
-	}
-	return nil
+// CreateRunStorage allocates one root-owned, fixed-capacity filesystem. The
+// privileged helper accepts only validated identifiers, two fixed scopes, and
+// a fixed size policy per scope.
+func (transport Transport) CreateRunStorage(ctx context.Context, runID string) error {
+	return transport.storage(ctx, "create", "run", runID)
 }
 
-func (transport Transport) VerifyStorage(ctx context.Context, runID string) error {
-	if err := runid.Validate(runID); err != nil {
-		return err
-	}
-	if _, err := transport.Execute(
-		ctx,
-		nil,
-		"sudo", "/usr/local/sbin/pisafe-run-storage", "verify", runID,
-	); err != nil {
-		return fmt.Errorf("verify quota-limited run storage: %w", err)
-	}
-	return nil
+func (transport Transport) VerifyRunStorage(ctx context.Context, runID string) error {
+	return transport.storage(ctx, "verify", "run", runID)
 }
 
-func (transport Transport) RemoveStorage(ctx context.Context, runID string) error {
-	if err := runid.Validate(runID); err != nil {
+func (transport Transport) RemoveRunStorage(ctx context.Context, runID string) error {
+	return transport.storage(ctx, "remove", "run", runID)
+}
+
+// EnsureProjectStorage allocates the filesystem holding one project's shared
+// layers, or verifies the one already there. A project outlives every run of
+// it, so no run may assume it is creating it.
+func (transport Transport) EnsureProjectStorage(ctx context.Context, projectKey string) error {
+	return transport.storage(ctx, "ensure", "project", projectKey)
+}
+
+func (transport Transport) storage(ctx context.Context, action, scope, id string) error {
+	if err := runid.Validate(id); err != nil {
 		return err
 	}
 	if _, err := transport.Execute(
 		ctx,
 		nil,
-		"sudo", "/usr/local/sbin/pisafe-run-storage", "remove", runID,
+		"sudo", "/usr/local/sbin/pisafe-storage", action, scope, id,
 	); err != nil {
-		return fmt.Errorf("remove quota-limited run storage: %w", err)
+		return fmt.Errorf("%s quota-limited %s storage: %w", action, scope, err)
 	}
 	return nil
 }

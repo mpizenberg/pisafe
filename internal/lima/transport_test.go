@@ -136,17 +136,22 @@ func TestTransportStorageUsesFixedPrivilegedHelper(t *testing.T) {
 	runner := &fakeRunner{}
 	transport := Transport{instance: InstanceName, runner: runner}
 	for _, operation := range []struct {
-		name string
-		call func() error
+		action string
+		scope  string
+		id     string
+		call   func() error
 	}{
-		{name: "create", call: func() error {
-			return transport.CreateStorage(context.Background(), "run-123")
+		{action: "create", scope: "run", id: "run-123", call: func() error {
+			return transport.CreateRunStorage(context.Background(), "run-123")
 		}},
-		{name: "verify", call: func() error {
-			return transport.VerifyStorage(context.Background(), "run-123")
+		{action: "verify", scope: "run", id: "run-123", call: func() error {
+			return transport.VerifyRunStorage(context.Background(), "run-123")
 		}},
-		{name: "remove", call: func() error {
-			return transport.RemoveStorage(context.Background(), "run-123")
+		{action: "remove", scope: "run", id: "run-123", call: func() error {
+			return transport.RemoveRunStorage(context.Background(), "run-123")
+		}},
+		{action: "ensure", scope: "project", id: "api-3f9c2a1b", call: func() error {
+			return transport.EnsureProjectStorage(context.Background(), "api-3f9c2a1b")
 		}},
 	} {
 		if err := operation.call(); err != nil {
@@ -157,7 +162,7 @@ func TestTransportStorageUsesFixedPrivilegedHelper(t *testing.T) {
 			t,
 			call,
 			"shell", "pisafe", "sudo",
-			"/usr/local/sbin/pisafe-run-storage", operation.name, "run-123",
+			"/usr/local/sbin/pisafe-storage", operation.action, operation.scope, operation.id,
 		)
 	}
 }

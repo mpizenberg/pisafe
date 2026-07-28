@@ -16,9 +16,12 @@ import (
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/runcontainer"
 	"github.com/mpizenberg/pisafe/internal/runcopy"
+	"github.com/mpizenberg/pisafe/internal/runid"
 	"github.com/mpizenberg/pisafe/internal/runssh"
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
+
+var testProject = runid.Project{Directory: "project", Key: "project-3f9c2a1b"}
 
 const testImage = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
@@ -64,7 +67,7 @@ func (backend *fakeBackend) ImportStage(
 	return nil
 }
 
-func (backend *fakeBackend) CreateStorage(_ context.Context, _ string) error {
+func (backend *fakeBackend) CreateRunStorage(_ context.Context, _ string) error {
 	backend.calls = append(backend.calls, backendCall{kind: "create-storage"})
 	if backend.failAt == "create-storage" {
 		return errors.New("storage failed")
@@ -72,7 +75,7 @@ func (backend *fakeBackend) CreateStorage(_ context.Context, _ string) error {
 	return nil
 }
 
-func (backend *fakeBackend) VerifyStorage(_ context.Context, _ string) error {
+func (backend *fakeBackend) VerifyRunStorage(_ context.Context, _ string) error {
 	backend.calls = append(backend.calls, backendCall{kind: "verify-storage"})
 	if backend.failAt == "verify-storage" {
 		return errors.New("verify storage failed")
@@ -80,10 +83,18 @@ func (backend *fakeBackend) VerifyStorage(_ context.Context, _ string) error {
 	return nil
 }
 
-func (backend *fakeBackend) RemoveStorage(_ context.Context, _ string) error {
+func (backend *fakeBackend) RemoveRunStorage(_ context.Context, _ string) error {
 	backend.calls = append(backend.calls, backendCall{kind: "remove-storage"})
 	if backend.failAt == "remove-storage" {
 		return errors.New("remove storage failed")
+	}
+	return nil
+}
+
+func (backend *fakeBackend) EnsureProjectStorage(_ context.Context, _ string) error {
+	backend.calls = append(backend.calls, backendCall{kind: "ensure-project-storage"})
+	if backend.failAt == "ensure-project-storage" {
+		return errors.New("ensure project storage failed")
 	}
 	return nil
 }
@@ -293,7 +304,7 @@ func TestStartPreparedActivatesOnlyAfterMaterialization(t *testing.T) {
 	manifest, err := controller.StartPrepared(
 		context.Background(),
 		testPrepared(),
-		"project",
+		testProject,
 		testImage,
 		testIdentity,
 	)
@@ -306,6 +317,7 @@ func TestStartPreparedActivatesOnlyAfterMaterialization(t *testing.T) {
 	joined := callsString(backend.calls)
 	for _, expected := range []string{
 		"stage",
+		"ensure-project-storage",
 		"create-storage",
 		"import",
 		"pisafe-guest configure-ssh",
@@ -357,7 +369,7 @@ func TestStartPreparedRollsBackAndRecordsFailure(t *testing.T) {
 	_, err := controller.StartPrepared(
 		context.Background(),
 		testPrepared(),
-		"project",
+		testProject,
 		testImage,
 		testIdentity,
 	)
@@ -395,7 +407,7 @@ func TestStartPreparedCleansStorageAfterAmbiguousCreateFailure(t *testing.T) {
 	if _, err := controller.StartPrepared(
 		context.Background(),
 		testPrepared(),
-		"project",
+		testProject,
 		testImage,
 		testIdentity,
 	); err == nil {
@@ -410,7 +422,7 @@ func TestStartPreparedCleansStorageAfterAmbiguousCreateFailure(t *testing.T) {
 func TestLifecycleStopsAndResumesWithRemainingBudget(t *testing.T) {
 	store := runstate.NewStore(t.TempDir())
 	manifest := activeManifest(t, store)
-	spec := specForManifest(manifest)
+	spec := specForManifest(manifest, manifest.Image)
 	runArgs, err := spec.RunArgs()
 	if err != nil {
 		t.Fatal(err)
@@ -462,7 +474,7 @@ func TestLifecycleStopsAndResumesWithRemainingBudget(t *testing.T) {
 func TestResumeCleansContainerAfterAmbiguousStartFailure(t *testing.T) {
 	store := runstate.NewStore(t.TempDir())
 	manifest := activeManifest(t, store)
-	spec := specForManifest(manifest)
+	spec := specForManifest(manifest, manifest.Image)
 	runArgs, err := spec.RunArgs()
 	if err != nil {
 		t.Fatal(err)
@@ -508,11 +520,12 @@ func TestDiscardCleansActiveAndFailedCreatingRuns(t *testing.T) {
 				manifest = activeManifest(t, store)
 			} else {
 				prepared := testPrepared()
-				spec := runcontainer.DefaultSpec(prepared.Snapshot.RunID, testImage)
+				spec := runcontainer.DefaultSpec(prepared.Snapshot.RunID, testProject.Key, testImage)
 				var err error
 				manifest, err = store.Create(runstate.Manifest{
 					RunID:              spec.RunID,
 					Project:            "project",
+					ProjectKey:         "project-3f9c2a1b",
 					Snapshot:           prepared.Snapshot,
 					Image:              spec.ImageID,
 					Container:          spec.ContainerName(),
@@ -525,7 +538,7 @@ func TestDiscardCleansActiveAndFailedCreatingRuns(t *testing.T) {
 			}
 			backend := &fakeBackend{}
 			if initial == runstate.StateActive {
-				spec := specForManifest(manifest)
+				spec := specForManifest(manifest, manifest.Image)
 				args, err := spec.RunArgs()
 				if err != nil {
 					t.Fatal(err)
@@ -559,7 +572,7 @@ func TestDiscardCleansActiveAndFailedCreatingRuns(t *testing.T) {
 func TestLifecycleRefusesMismatchedContainerBeforeDeletion(t *testing.T) {
 	store := runstate.NewStore(t.TempDir())
 	manifest := activeManifest(t, store)
-	spec := specForManifest(manifest)
+	spec := specForManifest(manifest, manifest.Image)
 	args, err := spec.RunArgs()
 	if err != nil {
 		t.Fatal(err)
@@ -634,32 +647,56 @@ func inspectionFromRunArgs(args []string, name string) *containerInspection {
 	inspection.State.Status = "running"
 	inspection.State.StartedAt = time.Now().UTC()
 	for index, arg := range args {
-		if arg != "--mount" || index+1 >= len(args) {
+		if index+1 >= len(args) {
 			continue
 		}
-		parts := strings.Split(args[index+1], ",")
-		mount := struct {
-			Type        string `json:"Type"`
-			Source      string `json:"Source"`
-			Destination string `json:"Destination"`
-		}{}
-		for _, part := range parts {
-			key, value, found := strings.Cut(part, "=")
-			if !found {
-				continue
-			}
-			switch key {
-			case "type":
-				mount.Type = value
-			case "src":
-				mount.Source = value
-			case "dst":
-				mount.Destination = value
-			}
+		switch arg {
+		case "--mount":
+			inspection.Mounts = append(inspection.Mounts, bindMount(args[index+1]))
+		case "--volume":
+			inspection.Mounts = append(inspection.Mounts, overlayMount(args[index+1]))
 		}
-		inspection.Mounts = append(inspection.Mounts, mount)
 	}
 	return inspection
+}
+
+func bindMount(specification string) containerMount {
+	mount := containerMount{}
+	for _, part := range strings.Split(specification, ",") {
+		key, value, found := strings.Cut(part, "=")
+		if !found {
+			continue
+		}
+		switch key {
+		case "type":
+			mount.Type = value
+		case "src":
+			mount.Source = value
+		case "dst":
+			mount.Destination = value
+		}
+	}
+	return mount
+}
+
+// overlayMount mirrors what Podman reports for lower:destination:O,options —
+// a bind onto a merged directory it names itself, with the real layers left
+// in the options.
+func overlayMount(specification string) containerMount {
+	lower, rest, _ := strings.Cut(specification, ":")
+	destination, options, _ := strings.Cut(rest, ":")
+	mount := containerMount{
+		Type:        "bind",
+		Source:      "/containers/storage/overlay/merged",
+		Destination: destination,
+		Options:     []string{"lowerdir=" + lower},
+	}
+	for _, option := range strings.Split(options, ",") {
+		if option != "O" {
+			mount.Options = append(mount.Options, option)
+		}
+	}
+	return mount
 }
 
 func flagValue(args []string, flag string) string {
@@ -674,10 +711,11 @@ func flagValue(args []string, flag string) string {
 func activeManifest(t *testing.T, store runstate.Store) runstate.Manifest {
 	t.Helper()
 	prepared := testPrepared()
-	spec := runcontainer.DefaultSpec(prepared.Snapshot.RunID, testImage)
+	spec := runcontainer.DefaultSpec(prepared.Snapshot.RunID, testProject.Key, testImage)
 	if _, err := store.Create(runstate.Manifest{
 		RunID:              spec.RunID,
 		Project:            "project",
+		ProjectKey:         "project-3f9c2a1b",
 		Snapshot:           prepared.Snapshot,
 		Image:              spec.ImageID,
 		Container:          spec.ContainerName(),

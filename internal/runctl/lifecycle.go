@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -33,11 +34,14 @@ type containerInspection struct {
 		StartedAt  time.Time `json:"StartedAt"`
 		FinishedAt time.Time `json:"FinishedAt"`
 	} `json:"State"`
-	Mounts []struct {
-		Type        string `json:"Type"`
-		Source      string `json:"Source"`
-		Destination string `json:"Destination"`
-	} `json:"Mounts"`
+	Mounts []containerMount `json:"Mounts"`
+}
+
+type containerMount struct {
+	Type        string   `json:"Type"`
+	Source      string   `json:"Source"`
+	Destination string   `json:"Destination"`
+	Options     []string `json:"Options"`
 }
 
 func (controller Controller) Stop(
@@ -51,10 +55,10 @@ func (controller Controller) Stop(
 	if manifest.State != runstate.StateActive {
 		return runstate.Manifest{}, fmt.Errorf("run %q is %s, not active", runID, manifest.State)
 	}
-	spec := specForManifest(manifest)
+	spec := specForManifest(manifest, manifest.Image)
 	endedAt, err := controller.stopAndRemoveContainer(ctx, spec)
 	if err == nil {
-		err = controller.backend.VerifyStorage(ctx, runID)
+		err = controller.backend.VerifyRunStorage(ctx, runID)
 	}
 	if err != nil {
 		return runstate.Manifest{}, controller.recordLifecycleError(runID, "stop", err)
@@ -85,12 +89,12 @@ func (controller Controller) Resume(
 			time.Duration(manifest.ActiveLimitSeconds)*time.Second,
 		)
 	}
-	spec := specForManifest(manifest)
+	spec := specForManifest(manifest, manifest.Image)
 	spec.WallSeconds = remaining
 	if err := spec.Validate(); err != nil {
 		return runstate.Manifest{}, err
 	}
-	if err := controller.backend.VerifyStorage(ctx, runID); err != nil {
+	if err := controller.backend.VerifyRunStorage(ctx, runID); err != nil {
 		return runstate.Manifest{}, controller.recordLifecycleError(runID, "resume", err)
 	}
 
@@ -205,11 +209,11 @@ func (controller Controller) reclaim(
 	ctx context.Context,
 	manifest runstate.Manifest,
 ) error {
-	if _, err := controller.stopAndRemoveContainer(ctx, specForManifest(manifest)); err != nil {
+	if _, err := controller.stopAndRemoveContainer(ctx, specForManifest(manifest, manifest.Image)); err != nil {
 		return err
 	}
 	var failures []error
-	if err := controller.backend.RemoveStorage(ctx, manifest.RunID); err != nil {
+	if err := controller.backend.RemoveRunStorage(ctx, manifest.RunID); err != nil {
 		failures = append(failures, err)
 	}
 	if err := controller.backend.RemoveRun(ctx, manifest.RunID); err != nil {
@@ -221,8 +225,11 @@ func (controller Controller) reclaim(
 	return errors.Join(failures...)
 }
 
-func specForManifest(manifest runstate.Manifest) runcontainer.Spec {
-	spec := runcontainer.DefaultSpec(manifest.RunID, manifest.Image)
+// specForManifest rebuilds the container definition of a recorded run. The
+// image is a separate argument because inspecting a run uses the current
+// managed image, not the one the run was created from.
+func specForManifest(manifest runstate.Manifest, imageID string) runcontainer.Spec {
+	spec := runcontainer.DefaultSpec(manifest.RunID, manifest.ProjectKey, imageID)
 	spec.WallSeconds = manifest.ActiveLimitSeconds
 	return spec
 }
@@ -315,6 +322,14 @@ func (controller Controller) inspectContainer(
 	return inspection, nil
 }
 
+// mountRequirement pins one mount a run must have. A bind is named by its
+// source; an overlay by the layers it was stacked from, because Podman
+// substitutes its own merged directory for the source.
+type mountRequirement struct {
+	source  string
+	options []string
+}
+
 func validateContainerInspection(
 	spec runcontainer.Spec,
 	inspection containerInspection,
@@ -332,22 +347,36 @@ func validateContainerInspection(
 	if inspection.Config.Labels["io.pisafe.run"] != spec.RunID {
 		return errors.New("run container label does not match manifest")
 	}
-	expected := map[string]string{
-		"/work":      spec.WorkspacePath(),
-		"/home/node": spec.HomePath(),
+	// Podman reports an overlay as a bind onto its own merged directory, whose
+	// path it chooses, so the cache is pinned by the layers it was stacked
+	// from instead: the lower must be this project's and nothing else's, and
+	// the upper must be inside this run.
+	expected := map[string]mountRequirement{
+		"/work":      {source: spec.WorkspacePath()},
+		"/home/node": {source: spec.HomePath()},
+		"/cache": {options: []string{
+			"lowerdir=" + spec.ProjectCachePath(),
+			"upperdir=" + spec.StoragePath() + "/overlay/cache/upper",
+			"workdir=" + spec.StoragePath() + "/overlay/cache/work",
+		}},
 	}
 	for _, mount := range inspection.Mounts {
-		source, required := expected[mount.Destination]
-		if required {
-			if mount.Type != "bind" || mount.Source != source {
-				return fmt.Errorf("run container mount %s does not match manifest", mount.Destination)
+		required, isExpected := expected[mount.Destination]
+		if !isExpected {
+			if mount.Type == "bind" || mount.Type == "volume" {
+				return fmt.Errorf("run container has unexpected persistent mount %s", mount.Destination)
 			}
-			delete(expected, mount.Destination)
 			continue
 		}
-		if mount.Type == "bind" || mount.Type == "volume" {
-			return fmt.Errorf("run container has unexpected persistent mount %s", mount.Destination)
+		matched := mount.Type == "bind" &&
+			(required.source == "" || mount.Source == required.source)
+		for _, option := range required.options {
+			matched = matched && slices.Contains(mount.Options, option)
 		}
+		if !matched {
+			return fmt.Errorf("run container mount %s does not match manifest", mount.Destination)
+		}
+		delete(expected, mount.Destination)
 	}
 	if len(expected) != 0 {
 		return errors.New("run container is missing persistent storage mounts")

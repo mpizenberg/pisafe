@@ -36,6 +36,7 @@ func TestListShowsDurableState(t *testing.T) {
 	if _, err := store.Create(runstate.Manifest{
 		RunID:              "run-123",
 		Project:            "project",
+		ProjectKey:         "project-3f9c2a1b",
 		ActiveLimitSeconds: 8 * 60 * 60,
 		Snapshot: gitstage.Snapshot{
 			RunID:   "run-123",
@@ -177,6 +178,7 @@ func TestInactiveRunIsRefusedBeforeAnythingLaunches(t *testing.T) {
 	if _, err := store.Create(runstate.Manifest{
 		RunID:              "inactive-run",
 		Project:            "project",
+		ProjectKey:         "project-3f9c2a1b",
 		ActiveLimitSeconds: 8 * 60 * 60,
 		Snapshot: gitstage.Snapshot{
 			RunID:   "inactive-run",
@@ -209,6 +211,7 @@ func TestConnectPointsAStoppedRunAtResume(t *testing.T) {
 	if _, err := store.Create(runstate.Manifest{
 		RunID:              "stopped-run",
 		Project:            "project",
+		ProjectKey:         "project-3f9c2a1b",
 		ActiveLimitSeconds: 8 * 60 * 60,
 		Snapshot:           gitstage.Snapshot{RunID: "stopped-run", WorkRef: "refs/heads/work/stopped-run"},
 	}); err != nil {

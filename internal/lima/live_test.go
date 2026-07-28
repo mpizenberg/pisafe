@@ -96,7 +96,7 @@ func ensureLiveVM(t *testing.T) {
 	}
 }
 
-func runLive(t *testing.T, ctx context.Context, arguments ...string) {
+func runLive(t *testing.T, ctx context.Context, arguments ...string) string {
 	t.Helper()
 	commandArguments := append([]string{"shell", lima.InstanceName}, arguments...)
 	command := exec.CommandContext(ctx, "limactl", commandArguments...)
@@ -112,4 +112,5 @@ func runLive(t *testing.T, ctx context.Context, arguments ...string) {
 	if testing.Verbose() && len(output) != 0 {
 		fmt.Printf("%s", output)
 	}
+	return strings.TrimSpace(string(output))
 }

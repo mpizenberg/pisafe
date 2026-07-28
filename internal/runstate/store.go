@@ -20,7 +20,7 @@ import (
 	"github.com/mpizenberg/pisafe/internal/runid"
 )
 
-const manifestVersion = 4
+const manifestVersion = 5
 
 var (
 	gitObjectPattern  = regexp.MustCompile(`^(?:[a-f0-9]{40}|[a-f0-9]{64})$`)
@@ -59,6 +59,7 @@ type Manifest struct {
 	Version             int               `json:"version"`
 	RunID               string            `json:"run_id"`
 	Project             string            `json:"project"`
+	ProjectKey          string            `json:"project_key"`
 	State               State             `json:"state"`
 	Snapshot            gitstage.Snapshot `json:"snapshot"`
 	Image               string            `json:"image,omitempty"`
@@ -574,6 +575,9 @@ func validateManifestIdentity(manifest Manifest) error {
 	}
 	if manifest.Project == "" {
 		return fmt.Errorf("project name is required")
+	}
+	if err := runid.Validate(manifest.ProjectKey); err != nil {
+		return fmt.Errorf("invalid project key: %w", err)
 	}
 	if manifest.ActiveLimitSeconds <= 0 {
 		return fmt.Errorf("active wall-clock limit is required")

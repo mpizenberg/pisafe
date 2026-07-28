@@ -43,6 +43,14 @@ documentation. Reproduce with the commands under [Verification](#verification).
   neither, both uppers survived exit, the lower stayed byte-unchanged. No new
   VM privilege: the root helper gains per-project filesystem creation, not
   mounting.
+- **The overlay spans two filesystems.** A lower on the project's ext4 image
+  and an upper on the run's own was mounted and written. Podman is particular
+  about the rest: `:O` is refused alongside any other mount option, so the
+  cache mount cannot carry `nodev,nosuid`; `--mount type=overlay` does not
+  exist, so `-v` is the only spelling; and both `upperdir` and `workdir` must
+  already exist, so the run filesystem is created with them.
+- **npm redirects into that overlay.** `npm_config_cache` moves the whole
+  cache, and `npm_config_logs_dir` keeps logs out of it.
 - **Ownership follows the existing rule.** The overlay is writable only when
   the lower's contents are owned by the container's mapped UID, the same
   `subuid_start + 999` the run-storage helper already derives.
@@ -64,21 +72,28 @@ Project key: directory slug plus the first eight hex characters of the SHA-256
 of the Mac-side Git root path, e.g. `api-3f9c2a1b`.
 
 ```text
-/var/lib/pisafe/global/<profile>          read-only mount, listed in packages
-/var/lib/pisafe/projects/<key>/cache/     overlay lower → ~/.npm, ~/.cargo, …
-/var/lib/pisafe/projects/<key>/sessions/  overlay lower → session dir
-/var/lib/pisafe/runs/<run>/               existing per-run ext4, holds the uppers
+/var/lib/pisafe/global/<profile>            read-only mount, listed in packages
+/var/lib/pisafe/projects/<key>/cache/       overlay lower → /cache
+/var/lib/pisafe/projects/<key>/sessions/    overlay lower → session dir
+/var/lib/pisafe/runs/<run>/workspace        bind mount → /work
+/var/lib/pisafe/runs/<run>/home             bind mount → /home/node
+/var/lib/pisafe/runs/<run>/overlay/cache/   the run's private upper and work
 ```
+
+Both the project and the run filesystem are root-owned fixed-capacity ext4
+images allocated by the same privileged helper, which is the only thing that
+mounts anything.
 
 ## Slices
 
 - [x] **0. Substrate scouting.** Establish the mechanisms above against the
       live VM. Commit `ce7cccb`.
-- [ ] **1. Per-project storage and the dependency cache.** Extend the
+- [x] **1. Per-project storage and the dependency cache.** Extend the
       root-owned helper from per-run to per-project filesystems; derive the
       project key; wire the cache overlay into `runcontainer.Spec`. Live test:
-      two concurrent runs of one project performing conflicting installs,
-      neither visible to the other, the lower unchanged.
+      `TestLiveProjectCacheIsSharedToReadAndPrivateToWrite` — two concurrent
+      runs of one project, both reading the seeded cache, neither seeing the
+      other's writes, the lower unchanged.
 - [ ] **2. Sessions on the same mechanism.** Point
       `PI_CODING_AGENT_SESSION_DIR` at a per-project overlay. Live test: a
       second run of a project reads the first's finished transcripts and cannot
@@ -138,6 +153,41 @@ Appended as they occur. These fold into `DECISIONS.md` when Phase 2 lands.
 - **The global profile is a read-only mount named by absolute path** in the
   `packages` array. Relocating Pi's package store with `PI_PACKAGE_DIR` was
   investigated and does not work, as recorded above.
+- **The shared cache is a directory pisafe owns, and tools are redirected into
+  it by cache-specific environment variables.** One overlay is mounted at
+  `/cache` and `npm_config_cache` points npm there. Overlaying each tool's own
+  location instead — `~/.npm`, `~/.cargo/registry`, `~/go/pkg/mod` — was not
+  taken: it needs one upper and work directory per path, which would make the
+  privileged helper's idea of a run filesystem depend on the list of
+  toolchains. This replaces the question of which paths are shared with a
+  rule: nothing is in the shared layer unless a variable puts it there, so the
+  layer can never accumulate arbitrary state. npm's logs and update-notifier
+  timestamp are pushed back out to the run home for the same reason — every
+  remaining path under `/cache` is content-addressed, which is the whole basis
+  for merging it last-writer-wins.
+- **One privileged helper serves both scopes.** `pisafe-run-storage` became
+  `pisafe-storage <action> <scope> <id>` with a `run` and a `project` scope
+  rather than gaining a near-identical sibling script; the two differ only in
+  their root path, size policy, and subdirectory set. Renaming it changes the
+  security profile digest, so this and any later helper change force a VM
+  recreate, and such changes are worth batching.
+- **The run's upper layers live in a third run-filesystem subdirectory**,
+  `overlay/`, which is not bind-mounted into the container. Putting them under
+  the existing home needs no helper change but exposes the raw upper, whiteouts
+  and all, to the code whose writes it records.
+- **A project filesystem is ensured, never created, and never rolled back.**
+  Many runs of one project reach it and none may assume it is the first; a run
+  that fails after ensuring it leaves it behind, because it is shared state
+  that outlives every run. Reclaiming an unused one belongs to `gc`.
+- **The cache overlay carries neither `nodev` nor `nosuid`**, because Podman
+  refuses any other option alongside `:O`. It is the only mount in a run
+  without them, and it costs nothing: creating a device needs `CAP_MKNOD` and
+  the run drops every capability, while `no-new-privileges` already neutralizes
+  a setuid bit.
+- **Run manifests recorded before this change are rejected, not migrated.**
+  A run without a project key cannot be resumed into a project cache, and the
+  VM recreate that the profile change forces destroys its storage regardless,
+  so the manifest version moves to 5 and old records fail loudly.
 - **`settings.json` and `trust.json` are copied into the run**, because Pi
   writes both — `/settings`, `pi install`, and `/trust` all do — and a
   read-only mount would turn ordinary Pi use into an I/O error. The copy dies
@@ -150,12 +200,11 @@ Appended as they occur. These fold into `DECISIONS.md` when Phase 2 lands.
 
 ## Open questions
 
-- **Which cache paths are shared.** Last-writer-wins on promotion is safe only
-  because package caches are content-addressed, so a colliding path almost
-  always means identical bytes. That argument dies if the shared layer holds
-  arbitrary state, so the layer must hold a known list — `~/.npm`,
-  `~/.cargo/registry`, `~/go/pkg/mod`, and so on — never a general home. The
-  list itself is undecided.
+- **How a toolchain without a cache-only variable is shared.** Cargo is the
+  known case: `CARGO_HOME` moves the registry cache but also installed
+  binaries and credentials, which the shared layer must not hold. Nothing in
+  the run image needs it yet, so the answer can wait for the toolchain that
+  forces it.
 - **What triggers promotion, and what the user sees.** Deliberate is decided;
   whether that means a flag on `apply`, a separate command, or a prompt is not.
 - **How global tools are installed.** The design lists `pisafe tool install`
@@ -168,8 +217,20 @@ Appended as they occur. These fold into `DECISIONS.md` when Phase 2 lands.
 
 ## Verification
 
-Slice-by-slice live tests are listed under [Slices](#slices). Substrate checks
-already run, for re-running after a Podman or Pi bump:
+Slice-by-slice live tests are listed under [Slices](#slices). They need a
+provisioned VM and a built run image:
+
+```sh
+PISAFE_LIVE_LIMA=1 go test ./internal/lima/ -run TestLiveCreateAndStart
+PISAFE_LIVE_LIMA=1 go test ./internal/runimage/
+limactl shell pisafe -- podman images --no-trunc --format '{{.Id}} {{.Repository}}'
+PISAFE_LIVE_LIMA=1 PISAFE_LIVE_RUN_IMAGE=sha256:<id> go test ./...
+```
+
+Any change to the VM definition moves the security profile digest, so the VM
+must be deleted and recreated before those tests pass.
+
+Substrate checks already run, for re-running after a Podman or Pi bump:
 
 ```sh
 # Overlay isolation: conflicting writes over one shared lower.

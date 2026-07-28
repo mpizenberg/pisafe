@@ -18,6 +18,7 @@ const (
 	DefaultPIDs       = 512
 	DefaultTemporary  = int64(1024 * 1024 * 1024)
 	DefaultPersistent = int64(10 * 1024 * 1024 * 1024)
+	DefaultProject    = int64(10 * 1024 * 1024 * 1024)
 	DefaultWallClock  = int64(8 * 60 * 60)
 	// applyPackage is where a run leaves the bundles apply fetches. It sits in
 	// the run's own workspace, the only writable place both the run and the
@@ -26,13 +27,19 @@ const (
 	containerUser     = "1000:1000"
 	containerWorkRoot = "/work"
 	containerHome     = "/home/node"
-	guestStorageRoot  = "/var/lib/pisafe/runs"
+	// containerCacheRoot is a layout pisafe owns rather than a tool's own
+	// default location. Only what a cache-specific environment variable points
+	// here is shared, so the project layer can never accumulate arbitrary state.
+	containerCacheRoot = "/cache"
+	guestStorageRoot   = "/var/lib/pisafe/runs"
+	guestProjectRoot   = "/var/lib/pisafe/projects"
 )
 
 var imageIDPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 
 type Spec struct {
 	RunID       string
+	ProjectKey  string
 	ImageID     string
 	CPUs        string
 	MemoryBytes int64
@@ -41,9 +48,10 @@ type Spec struct {
 	WallSeconds int64
 }
 
-func DefaultSpec(runID, imageID string) Spec {
+func DefaultSpec(runID, projectKey, imageID string) Spec {
 	return Spec{
 		RunID:       runID,
+		ProjectKey:  projectKey,
 		ImageID:     imageID,
 		CPUs:        DefaultCPUs,
 		MemoryBytes: DefaultMemory,
@@ -56,6 +64,9 @@ func DefaultSpec(runID, imageID string) Spec {
 func (spec Spec) Validate() error {
 	if err := runid.Validate(spec.RunID); err != nil {
 		return err
+	}
+	if err := runid.Validate(spec.ProjectKey); err != nil {
+		return fmt.Errorf("invalid project key: %w", err)
 	}
 	if !imageIDPattern.MatchString(spec.ImageID) {
 		return fmt.Errorf("image must be an immutable sha256 ID")
@@ -94,6 +105,22 @@ func (spec Spec) HomePath() string {
 	return spec.StoragePath() + "/home"
 }
 
+// ProjectCachePath is the dependency cache every run of one project reads.
+// It is only ever a lower layer, so no run can write what another run sees.
+func (spec Spec) ProjectCachePath() string {
+	return guestProjectRoot + "/" + spec.ProjectKey + "/cache"
+}
+
+// cacheOverlay stacks the run's private upper layer over the project cache.
+// Podman refuses nodev and nosuid alongside an overlay, which costs nothing
+// here: creating a device needs CAP_MKNOD and the run drops every capability,
+// and no-new-privileges already neutralizes a setuid bit.
+func (spec Spec) cacheOverlay() string {
+	return spec.ProjectCachePath() + ":" + containerCacheRoot +
+		":O,upperdir=" + spec.StoragePath() + "/overlay/cache/upper" +
+		",workdir=" + spec.StoragePath() + "/overlay/cache/work"
+}
+
 func (spec Spec) RunArgs() ([]string, error) {
 	if err := spec.Validate(); err != nil {
 		return nil, err
@@ -123,11 +150,18 @@ func (spec Spec) RunArgs() ([]string, error) {
 		"--mount", "type=tmpfs,dst=/run,tmpfs-size=16777216,tmpfs-mode=0755,U=true",
 		"--mount", "type=bind,src=" + spec.WorkspacePath() + ",dst=" + containerWorkRoot + ",nodev,nosuid",
 		"--mount", "type=bind,src=" + spec.HomePath() + ",dst=" + containerHome + ",nodev,nosuid",
+		"--volume", spec.cacheOverlay(),
 		"--workdir", containerWorkRoot,
 		"--env", "HOME=" + containerHome,
 		"--env", "GIT_TERMINAL_PROMPT=0",
 		"--env", "PI_CODING_AGENT_DIR=" + containerHome + "/.pi/agent",
 		"--env", "PI_SKIP_VERSION_CHECK=1",
+		"--env", "npm_config_cache=" + containerCacheRoot + "/npm",
+		// Logs and the update check write uncacheable per-run state. Keeping
+		// them out of the shared layer is what leaves every path in it
+		// content-addressed, and so safe to merge last-writer-wins.
+		"--env", "npm_config_logs_dir=" + containerHome + "/.npm/_logs",
+		"--env", "npm_config_update_notifier=false",
 		spec.ImageID,
 		"pisafe-guest", "serve-ssh",
 	}, nil

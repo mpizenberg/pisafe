@@ -4,9 +4,11 @@ package runid
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -22,6 +24,31 @@ func Validate(id string) error {
 	return nil
 }
 
+// Project names one checkout twice: Directory is what a run calls it, and Key
+// is what its persistent state is filed under. Two checkouts of one repository
+// share a Directory and must never share a Key, so the key carries a digest of
+// the checkout path.
+type Project struct {
+	Directory string
+	Key       string
+}
+
+func NewProject(repositoryRoot string) (Project, error) {
+	if !filepath.IsAbs(repositoryRoot) {
+		return Project{}, fmt.Errorf("repository root %q is not absolute", repositoryRoot)
+	}
+	directory := projectSlug(filepath.Base(repositoryRoot))
+	digest := sha256.Sum256([]byte(filepath.Clean(repositoryRoot)))
+	project := Project{
+		Directory: directory,
+		Key:       directory + "-" + hex.EncodeToString(digest[:4]),
+	}
+	if err := Validate(project.Key); err != nil {
+		return Project{}, err
+	}
+	return project, nil
+}
+
 func New(project string, now time.Time) (string, error) {
 	return newWithEntropy(project, now, rand.Reader)
 }
@@ -31,7 +58,7 @@ func newWithEntropy(project string, now time.Time, entropy io.Reader) (string, e
 	if _, err := io.ReadFull(entropy, suffix[:]); err != nil {
 		return "", fmt.Errorf("generate run ID entropy: %w", err)
 	}
-	id := ProjectSlug(project) + "-" +
+	id := projectSlug(project) + "-" +
 		now.UTC().Format("20060102-150405") + "-" +
 		hex.EncodeToString(suffix[:])
 	if err := Validate(id); err != nil {
@@ -40,7 +67,9 @@ func newWithEntropy(project string, now time.Time, entropy io.Reader) (string, e
 	return id, nil
 }
 
-func ProjectSlug(project string) string {
+// projectSlug reduces a directory name to something a Git ref, a filesystem
+// path, and a container name all accept.
+func projectSlug(project string) string {
 	var slug strings.Builder
 	lastSeparator := false
 	for _, character := range strings.ToLower(project) {

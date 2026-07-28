@@ -28,7 +28,7 @@ type Controller interface {
 	StartPrepared(
 		context.Context,
 		gitstage.PreparedStage,
-		string,
+		runid.Project,
 		string,
 		gitstage.Identity,
 	) (runstate.Manifest, error)
@@ -95,8 +95,11 @@ func (service Service) Start(
 	if err != nil {
 		return Result{}, err
 	}
-	project := runid.ProjectSlug(filepath.Base(root))
-	runID, err := service.newRunID(project, service.now())
+	project, err := runid.NewProject(root)
+	if err != nil {
+		return Result{}, err
+	}
+	runID, err := service.newRunID(project.Directory, service.now())
 	if err != nil {
 		return Result{}, err
 	}

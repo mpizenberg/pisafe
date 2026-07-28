@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/runid"
 	"github.com/mpizenberg/pisafe/internal/runimage"
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
@@ -45,7 +46,7 @@ func (installer *fakeInstaller) Ensure(
 
 type fakeController struct {
 	prepared gitstage.PreparedStage
-	project  string
+	project  runid.Project
 	imageID  string
 	identity gitstage.Identity
 }
@@ -53,7 +54,7 @@ type fakeController struct {
 func (controller *fakeController) StartPrepared(
 	_ context.Context,
 	prepared gitstage.PreparedStage,
-	project string,
+	project runid.Project,
 	imageID string,
 	identity gitstage.Identity,
 ) (runstate.Manifest, error) {
@@ -62,10 +63,11 @@ func (controller *fakeController) StartPrepared(
 	controller.imageID = imageID
 	controller.identity = identity
 	return runstate.Manifest{
-		RunID:     prepared.Snapshot.RunID,
-		Project:   project,
-		State:     runstate.StateActive,
-		Workspace: "/work/" + project,
+		RunID:      prepared.Snapshot.RunID,
+		Project:    project.Directory,
+		ProjectKey: project.Key,
+		State:      runstate.StateActive,
+		Workspace:  "/work/" + project.Directory,
 		SSH: &runstate.SSHConnection{
 			Alias:      "pisafe-" + prepared.Snapshot.RunID,
 			ConfigFile: "/state/ssh.config",
@@ -129,7 +131,8 @@ func TestStartComposesBoundaryImageStageAndController(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.Manifest.RunID != "my-project-run" ||
-		controller.project != "my-project" ||
+		controller.project.Directory != "my-project" ||
+		!strings.HasPrefix(controller.project.Key, "my-project-") ||
 		controller.imageID != testImageID {
 		t.Fatalf("result = %#v, controller = %#v", result, controller)
 	}

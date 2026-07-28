@@ -102,7 +102,7 @@ func TestStoreRejectsDuplicateAndCorruptManifest(t *testing.T) {
 	}
 	if err := os.WriteFile(
 		filepath.Join(root, "bad.json"),
-		[]byte(`{"version":4,"run_id":"other"}`),
+		[]byte(`{"version":5,"run_id":"other"}`),
 		0o600,
 	); err != nil {
 		t.Fatal(err)
@@ -473,6 +473,7 @@ func testManifest(runID string) Manifest {
 	return Manifest{
 		RunID:              runID,
 		Project:            "project",
+		ProjectKey:         "project-3f9c2a1b",
 		ActiveLimitSeconds: 8 * 60 * 60,
 		Snapshot: gitstage.Snapshot{
 			RunID:   runID,

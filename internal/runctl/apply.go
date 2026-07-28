@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
-	"github.com/mpizenberg/pisafe/internal/runcontainer"
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
@@ -112,11 +111,10 @@ func (controller Controller) importRun(
 ) (gitstage.PlannedApply, error) {
 	// A run's storage is mounted per VM boot, not per run, so a VM that
 	// restarted between the run and its apply presents an empty run root.
-	if err := controller.backend.VerifyStorage(ctx, manifest.RunID); err != nil {
+	if err := controller.backend.VerifyRunStorage(ctx, manifest.RunID); err != nil {
 		return gitstage.PlannedApply{}, err
 	}
-	spec := runcontainer.DefaultSpec(manifest.RunID, imageID)
-	spec.WallSeconds = manifest.ActiveLimitSeconds
+	spec := specForManifest(manifest, imageID)
 	args, err := spec.PrepareApplyArgs(manifest.Project, baseline)
 	if err != nil {
 		return gitstage.PlannedApply{}, err

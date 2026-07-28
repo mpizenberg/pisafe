@@ -7,10 +7,12 @@ import (
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 )
 
+const testProjectKey = "project-3f9c2a1b"
+
 const testImageID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 func TestRunArgsAreHardenedAndImmutable(t *testing.T) {
-	spec := DefaultSpec("run-123", testImageID)
+	spec := DefaultSpec("run-123", testProjectKey, testImageID)
 	args, err := spec.RunArgs()
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +59,7 @@ func TestRunArgsAreHardenedAndImmutable(t *testing.T) {
 }
 
 func TestStorageAndMaterializeArgsAreRunScoped(t *testing.T) {
-	spec := DefaultSpec("run-123", testImageID)
+	spec := DefaultSpec("run-123", testProjectKey, testImageID)
 	if spec.WorkspacePath() != "/var/lib/pisafe/runs/run-123/workspace" ||
 		spec.HomePath() != "/var/lib/pisafe/runs/run-123/home" {
 		t.Fatalf("storage paths = %q %q", spec.WorkspacePath(), spec.HomePath())
@@ -96,7 +98,7 @@ func TestStorageAndMaterializeArgsAreRunScoped(t *testing.T) {
 }
 
 func TestPrepareApplyArgsRunWithoutNetworkOrRunHome(t *testing.T) {
-	spec := DefaultSpec("run-123", testImageID)
+	spec := DefaultSpec("run-123", testProjectKey, testImageID)
 	args, err := spec.PrepareApplyArgs("project", gitstage.KeepBaseline)
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +141,7 @@ func TestPrepareApplyArgsRunWithoutNetworkOrRunHome(t *testing.T) {
 // A report must not be able to alter what it reports, so diff gets the
 // workspace read-only where apply, which commits, gets it writable.
 func TestDiffArgsMountTheWorkspaceReadOnly(t *testing.T) {
-	spec := DefaultSpec("run-123", testImageID)
+	spec := DefaultSpec("run-123", testProjectKey, testImageID)
 	args, err := spec.DiffArgs("project")
 	if err != nil {
 		t.Fatal(err)
@@ -160,7 +162,7 @@ func TestDiffArgsMountTheWorkspaceReadOnly(t *testing.T) {
 }
 
 func TestExportArgsStreamOneRequestedPathReadOnly(t *testing.T) {
-	spec := DefaultSpec("run-123", testImageID)
+	spec := DefaultSpec("run-123", testProjectKey, testImageID)
 	args, err := spec.ExportArgs("project", "./dist/../dist")
 	if err != nil {
 		t.Fatal(err)
@@ -188,15 +190,63 @@ func TestExportArgsStreamOneRequestedPathReadOnly(t *testing.T) {
 
 func TestSpecRejectsMutableImageAndUnsafeNames(t *testing.T) {
 	for _, spec := range []Spec{
-		DefaultSpec("../escape", testImageID),
-		DefaultSpec("safe", "localhost/pisafe-run:latest"),
+		DefaultSpec("../escape", testProjectKey, testImageID),
+		DefaultSpec("safe", testProjectKey, "localhost/pisafe-run:latest"),
 	} {
 		if _, err := spec.RunArgs(); err == nil {
 			t.Fatalf("RunArgs(%#v) unexpectedly succeeded", spec)
 		}
 	}
-	spec := DefaultSpec("safe", testImageID)
+	spec := DefaultSpec("safe", testProjectKey, testImageID)
 	if _, err := spec.MaterializeArgs("../project"); err == nil {
 		t.Fatal("unsafe project directory was accepted")
+	}
+}
+
+func TestCacheOverlayKeepsTheProjectLayerReadOnlyToTheRun(t *testing.T) {
+	spec := DefaultSpec("run-123", testProjectKey, testImageID)
+	args, err := spec.RunArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	// The lower layer is the project's and the upper is the run's, which is
+	// what stops one run's install from reaching another's.
+	for _, expected := range []string{
+		"--volume /var/lib/pisafe/projects/project-3f9c2a1b/cache:/cache:O," +
+			"upperdir=/var/lib/pisafe/runs/run-123/overlay/cache/upper," +
+			"workdir=/var/lib/pisafe/runs/run-123/overlay/cache/work",
+		"npm_config_cache=/cache/npm",
+		"npm_config_logs_dir=/home/node/.npm/_logs",
+		"npm_config_update_notifier=false",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Errorf("run args lack %q:\n%s", expected, joined)
+		}
+	}
+	// Inspecting a run reports on its workspace and must not reach, or hold
+	// open, state shared with every other run of the project.
+	for _, inspection := range []func() ([]string, error){
+		func() ([]string, error) { return spec.DiffArgs("project") },
+		func() ([]string, error) { return spec.ExportArgs("project", "file.txt") },
+		func() ([]string, error) { return spec.PrepareApplyArgs("project", gitstage.KeepBaseline) },
+		spec.ConfigureSSHArgs,
+	} {
+		args, err := inspection()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(strings.Join(args, " "), "/var/lib/pisafe/projects") {
+			t.Errorf("inspection container mounts project state:\n%s", strings.Join(args, " "))
+		}
+	}
+}
+
+func TestSpecRefusesAProjectKeyItCannotAddress(t *testing.T) {
+	for _, key := range []string{"", "../escape", "key/sub"} {
+		spec := DefaultSpec("run-123", key, testImageID)
+		if _, err := spec.RunArgs(); err == nil {
+			t.Errorf("project key %q was accepted", key)
+		}
 	}
 }

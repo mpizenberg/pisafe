@@ -54,6 +54,7 @@ func RenderConfig(options ConfigOptions) ([]byte, error) {
 		"@@HOST_PREFIX_LINES@@", strings.Join(prefixes, "\n    "),
 		"@@SECURITY_PROFILE_DIGEST@@", securityProfile,
 		"@@RUN_STORAGE_BYTES@@", strconv.FormatInt(runcontainer.DefaultPersistent, 10),
+		"@@PROJECT_STORAGE_BYTES@@", strconv.FormatInt(runcontainer.DefaultProject, 10),
 		"@@BROKER_ADDRESS@@", BrokerAddress,
 		"@@BROKER_PORT@@", strconv.Itoa(BrokerPort),
 	)
@@ -61,8 +62,8 @@ func RenderConfig(options ConfigOptions) ([]byte, error) {
 }
 
 // securityProfileDigest changes whenever the generated VM definition or its
-// immutable host-network deny set or persistent run quota changes. VM sizing
-// is deliberately excluded because it does not weaken a run boundary.
+// immutable host-network deny set or persistent storage quotas change. VM
+// sizing is deliberately excluded because it does not weaken a run boundary.
 func securityProfileDigest(prefixes []string) string {
 	digest := sha256.New()
 	_, _ = digest.Write([]byte("pisafe-lima-security-profile-v2\x00"))
@@ -71,6 +72,8 @@ func securityProfileDigest(prefixes []string) string {
 	_, _ = digest.Write([]byte(strings.Join(prefixes, "\n")))
 	_, _ = digest.Write([]byte{0})
 	_, _ = digest.Write([]byte(strconv.FormatInt(runcontainer.DefaultPersistent, 10)))
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write([]byte(strconv.FormatInt(runcontainer.DefaultProject, 10)))
 	return "sha256:" + hex.EncodeToString(digest.Sum(nil))
 }
 
@@ -170,8 +173,8 @@ provision:
     grep -q "^${pisafe_user}:" /etc/subgid ||
       usermod --add-subgids 100000-165535 "${pisafe_user}"
     runuser --login "${pisafe_user}" --command 'podman system migrate'
-    install -d -m 0711 -o root -g root /var/lib/pisafe/runs
-    install -d -m 0700 -o root -g root /var/lib/pisafe/run-images
+    install -d -m 0711 -o root -g root /var/lib/pisafe/runs /var/lib/pisafe/projects
+    install -d -m 0700 -o root -g root /var/lib/pisafe/run-images /var/lib/pisafe/project-images
 
     install -d -m 0755 /etc/pisafe /etc/ssh/sshd_config.d
     tee /etc/sysctl.d/90-pisafe.conf >/dev/null <<'PISAFE_SYSCTL'
@@ -288,19 +291,37 @@ provision:
     PISAFE_CLOCK
     chmod 0755 /usr/local/sbin/pisafe-clock-step
 
-    tee /usr/local/sbin/pisafe-run-storage >/dev/null <<'PISAFE_STORAGE'
+    tee /usr/local/sbin/pisafe-storage >/dev/null <<'PISAFE_STORAGE'
     #!/bin/bash
     set -euo pipefail
-    [[ "$#" -eq 2 ]]
+    [[ "$#" -eq 3 ]]
     action="$1"
-    run_id="$2"
-    [[ "${#run_id}" -le 64 ]]
-    [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
+    scope="$2"
+    storage_id="$3"
+    [[ "${#storage_id}" -le 64 ]]
+    [[ "$storage_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]
 
-    storage_root=/var/lib/pisafe/runs
-    image_root=/var/lib/pisafe/run-images
-    run_root="$storage_root/$run_id"
-    image="$image_root/$run_id.ext4"
+    # A run filesystem holds the container's two bind mounts plus the private
+    # upper layers it stacks over shared project state. A project filesystem
+    # holds only lower layers, which every run of that project reads and no run
+    # writes.
+    case "$scope" in
+      run)
+        storage_root=/var/lib/pisafe/runs
+        image_root=/var/lib/pisafe/run-images
+        storage_bytes=@@RUN_STORAGE_BYTES@@
+        directories=(workspace home overlay overlay/cache overlay/cache/upper overlay/cache/work)
+        ;;
+      project)
+        storage_root=/var/lib/pisafe/projects
+        image_root=/var/lib/pisafe/project-images
+        storage_bytes=@@PROJECT_STORAGE_BYTES@@
+        directories=(cache)
+        ;;
+      *) exit 64 ;;
+    esac
+    run_root="$storage_root/$storage_id"
+    image="$image_root/$storage_id.ext4"
     pisafe_user="$(
       getent passwd |
         awk -F: '$3 >= 500 && $3 < 65534 && $6 ~ /^\/home\// { print $1; exit }'
@@ -328,23 +349,24 @@ provision:
       [[ ! -e "$run_root" && ! -L "$run_root" ]]
       [[ ! -e "$image" && ! -L "$image" ]]
       trap 'cleanup_partial || true' ERR
-      truncate -s @@RUN_STORAGE_BYTES@@ "$image"
+      truncate -s "$storage_bytes" "$image"
       chmod 0600 "$image"
       mkfs.ext4 -q -F -m 0 "$image"
       mkdir "$run_root"
       mount -o loop,nodev,nosuid "$image" "$run_root"
-      install -d -m 0700 -o "$storage_uid" -g "$storage_gid" \
-        "$run_root/workspace" "$run_root/home"
+      for directory in "${directories[@]}"; do
+        install -d -m 0700 -o "$storage_uid" -g "$storage_gid" \
+          "$run_root/$directory"
+      done
       chown root:root "$run_root"
       chmod 0711 "$run_root"
-      chcon -t container_file_t \
-        "$run_root" "$run_root/workspace" "$run_root/home"
+      chcon -t container_file_t "$run_root" "${directories[@]/#/$run_root/}"
       trap - ERR
     }
 
     verify() {
       [[ -f "$image" && ! -L "$image" ]]
-      [[ "$(stat -c '%u:%g:%a:%s' "$image")" = "0:0:600:@@RUN_STORAGE_BYTES@@" ]]
+      [[ "$(stat -c '%u:%g:%a:%s' "$image")" = "0:0:600:$storage_bytes" ]]
       [[ -d "$run_root" && ! -L "$run_root" ]]
       if ! mountpoint -q "$run_root"; then
         mount -o loop,nodev,nosuid "$image" "$run_root"
@@ -361,14 +383,23 @@ provision:
         tr ',' '\n' |
         grep -qx nosuid
       [[ "$(stat -c '%u:%g:%a' "$run_root")" = "0:0:711" ]]
-      for directory in workspace home; do
+      for directory in "${directories[@]}"; do
         path="$run_root/$directory"
         [[ -d "$path" && ! -L "$path" ]]
         chown "$storage_uid:$storage_gid" "$path"
         chmod 0700 "$path"
       done
-      chcon -t container_file_t \
-        "$run_root" "$run_root/workspace" "$run_root/home"
+      chcon -t container_file_t "$run_root" "${directories[@]/#/$run_root/}"
+    }
+
+    # ensure is how a project filesystem is reached: many runs of one project
+    # need it present, and none of them may assume it is the first.
+    ensure() {
+      if [[ -e "$run_root" || -L "$run_root" || -e "$image" || -L "$image" ]]; then
+        verify
+      else
+        create
+      fi
     }
 
     remove() {
@@ -391,12 +422,13 @@ provision:
 
     case "$action" in
       create) create ;;
+      ensure) ensure ;;
       verify) verify ;;
       remove) remove ;;
       *) exit 64 ;;
     esac
     PISAFE_STORAGE
-    chmod 0755 /usr/local/sbin/pisafe-run-storage
+    chmod 0755 /usr/local/sbin/pisafe-storage
 
     tee /etc/systemd/system/pisafe-firewall.service >/dev/null <<'PISAFE_SERVICE'
     [Unit]
@@ -421,7 +453,7 @@ provision:
     tee /etc/sudoers.d/90-pisafe-controller >/dev/null <<PISAFE_SUDOERS
     ${pisafe_user} ALL=(root) NOPASSWD: /usr/local/sbin/pisafe-clock-step ""
     ${pisafe_user} ALL=(root) NOPASSWD: /usr/local/sbin/pisafe-firewall-status ""
-    ${pisafe_user} ALL=(root) NOPASSWD: /usr/local/sbin/pisafe-run-storage *
+    ${pisafe_user} ALL=(root) NOPASSWD: /usr/local/sbin/pisafe-storage *
     PISAFE_SUDOERS
     chmod 0440 /etc/sudoers.d/90-pisafe-controller
     if [[ -f /etc/sudoers.d/90-cloud-init-users ]]; then

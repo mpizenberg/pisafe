@@ -6,7 +6,6 @@ import (
 	"io"
 	"path"
 
-	"github.com/mpizenberg/pisafe/internal/runcontainer"
 	"github.com/mpizenberg/pisafe/internal/runcopy"
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
@@ -53,11 +52,10 @@ func (controller Controller) CopyOut(
 	}
 	// A run's storage is mounted per VM boot, not per run, so a VM that
 	// restarted since the run started presents an empty run root.
-	if err := controller.backend.VerifyStorage(ctx, manifest.RunID); err != nil {
+	if err := controller.backend.VerifyRunStorage(ctx, manifest.RunID); err != nil {
 		return nil, err
 	}
-	spec := runcontainer.DefaultSpec(manifest.RunID, request.ImageID)
-	spec.WallSeconds = manifest.ActiveLimitSeconds
+	spec := specForManifest(manifest, request.ImageID)
 	args, err := spec.ExportArgs(manifest.Project, requested)
 	if err != nil {
 		return nil, err
