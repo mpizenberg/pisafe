@@ -15,6 +15,29 @@ import (
 
 const liveBrokerMarker = "pisafe-live-broker-ok"
 
+// liveBrokerStub is a Mac-loopback listener that answers the way the broker
+// does. It has to answer rather than merely accept, because that is the whole
+// difference between a relay that carries a request and one whose owner is
+// exiting.
+func liveBrokerStub(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{
+		Handler: http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			fmt.Fprintln(writer, liveBrokerMarker)
+		}),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go server.Serve(listener)
+	t.Cleanup(func() {
+		_ = server.Close()
+	})
+	return listener.Addr().(*net.TCPAddr).Port
+}
+
 // TestLiveBrokerReverseRelay proves the only inbound path into the boundary:
 // a Mac-loopback listener published on the dedicated VM broker address, reachable
 // from the VM user and from a rootless pasta container, and gone once the
@@ -28,29 +51,12 @@ func TestLiveBrokerReverseRelay(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := &http.Server{
-		Handler: http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-			fmt.Fprintln(writer, liveBrokerMarker)
-		}),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	go server.Serve(listener)
-	defer server.Close()
-
 	transport := lima.NewTransport()
 	gateway, err := transport.SSHGateway(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	forward, err := lima.StartReverseForward(
-		ctx,
-		gateway,
-		listener.Addr().(*net.TCPAddr).Port,
-	)
+	forward, err := lima.StartReverseForward(ctx, gateway, liveBrokerStub(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,18 +92,28 @@ fi
 	}
 	closed = true
 	deadline := time.Now().Add(15 * time.Second)
-	for {
-		probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
-		err := transport.ProbeBrokerListener(probeCtx)
-		probeCancel()
-		if err != nil {
-			break
-		}
+	for liveBrokerPortIsBound(ctx, transport) {
 		if time.Now().After(deadline) {
 			t.Fatal("broker listener survived relay shutdown")
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
+}
+
+// liveBrokerPortIsBound answers a different question from
+// ProbeBrokerListener: not whether the relay carries a request, but whether
+// sshd still holds the forwarded port at all. It unbinds a moment after the
+// client owning the forward exits, so a test that returned as soon as the
+// relay stopped answering would leave the port taken for the next one.
+func liveBrokerPortIsBound(ctx context.Context, transport lima.Transport) bool {
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err := transport.Execute(probeCtx, nil, "bash", "-c", fmt.Sprintf(
+		"exec 3<>/dev/tcp/%s/%d",
+		lima.BrokerAddress,
+		lima.BrokerPort,
+	))
+	return err == nil
 }
 
 func waitForLiveRelay(
@@ -136,12 +152,7 @@ func TestLiveSecondRelayFailsClosed(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	port := listener.Addr().(*net.TCPAddr).Port
+	port := liveBrokerStub(t)
 
 	transport := lima.NewTransport()
 	gateway, err := transport.SSHGateway(ctx)

@@ -9,10 +9,17 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/runssh"
 )
+
+// brokerProbeReadTimeout bounds how long one probe waits inside the VM. It is
+// short because a working relay answers immediately, and it must stay under
+// whatever deadline a caller puts on the probe so the VM side is always the
+// one that gives up.
+const brokerProbeReadTimeout = 3 * time.Second
 
 // ReverseForward is the ssh child process that publishes a Mac-loopback
 // listener on the VM's dedicated broker address. The VM listener exists only
@@ -61,6 +68,13 @@ func StartReverseForward(
 		return nil, err
 	}
 	command := exec.CommandContext(ctx, "ssh", args...)
+	// A cancelled context must withdraw the forward rather than kill the client
+	// outright, for the same reason Close asks first: the broker exits this way
+	// on Ctrl-C, and a killed client leaves the VM-side listener bound.
+	command.Cancel = func() error {
+		return command.Process.Signal(syscall.SIGTERM)
+	}
+	command.WaitDelay = relayShutdownGrace
 	stderr := &bytes.Buffer{}
 	command.Stderr = stderr
 	if err := command.Start(); err != nil {
@@ -97,23 +111,63 @@ func (forward *ReverseForward) Done() <-chan error {
 	return forward.done
 }
 
+// relayShutdownGrace bounds each half of the relay's shutdown: how long the
+// client is given to withdraw its forward, and then how long a killed client
+// is given to die.
+const relayShutdownGrace = 5 * time.Second
+
+// Close ends the relay. The client is asked to exit before it is killed,
+// because ssh withdraws the forward on its way out and sshd keeps the VM-side
+// listener bound until something withdraws it. A client that is only killed
+// leaves the broker address taken for whatever tries to bind it next.
 func (forward *ReverseForward) Close() error {
-	if forward.command.Process != nil {
-		_ = forward.command.Process.Kill()
+	if forward.command.Process == nil {
+		return nil
 	}
+	_ = forward.command.Process.Signal(syscall.SIGTERM)
 	select {
 	case <-forward.done:
-	case <-time.After(5 * time.Second):
+		return nil
+	case <-time.After(relayShutdownGrace):
+	}
+	_ = forward.command.Process.Kill()
+	select {
+	case <-forward.done:
+	case <-time.After(relayShutdownGrace):
 		return errors.New("broker reverse relay did not exit")
 	}
 	return nil
 }
 
+// brokerProbeScript asks the relayed address for a response and requires a
+// status line back. Any status counts, including the 401 an unauthorized
+// request earns: the question is whether bytes cross the relay, not what the
+// broker makes of them.
+//
+// The read carries its own deadline because cancelling from the Mac does not
+// reach it. Killing the local client leaves a blocked remote shell holding the
+// session open, so a probe that waits indefinitely in the VM is a probe that
+// cannot be given up on.
+var brokerProbeScript = fmt.Sprintf(`exec 3<>/dev/tcp/%s/%d
+printf 'GET / HTTP/1.0\r\nHost: %s\r\nUser-Agent: pisafe-relay-probe\r\nConnection: close\r\n\r\n' >&3
+IFS= read -t %d -r status <&3
+case "$status" in
+HTTP/1.*) ;;
+*) exit 1 ;;
+esac
+`, BrokerAddress, BrokerPort, BrokerAddress, int(brokerProbeReadTimeout.Seconds()))
+
 // ProbeBrokerListener verifies from inside the VM that the dedicated broker
-// address currently accepts connections.
+// address relays a request end to end. Connecting is not enough on its own:
+// sshd accepts on the forwarded address as soon as it binds, and goes on
+// accepting while the client that owns the forward is exiting, so a bare
+// connect can succeed against a relay that is already gone.
 func (transport Transport) ProbeBrokerListener(ctx context.Context) error {
-	script := fmt.Sprintf("exec 3<>/dev/tcp/%s/%d", BrokerAddress, BrokerPort)
-	if _, err := transport.Execute(ctx, nil, "bash", "-c", script); err != nil {
+	if _, err := transport.Execute(
+		ctx,
+		nil,
+		"bash", "-ceu", brokerProbeScript, "pisafe-relay-probe",
+	); err != nil {
 		return fmt.Errorf("broker relay is not reachable inside the VM: %w", err)
 	}
 	return nil
