@@ -61,6 +61,9 @@ func TestLiveSSHStageAndContainerMaterialize(t *testing.T) {
 	if err := transport.CreateRunStorage(ctx, runID); err != nil {
 		t.Fatal(err)
 	}
+	if err := transport.PrepareRunOverlays(ctx, runID, spec.Caches); err != nil {
+		t.Fatal(err)
+	}
 	defer cleanupLiveContainer(t, transport, spec)
 	if err := transport.ImportStage(ctx, runID); err != nil {
 		t.Fatal(err)
