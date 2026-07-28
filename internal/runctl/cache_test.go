@@ -78,12 +78,13 @@ func TestStoppingPublishesAndTrimsEveryDeclaredCache(t *testing.T) {
 		t.Fatalf("published = %#v", published)
 	}
 	// The run is stopped, not gone, so it may still resume onto the generation
-	// it recorded, and eviction has to leave that one alone whatever its age.
-	if evicted["npm"] != "3 fedcba9876543210" {
+	// it recorded, and eviction has to leave that one alone on top of the
+	// newest it keeps anyway.
+	if evicted["npm"] != "1 fedcba9876543210" {
 		t.Errorf("npm eviction = %q", evicted["npm"])
 	}
 	// A run that restored nothing holds no generation, so nothing is protected.
-	if evicted["cargo"] != "3" {
+	if evicted["cargo"] != "1" {
 		t.Errorf("cargo eviction = %q", evicted["cargo"])
 	}
 }

@@ -22,9 +22,11 @@ const (
 	DefaultProject    = int64(10 * 1024 * 1024 * 1024)
 	DefaultWallClock  = int64(8 * 60 * 60)
 	// DefaultCacheGenerations bounds how many published generations one cache
-	// namespace keeps. Each is a full copy on a fixed-capacity image, and a
-	// generation older than the last few restores less than it costs to store.
-	DefaultCacheGenerations = 3
+	// namespace keeps, beyond any a run may still mount. One is enough for the
+	// fallback to work — an unmatched key restores the newest generation, and
+	// there is always exactly one — while keeping a namespace's cost to a
+	// single copy of the cache on a fixed-capacity image.
+	DefaultCacheGenerations = 1
 	// applyPackage is where a run leaves the bundles apply fetches. It sits in
 	// the run's own workspace, the only writable place both the run and the
 	// VM-side transport can reach.

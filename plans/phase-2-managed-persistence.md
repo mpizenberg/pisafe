@@ -121,10 +121,9 @@ project's own inputs:
   mounted lower ever changes, so concurrent runs need no coordination and
   publishing needs no scheduling window. Two runs producing the same key race
   to rename; the loser discards its temporary directory.
-- **Eviction** keeps the newest three snapshots per namespace and drops the
-  rest, because immutable generations are full copies on a fixed-capacity
-  image. It also keeps any snapshot a recorded run may still mount, whatever
-  its age.
+- **Eviction** keeps the newest snapshot per namespace and drops the rest,
+  because immutable generations are full copies on a fixed-capacity image. It
+  also keeps any snapshot a recorded run may still mount, whatever its age.
 - **Reset** empties every cache namespace of one project. It is refused while
   any run of the project could still mount a generation, for the same reason
   eviction protects one.
@@ -360,10 +359,17 @@ this document is the current truth, not an audit trail. These fold into
   it.** tar restores the merged view's own timestamp onto the extracted
   directory, and recency is how a namespace is searched, so an unstamped
   generation could sort behind one it supersedes.
-- **Three generations per namespace, and reset covers a whole project's
-  cache.** This settles the open question slice 4 inherited. Three is what
-  fits: each generation is a full copy on a 10 GiB image, and publishing needs
-  room for one more before eviction runs. Reset takes the whole cache rather
+- **One generation per namespace, and reset covers a whole project's cache.**
+  This settles the open question slice 4 inherited. Keeping three was the first
+  choice, on the CI convention, and it was wrong for a fixed 10 GiB project
+  image shared by every namespace and the session store: publishing writes a
+  full copy before eviction runs, so three kept generations peak at four copies
+  of one cache, and a 2.5 GiB npm tree fills the image on its own. One
+  generation costs a peak of two and loses almost nothing, because the fallback
+  only ever reads the newest: what three buys is an *exact* hit when a project
+  alternates between a small set of input states, and the miss it turns that
+  into still restores a warm base and fetches the delta. Reversibility: it is
+  one constant, `DefaultCacheGenerations`. Reset takes the whole cache rather
   than one namespace or one generation, because the reason to reach for it is
   never "this one generation is wrong". It leaves the session store alone: a
   transcript is not reproducible and so is not disposable.
