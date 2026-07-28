@@ -108,6 +108,123 @@ func TestLiveCacheSnapshotsAreSelectedByKeyThenRecency(t *testing.T) {
 	}
 }
 
+// TestLivePublishedGenerationsAreImmutableAndDisposable covers the second half
+// of sharing. What a run fetched has to reach the next run, the generation it
+// started from has to survive that untouched, and a reset has to be able to
+// throw all of it away — that last one is what makes the cache disposable in
+// practice rather than in principle.
+func TestLivePublishedGenerationsAreImmutableAndDisposable(t *testing.T) {
+	if os.Getenv("PISAFE_LIVE_LIMA") != "1" {
+		t.Skip("set PISAFE_LIVE_LIMA=1 to test the dedicated VM")
+	}
+	imageID := liveImageID(t)
+	ensureLiveVM(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	transport := lima.NewTransport()
+	projectKey := liveProject(t, transport, "livepublish")
+	runID := "livepublish-" + time.Now().UTC().Format("20060102150405")
+	namespace := runcontainer.
+		DefaultSpec("seed", projectKey, imageID).
+		CacheNamespacePath("npm")
+	seedSnapshot(t, ctx, namespace, liveOlderKey, "restored", "@1000000000")
+
+	// The run's inputs hash to a generation nobody published, so it restores
+	// the one that exists and publishes under its own key.
+	selected, err := transport.SelectCacheSnapshots(ctx, projectKey, []runcontainer.CacheMount{
+		liveCache(liveNewerKey),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected[0].Snapshot != liveOlderKey {
+		t.Fatalf("restored %q, want the only published generation", selected[0].Snapshot)
+	}
+	spec := runcontainer.DefaultSpec(runID, projectKey, imageID)
+	spec.Caches = selected
+	if err := transport.CreateRunStorage(ctx, runID); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		runLive(t, context.Background(), "podman", "rm", "--force", "--ignore", spec.ContainerName())
+		if err := transport.RemoveRunStorage(context.Background(), runID); err != nil {
+			t.Errorf("remove live run storage: %v", err)
+		}
+	}()
+	if err := transport.PrepareRunOverlays(ctx, runID, spec.Caches); err != nil {
+		t.Fatal(err)
+	}
+	runArgs, err := spec.RunArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runArgs = append(runArgs[:len(runArgs)-2:len(runArgs)-2], "sleep", "infinity")
+	if _, err := transport.Execute(ctx, nil, append([]string{"podman"}, runArgs...)...); err != nil {
+		t.Fatal(err)
+	}
+	inContainer(t, ctx, transport, spec, "printf fetched > /cache/npm/fetched.txt")
+	// Publishing reads the merged view, so a deletion the run made has to be
+	// absent from the generation rather than reappear from the lower.
+	inContainer(t, ctx, transport, spec, "rm /cache/npm/shared.txt")
+	if _, err := transport.Execute(
+		ctx, nil, "podman", "rm", "--force", spec.ContainerName(),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := transport.PublishCacheSnapshot(ctx, spec, spec.Caches[0]); err != nil {
+		t.Fatal(err)
+	}
+	published := namespace + "/" + liveNewerKey
+	if got := runLive(t, ctx, "podman", "unshare", "ls", published); got != "fetched.txt" {
+		t.Errorf("published generation = %q, want only what the run left", got)
+	}
+	// The generation the run started from is a lower some other run may still
+	// have mounted, so restoring it may never have written to it.
+	if got := runLive(t, ctx, "podman", "unshare", "ls", namespace+"/"+liveOlderKey); got != "shared.txt" {
+		t.Errorf("restored generation = %q after a run published over it", got)
+	}
+	// It is also the newest by publication time, which is what the next run
+	// with an unknown key falls back to.
+	next, err := transport.SelectCacheSnapshots(ctx, projectKey, []runcontainer.CacheMount{
+		liveCache(liveMissingKey),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next[0].Snapshot != liveNewerKey {
+		t.Errorf("next run falls back to %q, want the generation just published", next[0].Snapshot)
+	}
+
+	// Eviction keeps what a live run may still mount whatever its age, and
+	// drops the rest.
+	if err := transport.EvictCacheSnapshots(
+		ctx, projectKey, "npm", 1, []string{liveOlderKey},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := runLive(t, ctx, "podman", "unshare", "ls", namespace); got != liveOlderKey+"\n"+liveNewerKey {
+		t.Errorf("namespace = %q after keeping one generation and one mounted lower", got)
+	}
+	if err := transport.EvictCacheSnapshots(ctx, projectKey, "npm", 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := runLive(t, ctx, "podman", "unshare", "ls", namespace); got != liveNewerKey {
+		t.Errorf("namespace = %q after keeping one generation", got)
+	}
+
+	if err := transport.ResetProjectCache(ctx, projectKey); err != nil {
+		t.Fatal(err)
+	}
+	if got := runLive(t, ctx, "podman", "unshare", "ls", spec.ProjectPath()+"/cache"); got != "" {
+		t.Errorf("cache = %q after a reset", got)
+	}
+	// Reset is for the disposable half of the project store, so the session
+	// store has to still be there for slice 5 to promote into.
+	runLive(t, ctx, "podman", "unshare", "test", "-d", spec.ProjectPath()+"/sessions")
+}
+
 // TestLiveProjectLayersAreSharedToReadAndPrivateToWrite runs two containers of
 // one project at once. Both must start from the same shared state, and neither
 // may see what the other does to it or change what the next run starts from.

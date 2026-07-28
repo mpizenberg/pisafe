@@ -312,6 +312,18 @@ func TestDiscardRequiresExactRepeatedRunID(t *testing.T) {
 	}
 }
 
+// TestCacheTakesOnlyReset keeps a mistyped subcommand from reaching the VM,
+// where the only cache operation is destructive.
+func TestCacheTakesOnlyReset(t *testing.T) {
+	var output bytes.Buffer
+	for _, args := range [][]string{{"cache"}, {"cache", "clear"}, {"cache", "reset", "npm"}} {
+		err := Run(context.Background(), args, nil, &output)
+		if err == nil || !strings.Contains(err.Error(), "usage: pisafe cache reset") {
+			t.Fatalf("Run(%v) error = %v", args, err)
+		}
+	}
+}
+
 // Everything in a diff was written inside the run, so nothing may reach the
 // terminal unquoted, and a truncated list must say so.
 func TestPrintRunDiffQuotesRunContentAndReportsTruncation(t *testing.T) {

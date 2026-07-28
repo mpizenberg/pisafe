@@ -67,7 +67,21 @@ func (controller Controller) Stop(
 	if err != nil {
 		return runstate.Manifest{}, controller.recordLifecycleError(runID, "record stop", err)
 	}
-	return stopped, nil
+	publishErr := controller.publishCaches(ctx, stopped)
+	if publishErr == nil {
+		return stopped, nil
+	}
+	// A cache that did not publish costs a later run time and nothing else, so
+	// it is recorded against this run rather than failing a stop that worked.
+	// Only being unable to record it is worth failing on.
+	recorded, err := controller.store.RecordError(
+		runID,
+		fmt.Errorf("publish run caches: %w", publishErr),
+	)
+	if err != nil {
+		return stopped, errors.Join(publishErr, err)
+	}
+	return recorded, nil
 }
 
 func (controller Controller) Resume(

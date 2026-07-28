@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -125,6 +126,49 @@ func (backend *fakeBackend) PrepareRunOverlays(
 	backend.calls = append(backend.calls, backendCall{kind: "prepare-overlays"})
 	if backend.failAt == "prepare-overlays" {
 		return errors.New("prepare overlays failed")
+	}
+	return nil
+}
+
+func (backend *fakeBackend) PublishCacheSnapshot(
+	_ context.Context,
+	spec runcontainer.Spec,
+	cache runcontainer.CacheMount,
+) error {
+	backend.calls = append(backend.calls, backendCall{
+		kind: "publish-snapshot",
+		args: []string{spec.ProjectKey, cache.Name, cache.Key, cache.Snapshot},
+	})
+	if backend.failAt == "publish-snapshot" {
+		return errors.New("publish snapshot failed")
+	}
+	return nil
+}
+
+func (backend *fakeBackend) EvictCacheSnapshots(
+	_ context.Context,
+	projectKey string,
+	name string,
+	keep int,
+	held []string,
+) error {
+	backend.calls = append(backend.calls, backendCall{
+		kind: "evict-snapshots",
+		args: append([]string{projectKey, name, strconv.Itoa(keep)}, held...),
+	})
+	if backend.failAt == "evict-snapshots" {
+		return errors.New("evict snapshots failed")
+	}
+	return nil
+}
+
+func (backend *fakeBackend) ResetProjectCache(_ context.Context, projectKey string) error {
+	backend.calls = append(backend.calls, backendCall{
+		kind: "reset-project-cache",
+		args: []string{projectKey},
+	})
+	if backend.failAt == "reset-project-cache" {
+		return errors.New("reset project cache failed")
 	}
 	return nil
 }
@@ -741,10 +785,15 @@ func flagValue(args []string, flag string) string {
 	return ""
 }
 
-func activeManifest(t *testing.T, store runstate.Store) runstate.Manifest {
+func activeManifest(
+	t *testing.T,
+	store runstate.Store,
+	caches ...runcontainer.CacheMount,
+) runstate.Manifest {
 	t.Helper()
 	prepared := testPrepared()
 	spec := runcontainer.DefaultSpec(prepared.Snapshot.RunID, testProject.Key, testImage)
+	spec.Caches = caches
 	if _, err := store.Create(runstate.Manifest{
 		RunID:              spec.RunID,
 		Project:            "project",
@@ -753,6 +802,7 @@ func activeManifest(t *testing.T, store runstate.Store) runstate.Manifest {
 		Image:              spec.ImageID,
 		Container:          spec.ContainerName(),
 		Workspace:          "/work/project",
+		Caches:             spec.Caches,
 		ActiveLimitSeconds: spec.WallSeconds,
 	}); err != nil {
 		t.Fatal(err)

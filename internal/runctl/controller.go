@@ -31,6 +31,9 @@ type Backend interface {
 		[]runcontainer.CacheMount,
 	) ([]runcontainer.CacheMount, error)
 	PrepareRunOverlays(context.Context, string, []runcontainer.CacheMount) error
+	PublishCacheSnapshot(context.Context, runcontainer.Spec, runcontainer.CacheMount) error
+	EvictCacheSnapshots(context.Context, string, string, int, []string) error
+	ResetProjectCache(context.Context, string) error
 	ImportStage(context.Context, string) error
 	Execute(context.Context, io.Reader, ...string) ([]byte, error)
 	StreamExecute(context.Context, io.Writer, ...string) error

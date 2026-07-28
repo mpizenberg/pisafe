@@ -287,6 +287,52 @@ func TestColdCacheStartsFromRunLocalEmptiness(t *testing.T) {
 	}
 }
 
+// TestPublishReadsExactlyOneCacheThroughItsOverlay is what makes a published
+// generation the state the run actually saw: it is read back through the same
+// stack the run wrote to, so overlayfs resolves the deletions rather than
+// pisafe interpreting an upper it does not understand.
+func TestPublishReadsExactlyOneCacheThroughItsOverlay(t *testing.T) {
+	spec := DefaultSpec("run-123", testProjectKey, testImageID)
+	npm := CacheMount{
+		Name:     "npm",
+		Env:      []string{"npm_config_cache"},
+		Key:      "0123456789abcdef",
+		Snapshot: "fedcba9876543210",
+	}
+	cargo := CacheMount{Name: "cargo", Env: []string{"CARGO_HOME"}, Key: "1111111111111111"}
+	spec.Caches = []CacheMount{npm, cargo}
+
+	args, err := spec.PublishArgs(npm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	expected := "--volume /var/lib/pisafe/projects/project-3f9c2a1b/cache/npm/fedcba9876543210:/cache/npm:O," +
+		"upperdir=/var/lib/pisafe/runs/run-123/overlay/cache/npm/upper," +
+		"workdir=/var/lib/pisafe/runs/run-123/overlay/cache/npm/work"
+	if !strings.Contains(joined, expected) {
+		t.Errorf("publish args lack %q:\n%s", expected, joined)
+	}
+	if !strings.HasSuffix(joined, "tar --numeric-owner --owner=1000 --group=1000 -C /cache/npm -cf - .") {
+		t.Errorf("publish args do not stream the merged view:\n%s", joined)
+	}
+	// Publishing one namespace must open nothing else: not another cache, not
+	// the session store, and not the run's own workspace or home.
+	if count := strings.Count(joined, "--volume") + strings.Count(joined, "--mount"); count != 1 {
+		t.Errorf("publishing npm opens %d mounts, want only its own:\n%s", count, joined)
+	}
+	for _, required := range []string{
+		"--network=none", "--read-only", "--cap-drop=all", "--security-opt=no-new-privileges",
+	} {
+		if !strings.Contains(joined, required) {
+			t.Errorf("publish args lack %q:\n%s", required, joined)
+		}
+	}
+	if _, err := spec.PublishArgs(CacheMount{Name: "npm", Env: npm.Env, Key: "not-a-key"}); err == nil {
+		t.Error("an unkeyed cache was published")
+	}
+}
+
 // TestSpecRefusesCachesItCannotAddressOrTrust covers what arrives from the
 // repository and from a directory listing rather than from pisafe.
 func TestSpecRefusesCachesItCannotAddressOrTrust(t *testing.T) {

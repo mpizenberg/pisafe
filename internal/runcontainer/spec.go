@@ -21,6 +21,10 @@ const (
 	DefaultPersistent = int64(10 * 1024 * 1024 * 1024)
 	DefaultProject    = int64(10 * 1024 * 1024 * 1024)
 	DefaultWallClock  = int64(8 * 60 * 60)
+	// DefaultCacheGenerations bounds how many published generations one cache
+	// namespace keeps. Each is a full copy on a fixed-capacity image, and a
+	// generation older than the last few restores less than it costs to store.
+	DefaultCacheGenerations = 3
 	// applyPackage is where a run leaves the bundles apply fetches. It sits in
 	// the run's own workspace, the only writable place both the run and the
 	// VM-side transport can reach.
@@ -72,13 +76,25 @@ func (cache CacheMount) Validate() error {
 	if err := runid.Validate(cache.Name); err != nil {
 		return fmt.Errorf("invalid cache name %q", cache.Name)
 	}
-	if !cacheKeyPattern.MatchString(cache.Key) {
-		return fmt.Errorf("cache %q has an invalid key %q", cache.Name, cache.Key)
+	if err := ValidateCacheGeneration(cache.Key); err != nil {
+		return fmt.Errorf("cache %q has an invalid key: %w", cache.Name, err)
 	}
-	if cache.Snapshot != "" && !cacheKeyPattern.MatchString(cache.Snapshot) {
-		return fmt.Errorf("cache %q has an invalid snapshot %q", cache.Name, cache.Snapshot)
+	if cache.Snapshot != "" {
+		if err := ValidateCacheGeneration(cache.Snapshot); err != nil {
+			return fmt.Errorf("cache %q has an invalid snapshot: %w", cache.Name, err)
+		}
 	}
 	return ValidateCacheEnvironment(cache.Env)
+}
+
+// ValidateCacheGeneration bounds what may name a directory of published cache
+// state. A generation name reaches pisafe from a directory listing as well as
+// from its own keying, so it is checked wherever it becomes half of a path.
+func ValidateCacheGeneration(name string) error {
+	if !cacheKeyPattern.MatchString(name) {
+		return fmt.Errorf("invalid cache generation %q", name)
+	}
+	return nil
 }
 
 // ValidateCacheEnvironment refuses a variable pisafe sets itself. Rebinding
@@ -209,27 +225,35 @@ type ProjectOverlay struct {
 }
 
 func (spec Spec) ProjectOverlays() []ProjectOverlay {
-	sessions := spec.overlayRoot(sessionsNamespace)
-	overlays := []ProjectOverlay{{
-		Destination: containerSessionRoot,
-		Lower:       spec.ProjectPath() + "/" + sessionsNamespace,
-		Upper:       sessions + "/upper",
-		Work:        sessions + "/work",
-	}}
+	overlays := []ProjectOverlay{spec.sessionsOverlay()}
 	for _, cache := range spec.Caches {
-		private := spec.overlayRoot(cacheNamespace + "/" + cache.Name)
-		lower := private + "/lower"
-		if cache.Snapshot != "" {
-			lower = spec.CacheNamespacePath(cache.Name) + "/" + cache.Snapshot
-		}
-		overlays = append(overlays, ProjectOverlay{
-			Destination: containerCacheRoot + "/" + cache.Name,
-			Lower:       lower,
-			Upper:       private + "/upper",
-			Work:        private + "/work",
-		})
+		overlays = append(overlays, spec.cacheOverlay(cache))
 	}
 	return overlays
+}
+
+func (spec Spec) sessionsOverlay() ProjectOverlay {
+	private := spec.overlayRoot(sessionsNamespace)
+	return ProjectOverlay{
+		Destination: containerSessionRoot,
+		Lower:       spec.ProjectPath() + "/" + sessionsNamespace,
+		Upper:       private + "/upper",
+		Work:        private + "/work",
+	}
+}
+
+func (spec Spec) cacheOverlay(cache CacheMount) ProjectOverlay {
+	private := spec.overlayRoot(cacheNamespace + "/" + cache.Name)
+	lower := private + "/lower"
+	if cache.Snapshot != "" {
+		lower = spec.CacheNamespacePath(cache.Name) + "/" + cache.Snapshot
+	}
+	return ProjectOverlay{
+		Destination: containerCacheRoot + "/" + cache.Name,
+		Lower:       lower,
+		Upper:       private + "/upper",
+		Work:        private + "/work",
+	}
 }
 
 // runEnvironment is what pisafe sets in every run, and so is exactly what a
@@ -302,6 +326,42 @@ func (spec Spec) RunArgs() ([]string, error) {
 		spec.ImageID,
 		"pisafe-guest", "serve-ssh",
 	), nil
+}
+
+// PublishArgs renders the throwaway container that reads one cache's merged
+// view out as a tar stream. Only overlayfs knows what a run's writes and
+// deletions add up to, so the state worth keeping is taken from a container
+// that mounts the overlay rather than reconstructed from the upper. The
+// container gets no network, no home, and no workspace, because copying a
+// directory needs none of them.
+func (spec Spec) PublishArgs(cache CacheMount) ([]string, error) {
+	if err := spec.Validate(); err != nil {
+		return nil, err
+	}
+	if err := cache.Validate(); err != nil {
+		return nil, err
+	}
+	overlay := spec.cacheOverlay(cache)
+	memory := strconv.FormatInt(spec.MemoryBytes, 10)
+	return []string{
+		"run",
+		"--rm",
+		"--pull=never",
+		"--label", "io.pisafe.run=" + spec.RunID,
+		"--label", "io.pisafe.kind=publish",
+		"--user", containerUser,
+		"--read-only",
+		"--cap-drop=all",
+		"--security-opt=no-new-privileges",
+		"--network=none",
+		"--memory", memory,
+		"--memory-swap", memory,
+		"--pids-limit", strconv.Itoa(spec.PIDs),
+		"--volume", overlay.volume(),
+		spec.ImageID,
+		"tar", "--numeric-owner", "--owner=1000", "--group=1000",
+		"-C", overlay.Destination, "-cf", "-", ".",
+	}, nil
 }
 
 func (spec Spec) ConfigureSSHArgs() ([]string, error) {

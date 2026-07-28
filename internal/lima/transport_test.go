@@ -17,6 +17,8 @@ import (
 	"github.com/mpizenberg/pisafe/internal/runcontainer"
 )
 
+const testRunImage = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 func TestTransportCreateStageStreamsVerifiedArtifacts(t *testing.T) {
 	root := t.TempDir()
 	bundle := filepath.Join(root, "source.bundle")
@@ -378,6 +380,71 @@ func TestSelectCacheSnapshotsPairsEveryCacheWithItsGeneration(t *testing.T) {
 	arguments := runner.calls[0].args
 	if !slices.Contains(arguments, "project-3f9c2a1b") || !slices.Contains(arguments, "cargo") {
 		t.Fatalf("selection command = %v", arguments)
+	}
+}
+
+// TestPublishCacheSnapshotNamesTheRunItReads pins what the publishing command
+// is told: which namespace the generation lands in, which key names it, and
+// which run's overlay is read for it. Getting any of them from a different run
+// would publish one run's work into another's history.
+func TestPublishCacheSnapshotNamesTheRunItReads(t *testing.T) {
+	runner := &fakeRunner{}
+	transport := Transport{instance: InstanceName, runner: runner}
+	spec := runcontainer.DefaultSpec("run-1", "project-3f9c2a1b", testRunImage)
+	cache := runcontainer.CacheMount{
+		Name:     "npm",
+		Env:      []string{"npm_config_cache"},
+		Key:      "0123456789abcdef",
+		Snapshot: "fedcba9876543210",
+	}
+	spec.Caches = []runcontainer.CacheMount{cache}
+
+	if err := transport.PublishCacheSnapshot(context.Background(), spec, cache); err != nil {
+		t.Fatal(err)
+	}
+	arguments := runner.calls[0].args
+	for _, want := range []string{"project-3f9c2a1b", "npm", "0123456789abcdef", "run-1"} {
+		if !slices.Contains(arguments, want) {
+			t.Fatalf("publish command omits %q: %v", want, arguments)
+		}
+	}
+	// The generation is read out of a container that mounts the run's overlay,
+	// so the run container's own lower and upper have to be in the command.
+	joined := strings.Join(arguments, " ")
+	if !strings.Contains(joined, "/var/lib/pisafe/projects/project-3f9c2a1b/cache/npm/fedcba9876543210:") ||
+		!strings.Contains(joined, "upperdir=/var/lib/pisafe/runs/run-1/overlay/cache/npm/upper") {
+		t.Fatalf("publish command does not mount the run's overlay: %v", arguments)
+	}
+}
+
+func TestPublishAndEvictionRefuseWhatTheyCannotAddress(t *testing.T) {
+	spec := runcontainer.DefaultSpec("run-1", "project-3f9c2a1b", testRunImage)
+	transport := Transport{instance: InstanceName, runner: &fakeRunner{}}
+	if err := transport.PublishCacheSnapshot(
+		context.Background(),
+		spec,
+		runcontainer.CacheMount{Name: "npm", Env: []string{"npm_config_cache"}, Key: "not-a-key"},
+	); err == nil {
+		t.Error("an unkeyed cache was published")
+	}
+	for name, evict := range map[string]func() error{
+		// Keeping nothing would evict the generation the namespace was just
+		// published to, which is the one every later run starts from.
+		"keeping nothing": func() error {
+			return transport.EvictCacheSnapshots(context.Background(), "project-3f9c2a1b", "npm", 0, nil)
+		},
+		"climbing held generation": func() error {
+			return transport.EvictCacheSnapshots(
+				context.Background(), "project-3f9c2a1b", "npm", 3, []string{"../../sessions"},
+			)
+		},
+		"nested namespace": func() error {
+			return transport.EvictCacheSnapshots(context.Background(), "project-3f9c2a1b", "a/b", 3, nil)
+		},
+	} {
+		if err := evict(); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
 	}
 }
 

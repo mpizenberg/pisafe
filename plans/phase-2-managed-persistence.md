@@ -110,16 +110,24 @@ project's own inputs:
   Failing that it takes the newest snapshot in the namespace — the directory
   itself is the restore prefix, so a changed lockfile restores the previous
   generation as a base and the tool fetches only the delta.
-- **Publish.** At the end, if the run's key has no snapshot, the overlay's
-  merged view is materialized into a new directory and renamed into place.
-  overlayfs has already resolved deletions and whiteouts; pisafe copies what
-  the container saw and never interprets an upper.
+- **Publish.** When the run stops, if the run's key has no snapshot and the
+  run's upper is not empty, the overlay's merged view is materialized into a
+  new directory and renamed into place. overlayfs has already resolved
+  deletions and whiteouts; pisafe copies what the container saw and never
+  interprets an upper. The empty-upper condition is what keeps a run that
+  fetched nothing from laying a blank generation over a namespace that has
+  usable ones — a blank one would be the newest, and so the fallback.
 - **Immutability is what makes this safe.** No snapshot is ever modified, so no
   mounted lower ever changes, so concurrent runs need no coordination and
   publishing needs no scheduling window. Two runs producing the same key race
   to rename; the loser discards its temporary directory.
-- **Eviction** keeps the newest few snapshots per namespace and drops the rest,
-  because immutable generations are full copies on a fixed-capacity image.
+- **Eviction** keeps the newest three snapshots per namespace and drops the
+  rest, because immutable generations are full copies on a fixed-capacity
+  image. It also keeps any snapshot a recorded run may still mount, whatever
+  its age.
+- **Reset** empties every cache namespace of one project. It is refused while
+  any run of the project could still mount a generation, for the same reason
+  eviction protects one.
 
 Sessions are not a cache and do not use this. They have no key and no
 invalidation: filenames are session IDs, nothing is implied by a file's
@@ -196,11 +204,14 @@ anything.
       `TestLiveCacheSnapshotsAreSelectedByKeyThenRecency` — an empty namespace
       selects nothing, either seeded generation is found at its exact key, and
       an unknown key falls back to the newest.
-- [ ] **4. Publishing and eviction.** Materialize the merged view into a new
+- [x] **4. Publishing and eviction.** Materialize the merged view into a new
       immutable snapshot at run end, keep the newest few per namespace, and add
-      the reset that makes disposability real. Live test: a run's fetches are
-      present for the next run under the new key; an existing snapshot is
-      byte-unchanged after a run that restored it; reset empties the namespace.
+      the reset that makes disposability real. Live test:
+      `TestLivePublishedGenerationsAreImmutableAndDisposable` — a run's fetches
+      and its deletions are both in the generation it publishes, the generation
+      it restored is byte-unchanged, the next run falls back to what was just
+      published, eviction spares a generation a run may still mount, and reset
+      empties the cache while leaving the session store alone.
 - [ ] **5. Session promotion.** Fold a finished run's transcripts into the
       project session store — additive, no key, no invalidation. Live test: a
       second run of the project reads an earlier run's finished transcript,
@@ -318,14 +329,56 @@ this document is the current truth, not an audit trail. These fold into
 - **The key includes the run image ID.** A tool cache produced by a different
   image should not be restored into a run of this one, for the same reason CI
   keys start with the runner OS. The config does not control this part.
-- **Publishing happens at run end regardless of the run's outcome**, not only
+- **Publishing happens when a run stops, regardless of its outcome**, not only
   on `apply`. Under immutability a publish cannot damage anything that exists,
   so gating it behind a deliberate act buys less than it costs in cache misses.
-  *Flagged as uncertain*: this does mean a run that executed hostile code can
-  leave a snapshot a later run restores. The containment is that the later run
-  is itself sandboxed, that lockfile integrity checks reject a tampered tarball,
-  and that the cache is disposable. If it proves wrong, publishing only on
-  `apply` is a one-line change.
+  Stopping is also the one point every ending passes through — `apply` and
+  `discard` both stop first — and the last point at which the overlay can still
+  be mounted. Publishing at reclamation instead was not taken: an applied run
+  is reclaimed a week later by `gc`, far too late to help anything.
+  Two consequences. A stopped run that resumes and keeps working publishes
+  nothing further under the same key, because that generation now exists; the
+  work is not lost, it is simply not shared until the inputs move. And *flagged
+  as uncertain*: a run that executed hostile code can leave a snapshot a later
+  run restores. The containment is that the later run is itself sandboxed, that
+  lockfile integrity checks reject a tampered tarball, and that the cache is
+  disposable. If it proves wrong, publishing only on `apply` is a one-line
+  change.
+- **A publish that fails is recorded on the run, not returned as a stop
+  failure.** The run did stop, its workspace is intact, and the only cost is
+  that a later run fetches again — failing the command would misreport that.
+  Joining it into the returned error was not taken: `apply` and `discard` stop
+  a run on the way to something else, and neither may be aborted by a cache.
+  `pisafe stop` prints the recorded warning and `pisafe list` marks the run.
+- **The merged view is read by a throwaway container and written only by
+  pisafe.** The container mounts the run's own overlay and streams a tar to
+  standard output; the VM-side script extracts it under `podman unshare`. Bind
+  mounting a staging directory into that container and copying inside it was
+  not taken, though it is one command shorter: no container ever gets a
+  writable handle on the project store, and that is worth keeping true.
+- **A generation is stamped when it is published, not when the run last touched
+  it.** tar restores the merged view's own timestamp onto the extracted
+  directory, and recency is how a namespace is searched, so an unstamped
+  generation could sort behind one it supersedes.
+- **Three generations per namespace, and reset covers a whole project's
+  cache.** This settles the open question slice 4 inherited. Three is what
+  fits: each generation is a full copy on a 10 GiB image, and publishing needs
+  room for one more before eviction runs. Reset takes the whole cache rather
+  than one namespace or one generation, because the reason to reach for it is
+  never "this one generation is wrong". It leaves the session store alone: a
+  transcript is not reproducible and so is not disposable.
+- **Eviction and reset both protect a generation a recorded run may still
+  mount.** overlayfs leaves behaviour undefined when a mounted lower goes away,
+  and the run manifests already record which generation each run resolved to,
+  so the protected set is read from them rather than tracked separately. An
+  active run has one mounted now and a stopped run remounts its own on resume;
+  an imported run cannot resume, so it protects nothing.
+- **A half-written generation stages as a dot entry inside its own namespace.**
+  `ls` hides it, so neither selection nor eviction can see a generation that is
+  still being written, and the rename into place is within one directory on one
+  filesystem. A separate staging tree was not taken: it would need its own
+  cleanup path, while a leaked staging directory here is swept by the same
+  reset that empties the namespace.
 - **pisafe creates the run-side uppers, not the privileged helper.** The set of
   namespaces comes from the project config and so cannot be known when the run
   filesystem is allocated. Everything the helper creates is owned by the mapped
@@ -340,9 +393,10 @@ this document is the current truth, not an audit trail. These fold into
   this splits them.
 - **A second run of a project still cannot read an earlier run's finished
   transcripts.** Delivered by slice 5. Slices 1 and 2 built the isolation half
-  of sharing, whose value lives entirely in the publishing half; until slices 4
-  and 5 land, both project lowers are permanently empty and the overlays are
-  behaviourally equivalent to per-run directories.
+  of sharing, whose value lives entirely in the publishing half; slice 4
+  delivered that half for caches, and until slice 5 lands the session lower
+  stays permanently empty and its overlay is behaviourally equivalent to a
+  per-run directory.
 - **The shared cache is a directory pisafe owns, and tools are redirected into
   it by cache-specific environment variables.** Overlaying each tool's own
   location instead — `~/.npm`, `~/.cargo/registry`, `~/go/pkg/mod` — was not
@@ -397,9 +451,6 @@ this document is the current truth, not an audit trail. These fold into
   breaks — but a compromised run would then read what an earlier one left. This
   stays open because the answer is a documentation question as much as a code
   one: nothing tells a repository which variables are a bad idea.
-- **How many snapshots to keep per namespace, and what reset covers.** A whole
-  project, one namespace, or one snapshot. Slice 4 has to pick a default; the
-  right number probably wants real usage.
 - **How global tools are installed.** The design lists `pisafe tool install`
   separately from `pisafe extension install`, and the state table has "Global
   tools" as its own row. Whether those are npm globals in the profile, a second

@@ -132,6 +132,78 @@ while [ "$#" -gt 0 ]; do
 done
 ' pisafe-overlays "$@"
 `
+
+	// publishSnapshotScript materializes one cache's merged view into a new
+	// generation. The container reads; only this script writes, so nothing
+	// inside a run ever holds the project store open for writing. The staging
+	// directory is a dot entry, which is what keeps a half-written generation
+	// out of every listing that selects or evicts one.
+	publishSnapshotScript = `set -euo pipefail
+namespace="/var/lib/pisafe/projects/$1/cache/$2"
+key="$3"
+upper="/var/lib/pisafe/runs/$4/overlay/cache/$2/upper"
+staging="$namespace/.publish-$4"
+shift 4
+
+# A generation is never rewritten, and a run that added nothing must not lay an
+# empty generation over a namespace that has usable ones in it.
+if podman unshare test -d "$namespace/$key"; then
+	exit 0
+fi
+if [ -z "$(podman unshare find "$upper" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+	exit 0
+fi
+
+podman unshare rm -rf -- "$staging"
+podman unshare install -d -m 0700 -o 1000 -g 1000 "$namespace" "$staging"
+trap 'podman unshare rm -rf -- "$staging" || true' EXIT
+podman "$@" | podman unshare tar --numeric-owner -C "$staging" -xf -
+# tar restores the merged view's own timestamp onto the staging directory, and
+# recency is how a namespace is searched, so the generation is stamped with
+# when it was published rather than when the run last touched the directory.
+podman unshare touch "$staging"
+podman unshare mv -T "$staging" "$namespace/$key" ||
+	podman unshare test -d "$namespace/$key"
+`
+
+	// evictSnapshotsScript drops the generations past the newest few. A
+	// generation a recorded run may still stack an overlay on is kept whatever
+	// its age: overlayfs leaves behaviour undefined when a mounted lower goes
+	// away, and a stopped run remounts its own lower when it resumes.
+	evictSnapshotsScript = `set -eu
+exec podman unshare sh -ceu '
+set -eu
+namespace=/var/lib/pisafe/projects/$1/cache/$2
+keep=$3
+shift 3
+test -d "$namespace" || exit 0
+index=0
+for entry in $(ls -1t "$namespace"); do
+	index=$((index + 1))
+	if [ "$index" -le "$keep" ]; then
+		continue
+	fi
+	for held in "$@"; do
+		if [ "$entry" = "$held" ]; then
+			continue 2
+		fi
+	done
+	rm -rf -- "$namespace/$entry"
+done
+' pisafe-evict "$@"
+`
+
+	// resetProjectCacheScript empties every cache namespace of one project
+	// without touching the namespace roots the privileged helper owns, and
+	// without touching the session store, which is not disposable.
+	resetProjectCacheScript = `set -eu
+exec podman unshare sh -ceu '
+set -eu
+cache=/var/lib/pisafe/projects/$1/cache
+test -d "$cache" || exit 0
+find "$cache" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+' pisafe-reset "$@"
+`
 )
 
 // maxApplyArtifactBytes stops a run from filling the Mac's disk through the
@@ -395,6 +467,78 @@ func (transport Transport) PrepareRunOverlays(
 	}
 	if _, err := transport.shellScript(ctx, nil, prepareOverlaysScript, arguments...); err != nil {
 		return fmt.Errorf("prepare run overlay directories: %w", err)
+	}
+	return nil
+}
+
+// PublishCacheSnapshot keeps what one run added to a declared cache as a new
+// immutable generation. It does nothing when the run's key already names a
+// generation or when the run added nothing, so a namespace never gains a
+// duplicate or an empty entry that a later run would restore in preference to
+// a usable one.
+func (transport Transport) PublishCacheSnapshot(
+	ctx context.Context,
+	spec runcontainer.Spec,
+	cache runcontainer.CacheMount,
+) error {
+	publishArgs, err := spec.PublishArgs(cache)
+	if err != nil {
+		return err
+	}
+	arguments := append(
+		[]string{"pisafe-publish", spec.ProjectKey, cache.Name, cache.Key, spec.RunID},
+		publishArgs...,
+	)
+	if _, err := transport.Execute(
+		ctx,
+		nil,
+		append([]string{"bash", "-ceu", publishSnapshotScript}, arguments...)...,
+	); err != nil {
+		return fmt.Errorf("publish cache %q: %w", cache.Name, err)
+	}
+	return nil
+}
+
+// EvictCacheSnapshots trims one namespace to the newest keep generations, plus
+// every generation held names, which are the ones a recorded run may still
+// mount.
+func (transport Transport) EvictCacheSnapshots(
+	ctx context.Context,
+	projectKey string,
+	name string,
+	keep int,
+	held []string,
+) error {
+	if err := runid.Validate(projectKey); err != nil {
+		return err
+	}
+	if err := runid.Validate(name); err != nil {
+		return fmt.Errorf("invalid cache name %q", name)
+	}
+	if keep < 1 {
+		return fmt.Errorf("a cache namespace must keep at least one generation")
+	}
+	arguments := []string{projectKey, name, strconv.Itoa(keep)}
+	for _, snapshot := range held {
+		if err := runcontainer.ValidateCacheGeneration(snapshot); err != nil {
+			return err
+		}
+		arguments = append(arguments, snapshot)
+	}
+	if _, err := transport.shellScript(ctx, nil, evictSnapshotsScript, arguments...); err != nil {
+		return fmt.Errorf("evict generations of cache %q: %w", name, err)
+	}
+	return nil
+}
+
+// ResetProjectCache empties one project's shared cache. Nothing a run needs
+// for correctness lives there, so throwing all of it away is always allowed.
+func (transport Transport) ResetProjectCache(ctx context.Context, projectKey string) error {
+	if err := runid.Validate(projectKey); err != nil {
+		return err
+	}
+	if _, err := transport.shellScript(ctx, nil, resetProjectCacheScript, projectKey); err != nil {
+		return fmt.Errorf("reset project cache: %w", err)
 	}
 	return nil
 }

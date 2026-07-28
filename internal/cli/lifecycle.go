@@ -13,6 +13,7 @@ import (
 	"github.com/mpizenberg/pisafe/internal/hostnet"
 	"github.com/mpizenberg/pisafe/internal/lima"
 	"github.com/mpizenberg/pisafe/internal/runctl"
+	"github.com/mpizenberg/pisafe/internal/runid"
 	"github.com/mpizenberg/pisafe/internal/runimage"
 	"github.com/mpizenberg/pisafe/internal/runssh"
 	"github.com/mpizenberg/pisafe/internal/runstate"
@@ -23,6 +24,9 @@ func runStop(ctx context.Context, runID string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// Stopping keeps what the run cached, which for a large dependency tree is
+	// a copy that takes a while and says nothing while it runs.
+	fmt.Fprintf(out, "Stopping %s...\n", runID)
 	manifest, err := controller.Stop(ctx, runID)
 	if err != nil {
 		return err
@@ -32,6 +36,35 @@ func runStop(ctx context.Context, runID string, out io.Writer) error {
 		"Stopped %s; %s of active time remains.\n",
 		runID,
 		time.Duration(runstate.RemainingSeconds(manifest, time.Now()))*time.Second,
+	)
+	// Stopping clears the record's error, so anything left on it happened while
+	// publishing the run's caches, which is not a reason to fail a stop.
+	if manifest.LastError != "" {
+		fmt.Fprintf(out, "Warning: %s\n", manifest.LastError)
+	}
+	return nil
+}
+
+func runCacheReset(ctx context.Context, out io.Writer) error {
+	root, err := gitstage.RepositoryRoot(ctx, ".")
+	if err != nil {
+		return err
+	}
+	project, err := runid.NewProject(root)
+	if err != nil {
+		return err
+	}
+	controller, err := prepareLifecycle(ctx)
+	if err != nil {
+		return err
+	}
+	if err := controller.ResetProjectCache(ctx, project); err != nil {
+		return err
+	}
+	fmt.Fprintf(
+		out,
+		"Emptied the shared cache of %s; its next run fetches from scratch.\n",
+		project.Directory,
 	)
 	return nil
 }

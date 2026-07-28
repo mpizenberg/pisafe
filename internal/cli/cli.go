@@ -13,7 +13,7 @@ import (
 )
 
 var errUsage = errors.New(
-	"usage: pisafe <run|connect|stop|resume|diff|cp|apply|discard|gc|list|zed|login|broker|doctor|help>",
+	"usage: pisafe <run|connect|stop|resume|diff|cp|apply|discard|cache|gc|list|zed|login|broker|doctor|help>",
 )
 
 func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
@@ -81,6 +81,11 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 			return fmt.Errorf("discard confirmation does not exactly match run %q", args[1])
 		}
 		return runDiscard(ctx, args[1], out)
+	case "cache":
+		if len(args) != 2 || args[1] != "reset" {
+			return errors.New("usage: pisafe cache reset")
+		}
+		return runCacheReset(ctx, out)
 	case "gc":
 		return runGC(ctx, args[1:], out)
 	case "help", "-h", "--help":
@@ -122,6 +127,11 @@ Usage:
                    own commits without it.
   pisafe discard RUN --confirm RUN
                    Permanently delete one exact run workspace
+  pisafe cache reset
+                   Throw away every dependency cache this repository's runs
+                   share. Nothing needs it to be correct, so the only cost is
+                   that the next run fetches from scratch. Session transcripts
+                   are not touched.
   pisafe gc [--dry-run]
                    Reclaim imported runs older than seven days and prune
                    superseded run images. Their pisafe/RUN branches keep the
