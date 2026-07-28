@@ -28,8 +28,8 @@ const (
 	containerWorkRoot = "/work"
 	containerHome     = "/home/node"
 	// containerCacheRoot is a layout pisafe owns rather than a tool's own
-	// default location. Only what a cache-specific environment variable points
-	// here is shared, so the project layer can never accumulate arbitrary state.
+	// default location. Nothing is shared unless a cache-specific environment
+	// variable points it here, so the layer cannot accumulate arbitrary state.
 	containerCacheRoot   = "/cache"
 	containerSessionRoot = "/sessions"
 	guestStorageRoot     = "/var/lib/pisafe/runs"
@@ -197,9 +197,9 @@ func (spec Spec) RunArgs() ([]string, error) {
 		"--env", "PI_CODING_AGENT_SESSION_DIR="+containerSessionRoot,
 		"--env", "PI_SKIP_VERSION_CHECK=1",
 		"--env", "npm_config_cache="+containerCacheRoot+"/npm",
-		// Logs and the update check write uncacheable per-run state. Keeping
-		// them out of the shared layer is what leaves every path in it
-		// content-addressed, and so safe to merge last-writer-wins.
+		// Logs and the update check write per-run state that grows without
+		// bound and is useful to no later run, so they stay out of the layer
+		// runs share.
 		"--env", "npm_config_logs_dir="+containerHome+"/.npm/_logs",
 		"--env", "npm_config_update_notifier=false",
 		spec.ImageID,

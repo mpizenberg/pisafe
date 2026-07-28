@@ -30,6 +30,12 @@ The design's state table is the specification for what is writable where; the
 rows Phase 2 makes real are Pi sessions (project store, run-local), dependency
 caches (project), global settings, installed extensions, and global tools.
 
+A fourth property, not an invariant but the thing that makes the rest tractable:
+**shared state is disposable, and no run's correctness may depend on it.** A
+cache that is missing, stale, or wrong must cost time and nothing else. Every
+mechanism below is allowed to be approximate because of this, and the reset
+path is what makes the claim true rather than aspirational.
+
 ## Substrate
 
 Verified against the pinned image and the live VM, not inferred from
@@ -37,20 +43,32 @@ documentation. Reproduce with the commands under [Verification](#verification).
 
 - **Shared state is an overlay, not a shared mount.** Podman mounts it
   rootlessly: `-v <lower>:<dst>:O,upperdir=<upper>,workdir=<work>`. The lower
-  is the project store, the upper lives in the run's own filesystem. Two
-  containers on one lower were shown to hold conflicting states — one shadowed
-  a shared file and added another, the second still read the original and saw
-  neither, both uppers survived exit, the lower stayed byte-unchanged. No new
-  VM privilege: the root helper gains per-project filesystem creation, not
-  mounting.
+  is a project-owned directory, the upper lives in the run's own filesystem.
+  Two containers on one lower were shown to hold conflicting states — one
+  shadowed a shared file and added another, the second still read the original
+  and saw neither, both uppers survived exit, the lower stayed byte-unchanged.
+  No new VM privilege: the root helper gains per-project filesystem creation,
+  not mounting.
 - **The overlay spans two filesystems.** A lower on the project's ext4 image
   and an upper on the run's own was mounted and written. Podman is particular
-  about the rest: `:O` is refused alongside any other mount option, so the
-  cache mount cannot carry `nodev,nosuid`; `--mount type=overlay` does not
-  exist, so `-v` is the only spelling; and both `upperdir` and `workdir` must
-  already exist, so the run filesystem is created with them.
-- **npm redirects into that overlay.** `npm_config_cache` moves the whole
-  cache, and `npm_config_logs_dir` keeps logs out of it.
+  about the rest: `:O` is refused alongside any other mount option, so a shared
+  mount cannot carry `nodev,nosuid`; `--mount type=overlay` does not exist, so
+  `-v` is the only spelling; and both `upperdir` and `workdir` must already
+  exist, so they are created before the container starts.
+- **A mounted lower must not change underneath a live run.** overlayfs leaves
+  behaviour undefined if the underlying filesystem is modified while part of a
+  mounted overlay. This is a kernel constraint, not a merge-semantics one, and
+  it is the reason shared state is written by creating new directories rather
+  than by editing existing ones.
+- **npm's cache is only half content-addressed.** `~/.npm/_cacache` holds
+  `content-v2/` keyed by the hash of the bytes, but `index-v5/` is keyed by the
+  hash of the *request URL*, so two runs fetching the same package write the
+  same path with different contents. It happens to degrade into a re-fetch
+  rather than corruption because each index line carries its own checksum — but
+  that is npm being forgiving, and it generalizes to no other tool. Do not
+  build on directory merging.
+- **npm redirects wholesale.** `npm_config_cache` moves the whole cache, and
+  `npm_config_logs_dir` keeps per-run logs out of it.
 - **Pi writes its transcript where the environment says.** With
   `PI_CODING_AGENT_SESSION_DIR` set to the overlay, a real run's session file
   landed in the run's private upper and the project lower stayed empty. The
@@ -58,7 +76,10 @@ documentation. Reproduce with the commands under [Verification](#verification).
   a provider.
 - **Ownership follows the existing rule.** The overlay is writable only when
   the lower's contents are owned by the container's mapped UID, the same
-  `subuid_start + 999` the run-storage helper already derives.
+  `subuid_start + 999` the storage helper already derives. The consequence
+  worth keeping in mind: everything the helper creates is writable by the
+  pisafe user under `podman unshare`, so pisafe can build structure *inside* a
+  helper-created directory without any new privilege or helper change.
 - **The global profile is a read-only mount** named by absolute path in the
   `packages` array of `settings.json`. A package on a genuinely read-only mount
   was loaded and listed by the pinned Pi.
@@ -71,29 +92,84 @@ documentation. Reproduce with the commands under [Verification](#verification).
 - **`settings.json` and `trust.json` must be copied in, not mounted
   read-only**, because Pi writes both. The copy dies with the run.
 
+### How caches are shared
+
+The model is the one CI systems converged on, because directory merging is not
+a solvable problem in general — the presence or absence of a file carries
+tool-specific meaning that no generic rule reconstructs.
+
+A **cache namespace** is a name declared by the project. Under it the project
+store holds **immutable snapshots**, each named by a key derived from the
+project's own inputs:
+
+```text
+/var/lib/pisafe/projects/<project>/cache/<namespace>/<key>/
+```
+
+- **Restore.** A starting run looks for the snapshot whose key matches exactly.
+  Failing that it takes the newest snapshot in the namespace — the directory
+  itself is the restore prefix, so a changed lockfile restores the previous
+  generation as a base and the tool fetches only the delta.
+- **Publish.** At the end, if the run's key has no snapshot, the overlay's
+  merged view is materialized into a new directory and renamed into place.
+  overlayfs has already resolved deletions and whiteouts; pisafe copies what
+  the container saw and never interprets an upper.
+- **Immutability is what makes this safe.** No snapshot is ever modified, so no
+  mounted lower ever changes, so concurrent runs need no coordination and
+  publishing needs no scheduling window. Two runs producing the same key race
+  to rename; the loser discards its temporary directory.
+- **Eviction** keeps the newest few snapshots per namespace and drops the rest,
+  because immutable generations are full copies on a fixed-capacity image.
+
+Sessions are not a cache and do not use this. They have no key and no
+invalidation: filenames are session IDs, nothing is implied by a file's
+presence, and folding a run's transcripts into the project store is pure
+addition.
+
+### Project configuration
+
+Cache namespaces are declared by the project, in `.config/pisafe.json` at the
+repository root, read from the checkout on the Mac at run start:
+
+```json
+{
+  "caches": [
+    { "name": "npm", "env": ["npm_config_cache"], "key": ["package-lock.json"] }
+  ]
+}
+```
+
+pisafe chooses the mount point (`/cache/<name>`), sets each listed variable to
+it, and computes the key from the listed files plus the run image ID. The
+schema is deliberately **inert**: no commands, no shell, no paths of pisafe's
+own choosing. This file is the first repo-supplied input pisafe parses on the
+host, and on an untrusted clone it is attacker-controlled, so the worst a
+hostile config may achieve is a useless cache key or a full project image —
+both contained, both fixed by a reset.
+
 ### Layout
 
 Project key: directory slug plus the first eight hex characters of the SHA-256
 of the Mac-side Git root path, e.g. `api-3f9c2a1b`.
 
 ```text
-/var/lib/pisafe/global/<profile>            read-only mount, listed in packages
-/var/lib/pisafe/projects/<key>/cache/       overlay lower → /cache
-/var/lib/pisafe/projects/<key>/sessions/    overlay lower → session dir
-/var/lib/pisafe/runs/<run>/workspace        bind mount → /work
-/var/lib/pisafe/runs/<run>/home             bind mount → /home/node
-/var/lib/pisafe/runs/<run>/overlay/<layer>/ the run's private upper and work
+/var/lib/pisafe/global/<profile>                    read-only mount, listed in packages
+/var/lib/pisafe/projects/<key>/cache/<ns>/<snap>/   immutable snapshot → overlay lower
+/var/lib/pisafe/projects/<key>/sessions/            overlay lower → session dir
+/var/lib/pisafe/runs/<run>/workspace                bind mount → /work
+/var/lib/pisafe/runs/<run>/home                     bind mount → /home/node
+/var/lib/pisafe/runs/<run>/overlay/<ns>/            the run's private upper and work
 ```
 
-`cache` and `sessions` are the shared layers. One name files a layer in three
-places — the project lower, the run's upper and work pair, and the container
-path — so adding one is a single entry in `runcontainer.ProjectLayerNames`,
-which the privileged helper is templated from and the security profile digest
-covers.
+The privileged helper allocates only the two project namespaces (`cache`,
+`sessions`) and the run's bare `overlay` directory. Everything below them —
+snapshot directories and one upper/work pair per declared cache — is created by
+pisafe as the mapped UID, because the set of namespaces comes from the project
+and cannot be known when the filesystem is allocated.
 
 Both the project and the run filesystem are root-owned fixed-capacity ext4
-images allocated by the same privileged helper, which is the only thing that
-mounts anything.
+images allocated by that same helper, which is the only thing that mounts
+anything.
 
 ## Slices
 
@@ -101,38 +177,49 @@ mounts anything.
       live VM. Commit `ce7cccb`.
 - [x] **1. Per-project storage and the dependency cache.** Extend the
       root-owned helper from per-run to per-project filesystems; derive the
-      project key; wire the cache overlay into `runcontainer.Spec`. Live test:
-      two concurrent runs of one project, both reading the seeded cache,
-      neither seeing the other's writes, the lower unchanged.
+      project key; wire a cache overlay into `runcontainer.Spec`. Commit
+      `e6e316f`.
 - [x] **2. Sessions on the same mechanism.** `PI_CODING_AGENT_SESSION_DIR`
-      points at a second per-project overlay, and the layer list is one
-      declaration the helper and the mount check are both derived from. Live
-      test: `TestLiveProjectLayersAreSharedToReadAndPrivateToWrite` now covers
-      every shared layer — two concurrent runs read the seeded project state
-      and neither sees the other's writes.
-- [ ] **3. Promotion.** Fold a run's upper into the project store —
-      deliberately, and only while no run holds that lower. Decide the trigger
-      and the surface. Live test: a promoted cache entry is present for the
-      next run; a refused promotion leaves the store untouched.
-- [ ] **4. Global profile and `pisafe extension install`.** Read-only profile
+      points at a second per-project overlay. Live test:
+      `TestLiveProjectLayersAreSharedToReadAndPrivateToWrite` — two concurrent
+      runs read the seeded project state and neither sees the other's writes.
+      Commit `1c5ec79`.
+- [ ] **3. Declared caches and snapshot restore.** Parse `.config/pisafe.json`,
+      compute each namespace's key, select a snapshot by exact key then by
+      newest-in-namespace, and mount one overlay per declared cache with uppers
+      pisafe creates itself. Nothing publishes yet. Live test: a seeded
+      snapshot is restored at its exact key; a key with no exact match falls
+      back to the newest; a project with no config gets no cache mount at all.
+- [ ] **4. Publishing and eviction.** Materialize the merged view into a new
+      immutable snapshot at run end, keep the newest few per namespace, and add
+      the reset that makes disposability real. Live test: a run's fetches are
+      present for the next run under the new key; an existing snapshot is
+      byte-unchanged after a run that restored it; reset empties the namespace.
+- [ ] **5. Session promotion.** Fold a finished run's transcripts into the
+      project session store — additive, no key, no invalidation. Live test: a
+      second run of the project reads an earlier run's finished transcript,
+      while still not seeing a concurrent run's live one.
+- [ ] **6. Global profile and `pisafe extension install`.** Read-only profile
       mount, copied-in `settings.json`/`trust.json`, installer pinning exact
       version and integrity hash. Live test: a pinned extension loads in a run;
       `pi install` inside a run fails; `pi -e` still works.
-- [ ] **5. `pisafe extension update` and update notifications.** Offered, never
-      applied. Depends on how pinning is recorded in slice 4.
-- [ ] **6. Global tools.** See the open question below — the mechanism is not
+- [ ] **7. `pisafe extension update` and update notifications.** Offered, never
+      applied. Depends on how pinning is recorded in slice 6.
+- [ ] **8. Global tools.** See the open question below — the mechanism is not
       yet decided.
-- [ ] **7. `gc` sweep of caches and session stores.** The design already
-      specifies this; it has been a Known gap only because the targets did not
-      exist.
-- [ ] **8. Other providers.** Additional `pisafe login <provider>` commands
+- [ ] **9. `gc` sweep of project stores.** Reclaim whole project filesystems
+      whose repository is gone. Per-namespace eviction lands in slice 4; this
+      is the outer sweep the design already specifies.
+- [ ] **10. Other providers.** Additional `pisafe login <provider>` commands
       over the existing broker interface.
-- [ ] **9. Backup, reset, recovery.** Cheapest useful piece is resetting or
+- [ ] **11. Backup, reset, recovery.** Cheapest useful piece is resetting or
       removing a scope, which is nearly free once scopes exist.
 
 ## Decisions
 
-Appended as they occur. These fold into `DECISIONS.md` when Phase 2 lands.
+Appended as they occur, and revised in place when later work proves one wrong —
+this document is the current truth, not an audit trail. These fold into
+`DECISIONS.md` when Phase 2 lands.
 
 - **Project identity is a path hash.** A project is keyed by its directory slug
   plus eight hex of the SHA-256 of the Mac-side Git root path. Keying on the
@@ -149,34 +236,84 @@ Appended as they occur. These fold into `DECISIONS.md` when Phase 2 lands.
   whole project's cache when one tool gets it wrong. A full copy per run was
   not taken either: run filesystems are ext4 with no reflink, so the copy would
   be real.
-- **Promotion is deliberate, not automatic on run exit**, and may happen only
-  while no run holds that lower layer, because overlayfs leaves behaviour
-  undefined when a mounted lower changes underneath it. A run that executed
-  hostile code should also not fatten the shared layer merely by exiting. If
-  the no-live-run condition proves too restrictive, the escape hatch is
-  versioned lower generations, where a promotion writes a new generation and
-  live runs keep the one they mounted; that would also give `gc` another
-  natural sweep target.
-- **Sessions use the same overlay as caches**, rather than the run-local copy
-  the design's state table names. The semantics are what invariant 3 asks for
-  without paying for a copy, and session files are uniquely named per session
-  ID, so promotion is pure addition with no conflicting paths. This re-derives
-  a mechanism an earlier draft of the design sketched and dropped.
-- **The global profile is a read-only mount named by absolute path** in the
-  `packages` array. Relocating Pi's package store with `PI_PACKAGE_DIR` was
-  investigated and does not work, as recorded above.
+- **Caches are keyed immutable snapshots, not merged directories.** This
+  supersedes an earlier plan to fold a run's upper into the project store
+  additively. Merging was abandoned because the presence or absence of a file
+  carries tool-specific meaning — index files, stamp files, manifests — so no
+  generic rule reconstructs a state any tool would have produced. Every CI cache
+  system converged on wholesale keyed snapshots for this reason, and adopting
+  their model costs a full copy per generation and buys three things: whiteouts
+  are resolved by the kernel instead of interpreted by us, no mounted lower ever
+  changes so concurrent runs need no coordination, and eviction has an obvious
+  unit.
+- **The shared layer is disposable, not correct.** An earlier entry claimed
+  every path under `/cache` was content-addressed and therefore safe to merge
+  last-writer-wins. That was checked and is false: npm's `index-v5` is keyed by
+  request URL, not by content, and nothing generalizes to other tools anyway.
+  The property we actually hold, and can hold for any toolchain, is that a
+  wrong or missing cache costs time and never correctness. This is what obliges
+  slice 4 to ship a reset rather than defer it.
+- **The namespace directory is the restore prefix.** All snapshots for a cache
+  live under `cache/<namespace>/`, so falling back means taking the newest
+  entry there. Also writing each snapshot under a short shared key, as some CI
+  configurations do, was not taken: that overwrites an entry a concurrent run
+  may have mounted as its lower, reintroducing the one overlayfs hazard
+  immutability otherwise eliminates. Prefix search over immutable full keys
+  gives the same partial-hit behaviour with no mutation.
+- **Cache namespaces are declared by the project, in `.config/pisafe.json`.**
+  Hardcoding a per-tool table in pisafe was not taken: the knowledge belongs to
+  whoever knows the project, and a fixed table makes every new toolchain a
+  pisafe release. `.config/` rather than the repository root keeps the root
+  uncluttered.
+- **The config is JSON, parsed with the standard library.** pisafe currently has
+  zero dependencies. TOML would be the friendlier authoring format and the first
+  third-party package in a tool whose entire argument is boundary control; that
+  trade was declined. Reversibility: changing the format later means migrating
+  every repository that adopted it, so this is the expensive decision on this
+  page.
+- **The config schema is inert.** Key inputs are literal relative paths whose
+  contents pisafe hashes; there is no command execution, no shell, and no
+  caller-chosen mount path. This matters because the file arrives from the
+  repository and is parsed on the Mac before any sandbox exists. Globs were
+  deferred rather than refused — a monorepo will want `**/package-lock.json`,
+  but resolving one raises symlink-escape questions that a literal list does
+  not, so it waits for the repository that needs it.
+- **The key includes the run image ID.** A tool cache produced by a different
+  image should not be restored into a run of this one, for the same reason CI
+  keys start with the runner OS. The config does not control this part.
+- **Publishing happens at run end regardless of the run's outcome**, not only
+  on `apply`. Under immutability a publish cannot damage anything that exists,
+  so gating it behind a deliberate act buys less than it costs in cache misses.
+  *Flagged as uncertain*: this does mean a run that executed hostile code can
+  leave a snapshot a later run restores. The containment is that the later run
+  is itself sandboxed, that lockfile integrity checks reject a tampered tarball,
+  and that the cache is disposable. If it proves wrong, publishing only on
+  `apply` is a one-line change.
+- **pisafe creates the run-side uppers, not the privileged helper.** The set of
+  namespaces comes from the project config and so cannot be known when the run
+  filesystem is allocated. Everything the helper creates is owned by the mapped
+  UID, so pisafe builds the per-namespace upper and work pair under
+  `podman unshare` with no new privilege. This retires the helper's static layer
+  list — a helper change, so it forces one VM recreate, worth batching with any
+  other.
+- **Sessions do not use the cache mechanism.** They keep the plain overlay,
+  because isolation is what invariant 3 asks for, but their promotion is
+  additive and unkeyed. Slice 2 recorded sessions as riding the cache's
+  mechanism; that was right about the mount and wrong about the promotion, and
+  this splits them.
+- **A second run of a project still cannot read an earlier run's finished
+  transcripts.** Delivered by slice 5. Slices 1 and 2 built the isolation half
+  of sharing, whose value lives entirely in the publishing half; until slices 4
+  and 5 land, both project lowers are permanently empty and the overlays are
+  behaviourally equivalent to per-run directories.
 - **The shared cache is a directory pisafe owns, and tools are redirected into
-  it by cache-specific environment variables.** One overlay is mounted at
-  `/cache` and `npm_config_cache` points npm there. Overlaying each tool's own
+  it by cache-specific environment variables.** Overlaying each tool's own
   location instead — `~/.npm`, `~/.cargo/registry`, `~/go/pkg/mod` — was not
-  taken: it needs one upper and work directory per path, which would make the
-  privileged helper's idea of a run filesystem depend on the list of
-  toolchains. This replaces the question of which paths are shared with a
-  rule: nothing is in the shared layer unless a variable puts it there, so the
-  layer can never accumulate arbitrary state. npm's logs and update-notifier
-  timestamp are pushed back out to the run home for the same reason — every
-  remaining path under `/cache` is content-addressed, which is the whole basis
-  for merging it last-writer-wins.
+  taken: it needs one upper and work pair per path, and makes the run
+  filesystem's shape depend on the list of toolchains. The rule this buys:
+  nothing is shared unless a variable puts it there. npm's logs and
+  update-notifier timestamp are pushed back out to the run home under the same
+  rule — they are per-run, grow without bound, and are useful to nobody else.
 - **One privileged helper serves both scopes.** `pisafe-run-storage` became
   `pisafe-storage <action> <scope> <id>` with a `run` and a `project` scope
   rather than gaining a near-identical sibling script; the two differ only in
@@ -191,33 +328,19 @@ Appended as they occur. These fold into `DECISIONS.md` when Phase 2 lands.
   Many runs of one project reach it and none may assume it is the first; a run
   that fails after ensuring it leaves it behind, because it is shared state
   that outlives every run. Reclaiming an unused one belongs to `gc`.
-- **The cache overlay carries neither `nodev` nor `nosuid`**, because Podman
-  refuses any other option alongside `:O`. It is the only mount in a run
-  without them, and it costs nothing: creating a device needs `CAP_MKNOD` and
-  the run drops every capability, while `no-new-privileges` already neutralizes
-  a setuid bit.
-- **Run manifests recorded before this change are rejected, not migrated.**
-  A run without a project key cannot be resumed into a project cache, and the
-  VM recreate that the profile change forces destroys its storage regardless,
-  so the manifest version moves to 5 and old records fail loudly.
-- **The set of shared layers is one declaration.** `runcontainer` names them,
-  the privileged helper is templated from that list, and the container mount
-  check derives its expectations from the same place. Spelling the directory
-  set out separately in the provisioning script was not taken: adding a layer
-  would then silently produce a run filesystem with no upper for it, and Podman
-  would fail at container start rather than at the boundary check. The security
-  profile digest now covers the list, so a VM provisioned with an older set is
-  rejected instead of half-working.
-- **One live test covers every shared layer**, rather than the per-layer test
-  this plan named for each slice. The property under test is identical for
-  cache and sessions, so the test iterates `ProjectOverlays()` and a layer
-  added later is covered by construction.
-- **A second run of a project still cannot read an earlier run's finished
-  transcripts.** That half of this slice's stated test needs promotion, which
-  is slice 3; the live test seeds the project lower to stand in for it, exactly
-  as the cache test does. What slice 2 delivers is the other half — concurrent
-  runs cannot see one another's live transcripts — plus the shared layer that
-  promotion will write into.
+- **Shared mounts carry neither `nodev` nor `nosuid`**, because Podman refuses
+  any other option alongside `:O`. They are the only mounts in a run without
+  them, and it costs nothing: creating a device needs `CAP_MKNOD` and the run
+  drops every capability, while `no-new-privileges` already neutralizes a setuid
+  bit.
+- **Run manifests recorded before per-project storage are rejected, not
+  migrated.** A run without a project key cannot be resumed into a project
+  cache, and the VM recreate that the profile change forces destroys its storage
+  regardless, so the manifest version moved to 5 and old records fail loudly.
+- **One live test covers every shared layer**, rather than a per-layer test per
+  slice. The property under test is identical across layers, so the test
+  iterates the spec's overlays and a layer added later is covered by
+  construction.
 - **`settings.json` and `trust.json` are copied into the run**, because Pi
   writes both — `/settings`, `pi install`, and `/trust` all do — and a
   read-only mount would turn ordinary Pi use into an I/O error. The copy dies
@@ -230,18 +353,19 @@ Appended as they occur. These fold into `DECISIONS.md` when Phase 2 lands.
 
 ## Open questions
 
-- **How a toolchain without a cache-only variable is shared.** Cargo is the
-  known case: `CARGO_HOME` moves the registry cache but also installed
-  binaries and credentials, which the shared layer must not hold. Nothing in
-  the run image needs it yet, so the answer can wait for the toolchain that
-  forces it.
-- **What triggers promotion, and what the user sees.** Deliberate is decided;
-  whether that means a flag on `apply`, a separate command, or a prompt is not.
+- **Whether the declarable environment variables need an allowlist.** `CARGO_HOME`
+  is the case: it moves the registry cache but also installed binaries and
+  credentials. A project declaring it shares those across its own runs only, so
+  no boundary breaks — but a compromised run would then read what an earlier one
+  left. Documenting the footgun and permitting it is the current lean.
+- **How many snapshots to keep per namespace, and what reset covers.** A whole
+  project, one namespace, or one snapshot. Slice 4 has to pick a default; the
+  right number probably wants real usage.
 - **How global tools are installed.** The design lists `pisafe tool install`
   separately from `pisafe extension install`, and the state table has "Global
   tools" as its own row. Whether those are npm globals in the profile, a second
   read-only mount, or something built into the image is undecided. This is why
-  slice 6 has no shape yet.
+  slice 8 has no shape yet.
 - **Whether a moved repository can adopt its orphaned store.** A rebind command
   is possible and does not change the key scheme, so this can stay deferred.
 
@@ -272,6 +396,9 @@ limactl shell pisafe podman run --rm --user 1000:1000 --network=none \
 limactl shell pisafe podman run --rm --user 1000:1000 --network=none \
   --mount type=bind,src=<profile>,dst=/opt/pisafe/profile,ro \
   <run-image> sh -ec 'pi list'
+
+# npm cache shape, to confirm it is still not safe to merge.
+ls ~/.npm/_cacache            # content-v2 (by content), index-v5 (by request URL)
 ```
 
 The lower's contents must be owned by the mapped UID (`podman unshare chown -R
