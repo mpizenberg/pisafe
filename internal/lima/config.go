@@ -45,6 +45,7 @@ func RenderConfig(options ConfigOptions) ([]byte, error) {
 		return nil, err
 	}
 	securityProfile := securityProfileDigest(prefixes)
+	layers := strings.Join(runcontainer.ProjectLayerNames(), " ")
 
 	replacements := strings.NewReplacer(
 		"@@CPUS@@", fmt.Sprintf("%d", options.CPUs),
@@ -55,15 +56,18 @@ func RenderConfig(options ConfigOptions) ([]byte, error) {
 		"@@SECURITY_PROFILE_DIGEST@@", securityProfile,
 		"@@RUN_STORAGE_BYTES@@", strconv.FormatInt(runcontainer.DefaultPersistent, 10),
 		"@@PROJECT_STORAGE_BYTES@@", strconv.FormatInt(runcontainer.DefaultProject, 10),
+		"@@PROJECT_LAYERS@@", layers,
 		"@@BROKER_ADDRESS@@", BrokerAddress,
 		"@@BROKER_PORT@@", strconv.Itoa(BrokerPort),
 	)
 	return []byte(replacements.Replace(configTemplate)), nil
 }
 
-// securityProfileDigest changes whenever the generated VM definition or its
-// immutable host-network deny set or persistent storage quotas change. VM
-// sizing is deliberately excluded because it does not weaken a run boundary.
+// securityProfileDigest changes whenever the generated VM definition, its
+// immutable host-network deny set, its persistent storage quotas, or the set
+// of layers runs share change. The template is hashed before substitution, so
+// every value substituted into it has to be hashed here too. VM sizing is
+// deliberately excluded because it does not weaken a run boundary.
 func securityProfileDigest(prefixes []string) string {
 	digest := sha256.New()
 	_, _ = digest.Write([]byte("pisafe-lima-security-profile-v2\x00"))
@@ -74,6 +78,8 @@ func securityProfileDigest(prefixes []string) string {
 	_, _ = digest.Write([]byte(strconv.FormatInt(runcontainer.DefaultPersistent, 10)))
 	_, _ = digest.Write([]byte{0})
 	_, _ = digest.Write([]byte(strconv.FormatInt(runcontainer.DefaultProject, 10)))
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write([]byte(strings.Join(runcontainer.ProjectLayerNames(), "\n")))
 	return "sha256:" + hex.EncodeToString(digest.Sum(nil))
 }
 
@@ -305,18 +311,22 @@ provision:
     # upper layers it stacks over shared project state. A project filesystem
     # holds only lower layers, which every run of that project reads and no run
     # writes.
+    layers=(@@PROJECT_LAYERS@@)
     case "$scope" in
       run)
         storage_root=/var/lib/pisafe/runs
         image_root=/var/lib/pisafe/run-images
         storage_bytes=@@RUN_STORAGE_BYTES@@
-        directories=(workspace home overlay overlay/cache overlay/cache/upper overlay/cache/work)
+        directories=(workspace home overlay)
+        for layer in "${layers[@]}"; do
+          directories+=("overlay/$layer" "overlay/$layer/upper" "overlay/$layer/work")
+        done
         ;;
       project)
         storage_root=/var/lib/pisafe/projects
         image_root=/var/lib/pisafe/project-images
         storage_bytes=@@PROJECT_STORAGE_BYTES@@
-        directories=(cache)
+        directories=("${layers[@]}")
         ;;
       *) exit 64 ;;
     esac

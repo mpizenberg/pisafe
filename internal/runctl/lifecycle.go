@@ -347,18 +347,20 @@ func validateContainerInspection(
 	if inspection.Config.Labels["io.pisafe.run"] != spec.RunID {
 		return errors.New("run container label does not match manifest")
 	}
-	// Podman reports an overlay as a bind onto its own merged directory, whose
-	// path it chooses, so the cache is pinned by the layers it was stacked
-	// from instead: the lower must be this project's and nothing else's, and
-	// the upper must be inside this run.
 	expected := map[string]mountRequirement{
 		"/work":      {source: spec.WorkspacePath()},
 		"/home/node": {source: spec.HomePath()},
-		"/cache": {options: []string{
-			"lowerdir=" + spec.ProjectCachePath(),
-			"upperdir=" + spec.StoragePath() + "/overlay/cache/upper",
-			"workdir=" + spec.StoragePath() + "/overlay/cache/work",
-		}},
+	}
+	// Podman reports an overlay as a bind onto its own merged directory, whose
+	// path it chooses, so a shared layer is pinned by what it was stacked from
+	// instead: the lower must be this project's and nothing else's, and the
+	// upper must be inside this run.
+	for _, overlay := range spec.ProjectOverlays() {
+		expected[overlay.Destination] = mountRequirement{options: []string{
+			"lowerdir=" + overlay.Lower,
+			"upperdir=" + overlay.Upper,
+			"workdir=" + overlay.Work,
+		}}
 	}
 	for _, mount := range inspection.Mounts {
 		required, isExpected := expected[mount.Destination]

@@ -30,10 +30,29 @@ const (
 	// containerCacheRoot is a layout pisafe owns rather than a tool's own
 	// default location. Only what a cache-specific environment variable points
 	// here is shared, so the project layer can never accumulate arbitrary state.
-	containerCacheRoot = "/cache"
-	guestStorageRoot   = "/var/lib/pisafe/runs"
-	guestProjectRoot   = "/var/lib/pisafe/projects"
+	containerCacheRoot   = "/cache"
+	containerSessionRoot = "/sessions"
+	guestStorageRoot     = "/var/lib/pisafe/runs"
+	guestProjectRoot     = "/var/lib/pisafe/projects"
 )
+
+// projectLayers is what runs of one project share. A layer is one directory in
+// the project filesystem, one upper and work pair in the run filesystem, and
+// one path in the container, all filed under the same name.
+var projectLayers = []struct{ name, destination string }{
+	{name: "cache", destination: containerCacheRoot},
+	{name: "sessions", destination: containerSessionRoot},
+}
+
+// ProjectLayerNames is for the privileged helper, which allocates a directory
+// per layer in both filesystems and knows nothing else about them.
+func ProjectLayerNames() []string {
+	names := make([]string, 0, len(projectLayers))
+	for _, layer := range projectLayers {
+		names = append(names, layer.name)
+	}
+	return names
+}
 
 var imageIDPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 
@@ -105,20 +124,36 @@ func (spec Spec) HomePath() string {
 	return spec.StoragePath() + "/home"
 }
 
-// ProjectCachePath is the dependency cache every run of one project reads.
-// It is only ever a lower layer, so no run can write what another run sees.
-func (spec Spec) ProjectCachePath() string {
-	return guestProjectRoot + "/" + spec.ProjectKey + "/cache"
+// ProjectOverlay is one shared layer as the run sees it. Lower belongs to the
+// project and is never written; Upper and Work belong to the run alone, which
+// is what keeps one run's writes out of every other run of the project.
+type ProjectOverlay struct {
+	Destination string
+	Lower       string
+	Upper       string
+	Work        string
 }
 
-// cacheOverlay stacks the run's private upper layer over the project cache.
-// Podman refuses nodev and nosuid alongside an overlay, which costs nothing
-// here: creating a device needs CAP_MKNOD and the run drops every capability,
-// and no-new-privileges already neutralizes a setuid bit.
-func (spec Spec) cacheOverlay() string {
-	return spec.ProjectCachePath() + ":" + containerCacheRoot +
-		":O,upperdir=" + spec.StoragePath() + "/overlay/cache/upper" +
-		",workdir=" + spec.StoragePath() + "/overlay/cache/work"
+func (spec Spec) ProjectOverlays() []ProjectOverlay {
+	overlays := make([]ProjectOverlay, 0, len(projectLayers))
+	for _, layer := range projectLayers {
+		overlays = append(overlays, ProjectOverlay{
+			Destination: layer.destination,
+			Lower:       guestProjectRoot + "/" + spec.ProjectKey + "/" + layer.name,
+			Upper:       spec.StoragePath() + "/overlay/" + layer.name + "/upper",
+			Work:        spec.StoragePath() + "/overlay/" + layer.name + "/work",
+		})
+	}
+	return overlays
+}
+
+// volume renders the only spelling Podman accepts for a rootless overlay.
+// It refuses nodev and nosuid alongside one, which costs nothing here:
+// creating a device needs CAP_MKNOD and the run drops every capability, and
+// no-new-privileges already neutralizes a setuid bit.
+func (overlay ProjectOverlay) volume() string {
+	return overlay.Lower + ":" + overlay.Destination +
+		":O,upperdir=" + overlay.Upper + ",workdir=" + overlay.Work
 }
 
 func (spec Spec) RunArgs() ([]string, error) {
@@ -127,7 +162,7 @@ func (spec Spec) RunArgs() ([]string, error) {
 	}
 	memory := strconv.FormatInt(spec.MemoryBytes, 10)
 	tmpSize := strconv.FormatInt(spec.TmpBytes, 10)
-	return []string{
+	args := []string{
 		"run",
 		"--detach",
 		"--pull=never",
@@ -150,21 +185,26 @@ func (spec Spec) RunArgs() ([]string, error) {
 		"--mount", "type=tmpfs,dst=/run,tmpfs-size=16777216,tmpfs-mode=0755,U=true",
 		"--mount", "type=bind,src=" + spec.WorkspacePath() + ",dst=" + containerWorkRoot + ",nodev,nosuid",
 		"--mount", "type=bind,src=" + spec.HomePath() + ",dst=" + containerHome + ",nodev,nosuid",
-		"--volume", spec.cacheOverlay(),
+	}
+	for _, overlay := range spec.ProjectOverlays() {
+		args = append(args, "--volume", overlay.volume())
+	}
+	return append(args,
 		"--workdir", containerWorkRoot,
-		"--env", "HOME=" + containerHome,
+		"--env", "HOME="+containerHome,
 		"--env", "GIT_TERMINAL_PROMPT=0",
-		"--env", "PI_CODING_AGENT_DIR=" + containerHome + "/.pi/agent",
+		"--env", "PI_CODING_AGENT_DIR="+containerHome+"/.pi/agent",
+		"--env", "PI_CODING_AGENT_SESSION_DIR="+containerSessionRoot,
 		"--env", "PI_SKIP_VERSION_CHECK=1",
-		"--env", "npm_config_cache=" + containerCacheRoot + "/npm",
+		"--env", "npm_config_cache="+containerCacheRoot+"/npm",
 		// Logs and the update check write uncacheable per-run state. Keeping
 		// them out of the shared layer is what leaves every path in it
 		// content-addressed, and so safe to merge last-writer-wins.
-		"--env", "npm_config_logs_dir=" + containerHome + "/.npm/_logs",
+		"--env", "npm_config_logs_dir="+containerHome+"/.npm/_logs",
 		"--env", "npm_config_update_notifier=false",
 		spec.ImageID,
 		"pisafe-guest", "serve-ssh",
-	}, nil
+	), nil
 }
 
 func (spec Spec) ConfigureSSHArgs() ([]string, error) {

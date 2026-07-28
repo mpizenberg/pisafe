@@ -645,8 +645,9 @@ These explain why parts of the code look the way they do:
   manifest, so `diff` measures their submodules from the staged head and the
   drop would be offered where it should not be. No such run exists on this host.
 - `gc` reclaims runs and images, but not the per-project filesystems the design
-  also asks it to sweep. One is now allocated the first time a project is run
-  and is never reclaimed; session stores do not exist yet.
+  also asks it to sweep. One is allocated the first time a project is run, now
+  holds both its dependency cache and its session store, and is never
+  reclaimed.
 - Collection never reclaims an unimported run, even one a check could prove
   holds no commits, because `diff` sees the repository but not the run's home
   directory. Their 10 GiB filesystems are reclaimed on the user's schedule, by

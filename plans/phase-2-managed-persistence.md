@@ -51,6 +51,11 @@ documentation. Reproduce with the commands under [Verification](#verification).
   already exist, so the run filesystem is created with them.
 - **npm redirects into that overlay.** `npm_config_cache` moves the whole
   cache, and `npm_config_logs_dir` keeps logs out of it.
+- **Pi writes its transcript where the environment says.** With
+  `PI_CODING_AGENT_SESSION_DIR` set to the overlay, a real run's session file
+  landed in the run's private upper and the project lower stayed empty. The
+  file is written before any inference succeeds, so this is observable without
+  a provider.
 - **Ownership follows the existing rule.** The overlay is writable only when
   the lower's contents are owned by the container's mapped UID, the same
   `subuid_start + 999` the run-storage helper already derives.
@@ -77,8 +82,14 @@ of the Mac-side Git root path, e.g. `api-3f9c2a1b`.
 /var/lib/pisafe/projects/<key>/sessions/    overlay lower → session dir
 /var/lib/pisafe/runs/<run>/workspace        bind mount → /work
 /var/lib/pisafe/runs/<run>/home             bind mount → /home/node
-/var/lib/pisafe/runs/<run>/overlay/cache/   the run's private upper and work
+/var/lib/pisafe/runs/<run>/overlay/<layer>/ the run's private upper and work
 ```
+
+`cache` and `sessions` are the shared layers. One name files a layer in three
+places — the project lower, the run's upper and work pair, and the container
+path — so adding one is a single entry in `runcontainer.ProjectLayerNames`,
+which the privileged helper is templated from and the security profile digest
+covers.
 
 Both the project and the run filesystem are root-owned fixed-capacity ext4
 images allocated by the same privileged helper, which is the only thing that
@@ -91,13 +102,14 @@ mounts anything.
 - [x] **1. Per-project storage and the dependency cache.** Extend the
       root-owned helper from per-run to per-project filesystems; derive the
       project key; wire the cache overlay into `runcontainer.Spec`. Live test:
-      `TestLiveProjectCacheIsSharedToReadAndPrivateToWrite` — two concurrent
-      runs of one project, both reading the seeded cache, neither seeing the
-      other's writes, the lower unchanged.
-- [ ] **2. Sessions on the same mechanism.** Point
-      `PI_CODING_AGENT_SESSION_DIR` at a per-project overlay. Live test: a
-      second run of a project reads the first's finished transcripts and cannot
-      see a concurrent run's live one.
+      two concurrent runs of one project, both reading the seeded cache,
+      neither seeing the other's writes, the lower unchanged.
+- [x] **2. Sessions on the same mechanism.** `PI_CODING_AGENT_SESSION_DIR`
+      points at a second per-project overlay, and the layer list is one
+      declaration the helper and the mount check are both derived from. Live
+      test: `TestLiveProjectLayersAreSharedToReadAndPrivateToWrite` now covers
+      every shared layer — two concurrent runs read the seeded project state
+      and neither sees the other's writes.
 - [ ] **3. Promotion.** Fold a run's upper into the project store —
       deliberately, and only while no run holds that lower. Decide the trigger
       and the surface. Live test: a promoted cache entry is present for the
@@ -188,6 +200,24 @@ Appended as they occur. These fold into `DECISIONS.md` when Phase 2 lands.
   A run without a project key cannot be resumed into a project cache, and the
   VM recreate that the profile change forces destroys its storage regardless,
   so the manifest version moves to 5 and old records fail loudly.
+- **The set of shared layers is one declaration.** `runcontainer` names them,
+  the privileged helper is templated from that list, and the container mount
+  check derives its expectations from the same place. Spelling the directory
+  set out separately in the provisioning script was not taken: adding a layer
+  would then silently produce a run filesystem with no upper for it, and Podman
+  would fail at container start rather than at the boundary check. The security
+  profile digest now covers the list, so a VM provisioned with an older set is
+  rejected instead of half-working.
+- **One live test covers every shared layer**, rather than the per-layer test
+  this plan named for each slice. The property under test is identical for
+  cache and sessions, so the test iterates `ProjectOverlays()` and a layer
+  added later is covered by construction.
+- **A second run of a project still cannot read an earlier run's finished
+  transcripts.** That half of this slice's stated test needs promotion, which
+  is slice 3; the live test seeds the project lower to stand in for it, exactly
+  as the cache test does. What slice 2 delivers is the other half — concurrent
+  runs cannot see one another's live transcripts — plus the shared layer that
+  promotion will write into.
 - **`settings.json` and `trust.json` are copied into the run**, because Pi
   writes both — `/settings`, `pi install`, and `/trust` all do — and a
   read-only mount would turn ordinary Pi use into an I/O error. The copy dies

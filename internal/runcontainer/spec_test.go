@@ -203,7 +203,7 @@ func TestSpecRejectsMutableImageAndUnsafeNames(t *testing.T) {
 	}
 }
 
-func TestCacheOverlayKeepsTheProjectLayerReadOnlyToTheRun(t *testing.T) {
+func TestSharedLayersKeepTheProjectSideReadOnlyToTheRun(t *testing.T) {
 	spec := DefaultSpec("run-123", testProjectKey, testImageID)
 	args, err := spec.RunArgs()
 	if err != nil {
@@ -211,11 +211,15 @@ func TestCacheOverlayKeepsTheProjectLayerReadOnlyToTheRun(t *testing.T) {
 	}
 	joined := strings.Join(args, " ")
 	// The lower layer is the project's and the upper is the run's, which is
-	// what stops one run's install from reaching another's.
+	// what stops one run's install or transcript from reaching another's.
 	for _, expected := range []string{
 		"--volume /var/lib/pisafe/projects/project-3f9c2a1b/cache:/cache:O," +
 			"upperdir=/var/lib/pisafe/runs/run-123/overlay/cache/upper," +
 			"workdir=/var/lib/pisafe/runs/run-123/overlay/cache/work",
+		"--volume /var/lib/pisafe/projects/project-3f9c2a1b/sessions:/sessions:O," +
+			"upperdir=/var/lib/pisafe/runs/run-123/overlay/sessions/upper," +
+			"workdir=/var/lib/pisafe/runs/run-123/overlay/sessions/work",
+		"PI_CODING_AGENT_SESSION_DIR=/sessions",
 		"npm_config_cache=/cache/npm",
 		"npm_config_logs_dir=/home/node/.npm/_logs",
 		"npm_config_update_notifier=false",

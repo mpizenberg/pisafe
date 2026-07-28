@@ -3,6 +3,7 @@ package lima_test
 import (
 	"context"
 	"os"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -11,11 +12,11 @@ import (
 	"github.com/mpizenberg/pisafe/internal/runcontainer"
 )
 
-// TestLiveProjectCacheIsSharedToReadAndPrivateToWrite runs two containers of
-// one project at once. Both must start from the same dependency cache, and
-// neither may see what the other does to it or change what the next run
+// TestLiveProjectLayersAreSharedToReadAndPrivateToWrite runs two containers of
+// one project at once. Both must start from the same shared layers, and
+// neither may see what the other does to them or change what the next run
 // starts from.
-func TestLiveProjectCacheIsSharedToReadAndPrivateToWrite(t *testing.T) {
+func TestLiveProjectLayersAreSharedToReadAndPrivateToWrite(t *testing.T) {
 	if os.Getenv("PISAFE_LIVE_LIMA") != "1" {
 		t.Skip("set PISAFE_LIVE_LIMA=1 to test the dedicated VM")
 	}
@@ -28,7 +29,7 @@ func TestLiveProjectCacheIsSharedToReadAndPrivateToWrite(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	stamp := time.Now().UTC().Format("20060102150405")
-	projectKey := "livecache-" + stamp
+	projectKey := "livelayers-" + stamp
 	transport := lima.NewTransport()
 
 	if err := transport.EnsureProjectStorage(ctx, projectKey); err != nil {
@@ -41,14 +42,16 @@ func TestLiveProjectCacheIsSharedToReadAndPrivateToWrite(t *testing.T) {
 	)
 
 	// Seeding stands in for promotion, which does not exist yet: the point
-	// under test is what a run sees when the project already has a cache.
-	cache := runcontainer.DefaultSpec("seed", projectKey, imageID).ProjectCachePath()
-	runLive(t, ctx, "podman", "unshare", "sh", "-ec",
-		"printf promoted > "+cache+"/shared.txt && chown -R 1000:1000 "+cache)
+	// under test is what a run sees when the project already has state.
+	lowers := runcontainer.DefaultSpec("seed", projectKey, imageID).ProjectOverlays()
+	for _, overlay := range lowers {
+		runLive(t, ctx, "podman", "unshare", "sh", "-ec",
+			"printf promoted > "+overlay.Lower+"/shared.txt && chown -R 1000:1000 "+overlay.Lower)
+	}
 
 	specs := map[string]runcontainer.Spec{}
 	for _, name := range []string{"a", "b"} {
-		runID := "livecache-" + name + "-" + stamp
+		runID := "livelayers-" + name + "-" + stamp
 		spec := runcontainer.DefaultSpec(runID, projectKey, imageID)
 		specs[name] = spec
 		if err := transport.CreateRunStorage(ctx, runID); err != nil {
@@ -76,25 +79,34 @@ func TestLiveProjectCacheIsSharedToReadAndPrivateToWrite(t *testing.T) {
 	// Both runs are live throughout: each writes before either reads, so a
 	// leak between them would be visible rather than merely possible.
 	for name, spec := range specs {
-		inCache(t, ctx, transport, spec, "printf %s > /cache/"+name+".txt", name)
+		for _, overlay := range spec.ProjectOverlays() {
+			inContainer(t, ctx, transport, spec,
+				"printf %s > "+path.Join(overlay.Destination, name+".txt"), name)
+		}
 	}
 	for name, spec := range specs {
-		if got := inCache(t, ctx, transport, spec, "cat /cache/shared.txt"); got != "promoted" {
-			t.Errorf("run %s reads the project cache as %q", name, got)
-		}
-		listed := inCache(t, ctx, transport, spec, "ls /cache")
-		if want := name + ".txt shared.txt"; strings.Join(strings.Fields(listed), " ") != want {
-			t.Errorf("run %s sees %q, want %q", name, listed, want)
+		for _, overlay := range spec.ProjectOverlays() {
+			shared := inContainer(t, ctx, transport, spec,
+				"cat "+path.Join(overlay.Destination, "shared.txt"))
+			if shared != "promoted" {
+				t.Errorf("run %s reads %s as %q", name, overlay.Destination, shared)
+			}
+			listed := inContainer(t, ctx, transport, spec, "ls "+overlay.Destination)
+			if want := name + ".txt shared.txt"; strings.Join(strings.Fields(listed), " ") != want {
+				t.Errorf("run %s sees %s as %q, want %q", name, overlay.Destination, listed, want)
+			}
 		}
 	}
 
 	// A run may not change what the next run of the project starts from.
-	if got := runLive(t, ctx, "podman", "unshare", "ls", cache); got != "shared.txt" {
-		t.Errorf("project cache = %q after two runs wrote to it", got)
+	for _, overlay := range lowers {
+		if got := runLive(t, ctx, "podman", "unshare", "ls", overlay.Lower); got != "shared.txt" {
+			t.Errorf("project layer %s = %q after two runs wrote to it", overlay.Lower, got)
+		}
 	}
 }
 
-func inCache(
+func inContainer(
 	t *testing.T,
 	ctx context.Context,
 	transport lima.Transport,
