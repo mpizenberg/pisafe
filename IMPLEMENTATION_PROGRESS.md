@@ -707,47 +707,11 @@ another project's sessions or caches, nor concurrent runs one another's live
 transcripts. Making per-project caches and session stores exist is also what
 gives `gc` the sweep targets it is already specified to collect.
 
-### Phase 2 substrate, established against the live VM
-
-Nothing below is implemented; it is what the mechanism has to be, checked
-against the pinned image and VM rather than inferred from Pi's documentation.
-
-- **Shared state is an overlay, not a shared mount.** Podman mounts it
-  rootlessly with `-v <lower>:<dst>:O,upperdir=…,workdir=…`, so the lower layer
-  is the project store and the upper lives in the run's own filesystem. Two
-  containers on one lower were verified to hold conflicting states: one wrote a
-  new file and shadowed a shared one, the other still read the original and
-  never saw the new file, both uppers persisted after exit, and the lower was
-  unchanged. No new VM privilege is involved — the root helper gains
-  per-project filesystem creation, not mounting.
-- **Ownership follows the existing rule.** The overlay is only writable when
-  the lower's contents are owned by the container's mapped UID, the same
-  `subuid_start + 999` the run-storage helper already derives.
-- **The global profile is a read-only mount named by absolute path** in the
-  `packages` array of `settings.json`. A package on a genuinely read-only mount
-  was loaded and listed by the pinned Pi. `PI_PACKAGE_DIR` does not relocate
-  installed packages — it locates Pi's own installation for Nix and Guix store
-  paths, and installs still go to `$PI_CODING_AGENT_DIR/npm`.
-- **Sessions relocate.** `PI_CODING_AGENT_SESSION_DIR` is read by Pi (the name
-  is assembled from `APP_NAME` at build time, so it does not appear as a
-  literal in `dist`), and `--session-dir` overrides it. Both are ours to set.
-- **`settings.json` and `trust.json` must be copied in, not mounted read-only**,
-  because Pi writes both. The copy dies with the run.
-
-Layout this implies, keyed by project slug plus eight hex of the SHA-256 of the
-Mac-side Git root path:
-
-```text
-/var/lib/pisafe/global/<profile>          read-only mount, listed in packages
-/var/lib/pisafe/projects/<key>/cache/     overlay lower → ~/.npm, ~/.cargo, …
-/var/lib/pisafe/projects/<key>/sessions/  overlay lower → session dir
-/var/lib/pisafe/runs/<run>/               existing per-run ext4, holds the uppers
-```
-
-Order: the storage substrate and overlay proven on the dependency cache, then
-sessions on the same mechanism, then the global profile with
-`pisafe extension install` and its pinning, then other providers, update
-notifications, and backup/reset/recovery.
+Phase 2 is planned and tracked in
+[`plans/phase-2-managed-persistence.md`](plans/phase-2-managed-persistence.md),
+which holds its slice order, its decisions, and the substrate already
+established against the live VM. That document folds back into the design,
+`DECISIONS.md`, and this file when Phase 2 lands, and is deleted then.
 
 Do not weaken the boundary for any of it.
 
