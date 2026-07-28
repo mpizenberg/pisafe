@@ -77,6 +77,19 @@ history holds them. New entries are appended in full.
   npm `overrides` were rejected for the same reason — they do not penetrate a
   published shrinkwrap either. The cost is three digests that must move with
   `PiVersion`; a unit test fails the build until they do.
+- The firewall's DNS test resolves names through a public wildcard resolver
+  that encodes an address in the name, so the container acts on a real answer
+  pointing into a denied range. Seeding `/etc/hosts` with `--add-host` was not
+  taken: it is deterministic but never asks a resolver anything, which is the
+  half of the path the gap was about. The test requires the answer before
+  asserting the denial, so an unreachable resolver fails loudly instead of
+  passing as a refusal — at the price of a live test that depends on a third
+  party staying up.
+- That the broker port is the exception rather than the broker address is
+  established across two tests: the shaped-traffic test shows every other port
+  on `192.0.2.1` refused, and the relay test shows `18080` served. Binding a
+  stand-in listener inside the one test was not taken, because it would race a
+  real broker for the port and fail for a reason unrelated to the boundary.
 
 ## Storage and lifecycle
 

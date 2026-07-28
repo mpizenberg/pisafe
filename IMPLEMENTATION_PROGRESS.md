@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-07-27
+Last updated: 2026-07-28
 
 The durable handoff for continuing `pisafe` from a fresh session: what is
 implemented, what has been verified against a real VM, and what comes next.
@@ -9,7 +9,7 @@ implemented, what has been verified against a real VM, and what comes next.
 
 ## Current milestone
 
-Phase 1 is in progress. Every command the design enumerates for it exists:
+Phase 1 is complete. Every command the design enumerates for it exists:
 `run`, `list`, `connect`, `stop`, `resume`, `diff`, `cp`, `apply`, `discard`,
 `gc`, `zed`, `login`, `broker`, `doctor`. Built in twelve slices: the controller
 and Git isolation core; the Lima VM backend and firewall; SSH transport, run
@@ -18,7 +18,8 @@ run creation; stop/resume/discard and quota-backed storage; the reverse
 inference relay; ChatGPT subscription login; getting work back out (`diff`,
 `cp`, `gc`); terminal access without an editor (`connect`); the
 keep-or-replay choice about a run's carried-in baseline commit; and freezing the
-run image's transitive npm resolution.
+run image's transitive npm resolution. A thirteenth closed the last verification
+debt, testing the packet filter against traffic shaped to look permitted.
 
 `pisafe run` uses the tested mountless path and materializes inside private
 quota-backed VM storage. **Do not add a local-workspace fallback.**
@@ -428,6 +429,20 @@ Verified against a real ARM64 VM:
   firewall-status, and storage helpers work through their narrow rules; the
   root-owned security-profile record is mode 0444 and matches the generated
   definition.
+- **Traffic shaped to look permitted**, from a rootless container: a public
+  wildcard resolver answering `10.0.0.1` and `169.254.169.254` for names that
+  encode them was refused at connect time, with the answer itself required so a
+  resolver failure cannot pass as a denial; a client that followed a redirect
+  into link-local failed on the second hop, naming it; a DNS query to
+  `10.0.0.1` went unanswered, so the reject rules hold for a datagram expecting
+  no handshake; and `host.containers.internal`, `host.docker.internal`, the
+  container's own address, the default gateway, loopback, and the broker
+  address were all unreachable on port 22, which the input chain accepts and
+  sshd is listening on. From the VM's unprivileged user, sshd and the local
+  resolver were both refused on loopback while both were listening, because the
+  loopback exception is root's alone. Each denial was shown to be the ruleset
+  rather than a dead path: every assertion was re-run against a permitted
+  destination and reported the breach.
 - **Frozen npm resolution**: the drift was reproduced in the real ARM64 image
   before it was fixed — `pi-coding-agent` 0.82.0 installed `pi-agent-core`,
   `pi-ai`, and `pi-tui` at 0.82.1, the versions its own shrinkwrap pinned to
@@ -658,8 +673,6 @@ These explain why parts of the code look the way they do:
 - While no broker is connected, a process escaped to the unprivileged VM user
   could bind `192.0.2.1:18080` itself. It gains nothing beyond what that user
   already has, and a real broker then fails loudly at bind time.
-- Firewall behavioral coverage still needs DNS-to-private answers, redirects,
-  raw UDP, `host.containers.internal`, and VM loopback attempts.
 - Security-profile drift fails closed, but automated replacement is
   intentionally absent because deleting a VM is destructive and must be an
   explicit lifecycle operation.
@@ -679,14 +692,20 @@ These explain why parts of the code look the way they do:
 
 ## Next implementation slice
 
-Every Phase 1 command is implemented and live-verified, and nothing the design
-names is now unbuilt.
+Phase 1 is complete: every command the design enumerates is implemented and
+live-verified, and both components the design singles out as carrying security
+weight — the packet filter and the inference broker — now have the bypass and
+contract tests it asks for.
 
-One verification debt remains: the firewall behaviours listed under Known gaps —
-DNS answers pointing into private ranges, redirects, raw UDP,
-`host.containers.internal`, and VM loopback attempts. Unlike the debts already
-paid, these need test code rather than a re-run, because no live test exercises
-what the ruleset does with traffic that is shaped to look permitted.
+What remains is Phase 2, managed persistence: the read-only global profile,
+`extension`/`tool` installers pinning an exact version and integrity hash,
+update notifications, per-project sessions and caches, other providers, and
+backup/reset/recovery. Its three invariants are the ones to build against —
+agent code cannot write global settings, extensions, or tools; a pinned
+extension is still untrusted at runtime; and one project's runs cannot read
+another project's sessions or caches, nor concurrent runs one another's live
+transcripts. Making per-project caches and session stores exist is also what
+gives `gc` the sweep targets it is already specified to collect.
 
 Do not weaken the boundary for any of it.
 
