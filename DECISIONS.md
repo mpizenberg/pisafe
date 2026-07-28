@@ -311,6 +311,56 @@ history holds them. New entries are appended in full.
   Pi settings, merging rather than replacing what Pi wrote itself: Pi's default
   auto transport dials a WebSocket first, which the HTTP relay cannot speak.
 
+## Managed persistence
+
+- A project is keyed by its directory slug plus the first eight hex characters
+  of the SHA-256 of the Mac-side Git root path. Keying on the repository's
+  root-commit ID was not taken: it survives moves, but two clones of one
+  upstream would then share a cache and session store, an empty repository has
+  no key at all, and a multi-root history needs a tiebreak rule. The path hash
+  is always available and always distinguishes two checkouts. Moving or
+  renaming a repository therefore orphans its store rather than migrating it;
+  a rebind command can adopt an orphan later without changing the key scheme.
+- Runs share project state through an overlay whose lower layer is the project
+  store and whose upper layer lives in the run's own filesystem, mounted by
+  Podman itself with `-v <lower>:<dst>:O,upperdir=…,workdir=…`. A shared
+  read-write mount was not taken: it would make every package manager's
+  concurrency correctness a property of the boundary, unverifiable by us and
+  fatal to the whole project's cache when one tool gets it wrong. A full copy
+  per run was not taken either, because the run filesystems are ext4 with no
+  reflink, so the copy would be real. The overlay is rootless, so it needs no
+  new VM privilege and no mount logic in the root helper.
+- Folding a run's upper layer back into the project store is deliberate rather
+  than automatic on run exit, and may only happen while no run holds that lower
+  layer, because overlayfs leaves behaviour undefined when a mounted lower
+  changes underneath it. A run that executed hostile code should also not
+  fatten the shared layer merely by exiting. If the no-live-run condition turns
+  out to be too restrictive, the escape hatch is versioned lower generations,
+  where a promotion writes a new generation and live runs keep the one they
+  mounted; that would also give `gc` another natural sweep target.
+- Sessions use the same overlay mechanism as caches rather than the run-local
+  copy the design's state table names. The semantics are what the invariant
+  asks for — a run reads the project's prior transcripts and cannot see another
+  live run's — without paying for a copy, and session files are uniquely named
+  per session ID, so promotion is pure addition with no conflicting paths. This
+  re-derives the mechanism an earlier draft of the design sketched and dropped.
+- The global profile is a directory of Pi packages mounted read-only and named
+  by absolute path in the `packages` array of the run's `settings.json`.
+  Relocating Pi's package store with `PI_PACKAGE_DIR` was investigated and does
+  not work: that variable locates Pi's own installation for Nix and Guix store
+  paths, and installs still go to `$PI_CODING_AGENT_DIR/npm`. Loading a package
+  from a genuinely read-only mount was verified against the pinned image
+  instead.
+- `settings.json` and `trust.json` are copied into the run rather than mounted
+  read-only, because Pi writes both — `/settings`, `pi install`, and `/trust`
+  all do — and a read-only mount would turn ordinary Pi use into an I/O error.
+  The copy dies with the run, so agent code still cannot change what any later
+  run sees. A consequence worth keeping: with the package store read-only,
+  `pi install` inside a run fails while `pi -e <package>` still works, because
+  Pi installs those to a temporary directory for one run. Trying an extension
+  stays ephemeral and keeping one goes through a pisafe command, without pisafe
+  enforcing the split itself.
+
 ## Documentation
 
 - The design document is a spec and this file is its decision log; what the
