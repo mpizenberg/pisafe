@@ -255,3 +255,48 @@ func TestAnOfferSurvivesStorageAndOnlyDiffersFromWhatIsInstalled(t *testing.T) {
 		t.Errorf("an unchecked profile offered %+v", pending)
 	}
 }
+
+// TestAnOfferNobodyAskedForIsMadeOncePerChange is what keeps the end of a run
+// worth reading: an unsolicited offer appears when a check moved the answer,
+// and says nothing when it would repeat one the user has already declined.
+func TestAnOfferNobodyAskedForIsMadeOncePerChange(t *testing.T) {
+	installed := Extension{
+		Name:      "is-number",
+		Version:   "6.0.0",
+		Integrity: "sha512-" + strings.Repeat("B", 86) + "==",
+		Directory: "is-number-5e0e83b1",
+	}
+	record := Record{Version: RecordVersion}.With(installed)
+	never := Offers{Version: OffersVersion}
+	offered := NewOffers(time.Now(), []Offer{{Name: "is-number", Version: "7.0.0"}})
+
+	changed := record.PendingChange(never, offered)
+	if len(changed) != 1 || changed[0].Available != "7.0.0" {
+		t.Fatalf("the first check to find an update reported %+v", changed)
+	}
+	if repeated := record.PendingChange(offered, offered); repeated != nil {
+		t.Errorf("a check that moved nothing spoke again: %+v", repeated)
+	}
+
+	// Applied before the check, and withdrawn by the registry, both mean there
+	// is nothing to say whatever the check before them had found.
+	applied := installed
+	applied.Version = "7.0.0"
+	if spoke := record.With(applied).PendingChange(never, offered); spoke != nil {
+		t.Errorf("an already applied update was offered: %+v", spoke)
+	}
+	withdrawn := NewOffers(time.Now(), []Offer{{Name: "is-number", Version: "6.0.0"}})
+	if spoke := record.PendingChange(offered, withdrawn); spoke != nil {
+		t.Errorf("a registry that came back to the pin was reported: %+v", spoke)
+	}
+
+	// A second package picking up an offer is a change, and the standing one
+	// rides along rather than being dropped for having been seen.
+	both := NewOffers(time.Now(), []Offer{
+		{Name: "is-number", Version: "7.0.0"},
+		{Name: planMode().Name, Version: "2.0.0"},
+	})
+	if rode := record.With(planMode()).PendingChange(offered, both); len(rode) != 2 {
+		t.Errorf("a new offer left the standing one out: %+v", rode)
+	}
+}

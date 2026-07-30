@@ -147,7 +147,8 @@ Usage:
   pisafe extension remove PACKAGE
                    Take an extension out of the profile
   pisafe extension list
-                   Show what the profile has installed, and what it is pinned to
+                   Show what the profile has installed, what it is pinned to,
+                   and any update still on offer
   pisafe gc [--dry-run]
                    Reclaim imported runs older than seven days and prune
                    superseded run images. Their pisafe/RUN branches keep the

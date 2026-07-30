@@ -222,6 +222,16 @@ func TestLiveAnAvailableUpdateIsOfferedAndNeverApplied(t *testing.T) {
 		t.Fatalf("pending = %+v", pending)
 	}
 
+	// The end of a run speaks only when a check moved the answer, so the registry
+	// answering the same thing twice has to leave nothing to say.
+	again, err := transport.ResolveExtensionUpdates(ctx, imageID, record, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spoke := record.PendingChange(stored, again); spoke != nil {
+		t.Errorf("an unchanged check offered %+v again", spoke)
+	}
+
 	// Applying is an install: the offer names a version, and the bytes are still
 	// checked against what the registry answers when they are fetched.
 	resolved, err := transport.ResolveExtension(ctx, imageID, "is-number")

@@ -214,7 +214,8 @@ already uses for its global packages:
 Beside the pins, `pins/updates.json` records what npm last said those names
 resolve to. Nothing installs from it and no run reads it: it exists so the user
 can be told what is available without pisafe reaching the network while they
-wait, and it is refreshed at most once a day, when a run stops.
+wait. It is refreshed at most once a day, when a run stops, and that stop says
+something only when the refresh moved what is on offer.
 
 - **The mount is Pi's own global package store**, `$PI_CODING_AGENT_DIR/npm`.
   Nothing simulates the invariant: `pi install` fails because the store it
@@ -337,12 +338,14 @@ thing that mounts anything.
 - [x] **7. `pisafe extension update` and update notifications.** Ask npm what
       the installed names resolve to now, keep the answer beside the pins, and
       apply it only when the user names a package. The offer is made when a run
-      stops, so no run start depends on the registry. Live test:
+      stops, so no run start depends on the registry, and only when that check
+      moved it. Live test:
       `TestLiveAnAvailableUpdateIsOfferedAndNeverApplied` — a check leaves the
       pin, the tree, and the mounted directory exactly as they were; what it
       found survives storage and is pending only while the record disagrees
-      with it; and applying goes through the same fetch-and-verify path an
-      install takes.
+      with it; a second check answering the same thing leaves nothing to say;
+      and applying goes through the same fetch-and-verify path an install
+      takes.
 - [ ] **8. Global tools.** See the open question below — the mechanism is not
       yet decided.
 - [ ] **9. `gc` sweep of project stores.** Reclaim whole project filesystems
@@ -682,13 +685,26 @@ this document is the current truth, not an audit trail. These fold into
   no run start reaches npm at all. Checking in the background at start was not
   taken: it buys a fresher answer at the cost of a network call on the path that
   matters most.
-- **A check is repeated from what it found, and refreshed at most once a day.**
-  The offer is printed at every stop from `pins/updates.json`, so the reminder
-  does not depend on the interval and the network is touched on one stop a day.
-  A check that resolved no package at all does not count as having happened, so
-  an unreachable registry leaves a standing offer alone rather than erasing it.
-  The whole check is bounded to 45 seconds, against the ten minutes an install
-  container is allowed: a stop must never wait on npm.
+- **An unsolicited offer is made once per change, not at every stop.** A stop
+  prints only when that day's check moved what is pending; a standing offer is
+  repeated by `pisafe extension list` and by `pisafe extension update`, on
+  request. Printing it at every stop was the first design and was dropped: the
+  end of a run is also where the run's own `LastError` warning prints, and a
+  channel that repeats what the reader already declined is one they stop
+  reading. The window is between checks rather than within a run, because
+  knowing what changed *during* a run would need an answer from the registry at
+  run start, which is the one thing that path may not do. The cost is that a
+  declined offer is not raised again until the registry moves, which for a quiet
+  package could be a long time. Cheaply reversible: an announced-at timestamp
+  and a second, longer interval would add a periodic re-offer without changing
+  anything else.
+- **The check is refreshed at most once a day, and one that found nothing did
+  not happen.** The network is touched on one stop a day, and a check that
+  resolved no package at all neither replaces a standing offer nor counts, so an
+  unreachable registry leaves what is known alone rather than erasing it — and
+  says nothing, since nothing moved. The whole check is bounded to 45 seconds,
+  against the ten minutes an install container is allowed: a stop must never
+  wait on npm.
 - **The offers file is advisory, and reading it cannot fail.** Anything absent,
   oversized, malformed, or of an unknown shape means the same thing as never
   having checked, and an entry that is not a name and an exact version is

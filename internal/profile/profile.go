@@ -279,6 +279,18 @@ func (record Record) Pending(offers Offers) []Update {
 	return updates
 }
 
+// PendingChange reports what is on offer when the latest check moved it, and
+// nothing when it did not. An offer nobody asked for is made once per change
+// rather than repeated, because a line that says what the last one said trains
+// a reader to skip the place a run's own errors are printed too.
+func (record Record) PendingChange(before, after Offers) []Update {
+	pending := record.Pending(after)
+	if slices.Equal(pending, record.Pending(before)) {
+		return nil
+	}
+	return pending
+}
+
 // Configuration is what one run is told: the packages it loads, and the one
 // directory it may load project resources from. Both are paths inside the
 // container, so neither discloses anything about the Mac.

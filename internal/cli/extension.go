@@ -15,9 +15,9 @@ import (
 )
 
 const (
-	// updateCheckInterval keeps stopping a run off the network on all but the
-	// first stop of a day. The offer itself is repeated at every stop from what
-	// the last check found, so the reminder does not depend on the interval.
+	// updateCheckInterval is the cadence of the whole unsolicited path: a stop
+	// reaches the network at most this often, and says something only when that
+	// check moved what is on offer.
 	updateCheckInterval = 24 * time.Hour
 
 	// updateCheckTimeout bounds a check nobody asked for. An unreachable
@@ -238,9 +238,11 @@ func applyExtensionUpdate(
 }
 
 // notifyExtensionUpdates tells the user what the profile could hold, at the
-// moment they have stopped working rather than while they wait to start. The
-// check is bounded and best-effort throughout: a stop that worked is never
-// failed, delayed, or made to depend on npm being reachable.
+// moment they have stopped working rather than while they wait to start, and
+// only when a check moved the answer: a standing offer is repeated by pisafe
+// extension list, on request. The check is bounded and best-effort throughout,
+// so a stop that worked is never failed, delayed, or made to depend on npm
+// being reachable.
 func notifyExtensionUpdates(
 	ctx context.Context,
 	transport lima.Transport,
@@ -252,13 +254,11 @@ func notifyExtensionUpdates(
 		return
 	}
 	offers, err := transport.ReadProfileOffers(ctx)
-	if err != nil {
+	if err != nil || !offers.Stale(time.Now(), updateCheckInterval) {
 		return
 	}
-	if offers.Stale(time.Now(), updateCheckInterval) {
-		offers = refreshExtensionOffers(ctx, transport, imageID, record, offers)
-	}
-	printExtensionUpdates(out, record.Pending(offers))
+	refreshed := refreshExtensionOffers(ctx, transport, imageID, record, offers)
+	printExtensionUpdates(out, record.PendingChange(offers, refreshed))
 }
 
 // refreshExtensionOffers asks npm again, keeping what the last check found if
