@@ -273,9 +273,72 @@ func TestTheProfileMountsWhereAgentCodeWouldInstallGlobally(t *testing.T) {
 	if strings.Contains(joined, ProfilePinsPath()) {
 		t.Errorf("run args mount the profile record:\n%s", joined)
 	}
-	if got := ExtensionPackagePath("earendil-works-plan-mode-bf0f2759", "@earendil-works/plan-mode"); got !=
-		"/home/node/.pi/agent/npm/earendil-works-plan-mode-bf0f2759/node_modules/@earendil-works/plan-mode" {
-		t.Errorf("extension package path = %q", got)
+	if got := ExtensionInstallRoot("earendil-works-plan-mode-bf0f2759"); got !=
+		"/var/lib/pisafe/global/default/extensions/earendil-works-plan-mode-bf0f2759" {
+		t.Errorf("extension install root = %q", got)
+	}
+}
+
+// TestInstallingAnExtensionRunsWithNetworkAndNoStorage is what lets the one
+// pisafe operation that needs the internet stay as contained as a run: it gets
+// the network and nothing else, so the tree it builds can only leave through
+// the tar stream pisafe reads.
+func TestInstallingAnExtensionRunsWithNetworkAndNoStorage(t *testing.T) {
+	integrity := "sha512-" + strings.Repeat("A", 86) + "=="
+	resolve, err := ExtensionResolveArgs(testImageID, "is-number@7.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	install, err := ExtensionInstallArgs(testImageID, "is-number", "7.0.0", integrity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, args := range map[string][]string{"resolve": resolve, "install": install} {
+		joined := strings.Join(args, " ")
+		for _, required := range []string{
+			"--rm",
+			"--pull=never",
+			"--user 1000:1000",
+			"--read-only",
+			"--cap-drop=all",
+			"--security-opt=no-new-privileges",
+			"--network=pasta",
+			"--pids-limit 512",
+			"--timeout 600",
+			testImageID,
+		} {
+			if !strings.Contains(joined, required) {
+				t.Errorf("%s args lack %q:\n%s", name, required, joined)
+			}
+		}
+		// Nothing of any run, project, or profile is reachable from the one
+		// container pisafe gives the network to.
+		for _, forbidden := range []string{"--mount", "--volume", "/var/lib/pisafe"} {
+			if strings.Contains(joined, forbidden) {
+				t.Errorf("%s args reach storage through %q:\n%s", name, forbidden, joined)
+			}
+		}
+	}
+	if got := install[len(install)-3:]; strings.Join(got, "|") != "is-number|7.0.0|"+integrity {
+		t.Errorf("install arguments = %#v", got)
+	}
+	// The pin the install is checked against arrives as an argument, never
+	// interpolated into the script the container runs.
+	if strings.Contains(install[len(install)-4], "is-number") {
+		t.Error("the package was interpolated into the installer script")
+	}
+
+	for name, pin := range map[string][3]string{
+		"climbing name":    {"../escape", "7.0.0", integrity},
+		"unpinned version": {"is-number", "^7.0.0", integrity},
+		"unhashed":         {"is-number", "7.0.0", "sha1-short"},
+	} {
+		if _, err := ExtensionInstallArgs(testImageID, pin[0], pin[1], pin[2]); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+	if _, err := ExtensionResolveArgs("localhost/pisafe-run:latest", "is-number"); err == nil {
+		t.Error("a mutable image was accepted")
 	}
 }
 

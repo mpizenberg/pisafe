@@ -27,7 +27,7 @@ func TestAnEmptyProfileIsValidRatherThanMissing(t *testing.T) {
 		if len(record.Extensions) != 0 || record.Version != RecordVersion {
 			t.Errorf("%s: record = %+v", name, record)
 		}
-		if configured := record.Configure("/work/project"); len(configured.Packages) != 0 {
+		if configured := record.Configure("/home/node/.pi/agent/npm", "/work/project"); len(configured.Packages) != 0 {
 			t.Errorf("%s: packages = %v", name, configured.Packages)
 		}
 	}
@@ -92,7 +92,7 @@ func TestInstalledExtensionsBecomeThePackagesARunLoads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	configured := parsed.Configure("/work/project")
+	configured := parsed.Configure("/home/node/.pi/agent/npm", "/work/project")
 	if configured.Workspace != "/work/project" {
 		t.Errorf("workspace = %q", configured.Workspace)
 	}

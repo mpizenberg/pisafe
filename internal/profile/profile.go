@@ -12,7 +12,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/mpizenberg/pisafe/internal/runcontainer"
 	"github.com/mpizenberg/pisafe/internal/runid"
 )
 
@@ -164,13 +163,14 @@ type Configuration struct {
 	Workspace string   `json:"workspace"`
 }
 
-// Configure renders the run-side configuration for one workspace.
-func (record Record) Configure(workspace string) Configuration {
+// Configure renders the run-side configuration. The package root is where the
+// profile is mounted, which is the run's business rather than the record's.
+func (record Record) Configure(packageRoot, workspace string) Configuration {
 	packages := make([]string, 0, len(record.Extensions))
 	for _, extension := range record.Extensions {
 		packages = append(
 			packages,
-			runcontainer.ExtensionPackagePath(extension.Directory, extension.Name),
+			packageRoot+"/"+extension.Directory+"/node_modules/"+extension.Name,
 		)
 	}
 	slices.Sort(packages)

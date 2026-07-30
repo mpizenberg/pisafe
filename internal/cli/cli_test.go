@@ -324,6 +324,48 @@ func TestCacheTakesOnlyReset(t *testing.T) {
 	}
 }
 
+// TestExtensionRefusesWhatItCannotPinBeforeReachingTheVM keeps a spec that
+// cannot be pinned from becoming a container argument, and keeps a source
+// pisafe cannot pin at all — a git repository, a path — from looking supported.
+func TestExtensionRefusesWhatItCannotPinBeforeReachingTheVM(t *testing.T) {
+	var output bytes.Buffer
+	for _, args := range [][]string{
+		{"extension"},
+		{"extension", "update"},
+		{"extension", "install"},
+		{"extension", "install", "a", "b"},
+		{"extension", "list", "extra"},
+	} {
+		err := Run(context.Background(), args, nil, &output)
+		if err == nil || !strings.Contains(err.Error(), "usage: pisafe extension") {
+			t.Fatalf("Run(%v) error = %v", args, err)
+		}
+	}
+	for name, spec := range map[string]string{
+		"range":       "is-number@^7.0.0",
+		"tag":         "is-number@latest",
+		"git source":  "git:github.com/user/repo",
+		"local path":  "/absolute/path",
+		"npm prefix":  "npm:is-number@7.0.0",
+		"empty":       "",
+		"shell metac": "is-number;id",
+	} {
+		if err := validateExtensionSpec(spec); err == nil {
+			t.Errorf("%s %q was accepted", name, spec)
+		}
+	}
+	for _, spec := range []string{
+		"is-number",
+		"is-number@7.0.0",
+		"@earendil-works/plan-mode",
+		"@earendil-works/plan-mode@1.2.3",
+	} {
+		if err := validateExtensionSpec(spec); err != nil {
+			t.Errorf("%q: %v", spec, err)
+		}
+	}
+}
+
 // Everything in a diff was written inside the run, so nothing may reach the
 // terminal unquoted, and a truncated list must say so.
 func TestPrintRunDiffQuotesRunContentAndReportsTruncation(t *testing.T) {

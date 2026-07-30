@@ -321,11 +321,13 @@ thing that mounts anything.
       the profile registers its flag in `pi --help`, so its code ran; the
       repository's own extension loads without a trust prompt; `pi -e` still
       works; and the run can neither write the store nor `pi install` into it.
-- [ ] **6b. `pisafe extension install`.** Resolve the pin from npm's own report,
+- [x] **6b. `pisafe extension install`.** Resolve the pin from npm's own report,
       install that exact version into its own module root inside a throwaway
-      container, and stream it into the profile by rename. Live test: an
-      installed extension is pinned to an exact version and integrity, loads in
-      the next run, reinstalls idempotently, and can be removed.
+      container, and stream it into the profile by rename. Live test:
+      `TestLiveAnInstalledExtensionIsPinnedToWhatWasFetched` — the recorded pin
+      is the registry's own answer, bytes that hash to anything else never reach
+      the profile, the installed tree is that exact release, reinstalling
+      replaces rather than accumulates, and the next run resolves the package.
 - [ ] **7. `pisafe extension update` and update notifications.** Offered, never
       applied. Depends on how pinning is recorded in slice 6.
 - [ ] **8. Global tools.** See the open question below — the mechanism is not
@@ -631,6 +633,33 @@ this document is the current truth, not an audit trail. These fold into
   pisafe writes it, and copying the Mac's own `~/.pi/agent/settings.json` in
   would carry host paths and host tool configuration across the boundary. Until
   a command exists to edit it, the run's settings are what pisafe renders.
+
+- **An install is two containers, and pisafe holds the pin between them.** The
+  first asks npm what a spec resolves to and reports the exact version and the
+  integrity of that release; the second fetches that version and refuses to
+  install bytes that hash to anything else. One container reporting both the
+  pin and the tree was not taken: the pin would then be a claim by the same
+  process that produced what it describes. This does not make the fetch
+  trustworthy — it happens inside a container by necessity, and nothing pisafe
+  can do changes that — but it makes the recorded pin something the install was
+  checked against rather than a description of whatever arrived.
+- **Only npm sources are installable, and only at an exact version.** A git
+  source has no integrity hash to pin, and a local path names something inside a
+  container the user cannot see. A version the user omits is resolved once and
+  recorded, so a spec never means two different profiles.
+- **Install scripts do not run.** `--ignore-scripts` matches how the run image
+  installs Pi itself. The consequence: a package needing a build step is not
+  installable this way. It is defence in depth rather than a boundary — the
+  installing container is the same class of sandbox a run is.
+- **The record is written after the tree and before a removal.** A record can
+  name a package that is missing, which Pi skips silently, but never fail to
+  name one that is there — the reverse would leave a run loading something the
+  user removed. Two installs at once can lose an entry from the record; the
+  loser's tree stays in the profile unrecorded, and re-running the command fixes
+  it. A lock was not taken for a single-user command.
+- **Replacing an extension swaps the new tree in before the old one goes**, so a
+  run starting during an install finds one release or the other rather than a
+  path that briefly does not exist.
 
 ## Open questions
 

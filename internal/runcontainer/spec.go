@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/profile"
 	"github.com/mpizenberg/pisafe/internal/runcopy"
 	"github.com/mpizenberg/pisafe/internal/runid"
 )
@@ -26,6 +27,10 @@ const (
 	// user runs deliberately.
 	DefaultGlobal    = int64(2 * 1024 * 1024 * 1024)
 	DefaultWallClock = int64(8 * 60 * 60)
+	// extensionSeconds bounds an install. It is generous for fetching one
+	// package and its dependencies, and short enough that a wedged registry
+	// fails the command rather than hanging it.
+	extensionSeconds = 600
 	// DefaultCacheGenerations bounds how many published generations one cache
 	// namespace keeps, beyond any a run may still mount. One is enough for the
 	// fallback to work — an unmatched key restores the newest generation, and
@@ -110,12 +115,11 @@ func ProfileMount() Mount {
 	}
 }
 
-// ExtensionPackagePath is how a run names one installed extension in its Pi
-// settings. Naming a package by path rather than by npm source is what keeps
-// loading it inert: Pi reads what is there instead of reconciling it with a
-// version it would then try to install into a read-only store.
-func ExtensionPackagePath(directory, name string) string {
-	return ProfileMount().Destination + "/" + directory + "/node_modules/" + name
+// ExtensionInstallRoot is the module root one extension is installed into.
+// Each gets its own, so installing a second never merges dependency trees with
+// the first.
+func ExtensionInstallRoot(directory string) string {
+	return ProfileMount().Source + "/" + directory
 }
 
 var (
@@ -428,6 +432,98 @@ func (spec Spec) PublishArgs(cache CacheMount) ([]string, error) {
 		"-C", overlay.Destination, "-cf", "-", ".",
 	}, nil
 }
+
+// ExtensionResolveArgs renders the throwaway container that asks npm what a
+// spec resolves to. It reports npm's own JSON, which carries the exact version
+// and the integrity of the tarball that spec names, so the pin comes from the
+// registry's own answer rather than from anything pisafe invents.
+func ExtensionResolveArgs(imageID, packageSpec string) ([]string, error) {
+	args, err := extensionArgs(imageID, "resolve")
+	if err != nil {
+		return nil, err
+	}
+	return append(args, "bash", "-ceu", resolveExtensionScript, "pisafe-resolve", packageSpec), nil
+}
+
+// ExtensionInstallArgs renders the throwaway container that fetches one exact
+// release, checks it against the pin pisafe already holds, installs it into a
+// module root of its own, and streams the tree out. It writes nothing outside
+// its own temporary filesystem: no container ever holds the profile open for
+// writing, exactly as no container holds the project store open.
+func ExtensionInstallArgs(imageID, name, version, integrity string) ([]string, error) {
+	if err := profile.ValidatePackageName(name); err != nil {
+		return nil, err
+	}
+	if err := profile.ValidateVersion(version); err != nil {
+		return nil, err
+	}
+	if err := profile.ValidateIntegrity(integrity); err != nil {
+		return nil, err
+	}
+	args, err := extensionArgs(imageID, "install")
+	if err != nil {
+		return nil, err
+	}
+	return append(
+		args,
+		"bash", "-ceu", installExtensionScript, "pisafe-install", name, version, integrity,
+	), nil
+}
+
+// extensionArgs is the container both halves of an install run in. It is a run
+// container in every respect except that it has no storage at all: managing the
+// profile is the one thing pisafe does that needs the network and needs nothing
+// of any run or project.
+func extensionArgs(imageID, kind string) ([]string, error) {
+	if !imageIDPattern.MatchString(imageID) {
+		return nil, fmt.Errorf("image must be an immutable sha256 ID")
+	}
+	memory := strconv.FormatInt(DefaultMemory, 10)
+	return []string{
+		"run",
+		"--rm",
+		"--pull=never",
+		"--label", "io.pisafe.kind=extension-" + kind,
+		"--user", containerUser,
+		"--read-only",
+		"--cap-drop=all",
+		"--security-opt=no-new-privileges",
+		"--network=pasta",
+		"--dns=1.1.1.1",
+		"--dns=9.9.9.9",
+		"--memory", memory,
+		"--memory-swap", memory,
+		"--pids-limit", strconv.Itoa(DefaultPIDs),
+		"--timeout", strconv.Itoa(extensionSeconds),
+		"--tmpfs", "/tmp:rw,nosuid,nodev,size=" + strconv.FormatInt(DefaultTemporary, 10),
+		"--env", "HOME=/tmp",
+		"--env", "npm_config_cache=/tmp/npm-cache",
+		"--env", "npm_config_update_notifier=false",
+		"--env", "npm_config_fund=false",
+		"--env", "npm_config_audit=false",
+		"--workdir", "/tmp",
+		imageID,
+	}, nil
+}
+
+const (
+	resolveExtensionScript = `exec npm pack --dry-run --json -- "$1"`
+
+	// installExtensionScript fetches the pinned release, refuses to install
+	// anything whose bytes do not hash to what pisafe recorded, and then lets
+	// npm resolve the package's own dependencies into the same root. Install
+	// scripts are not run: a package that needs a build step is not installable
+	// this way, which is the same discipline the run image is built with.
+	installExtensionScript = `
+tarball=$(npm pack --ignore-scripts --silent -- "$1@$2")
+test "sha512-$(openssl dgst -sha512 -binary "$tarball" | openssl base64 -A)" = "$3"
+mkdir /tmp/root
+npm install --prefix /tmp/root --ignore-scripts --legacy-peer-deps "./$tarball" >&2
+rm -f "$tarball"
+test -d "/tmp/root/node_modules/$1"
+exec tar --numeric-owner --owner=1000 --group=1000 -C /tmp/root -cf - .
+`
+)
 
 func (spec Spec) ConfigureSSHArgs() ([]string, error) {
 	if err := spec.Validate(); err != nil {

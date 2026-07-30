@@ -94,6 +94,140 @@ chown 1000:1000 "`+path+`"
 	})
 }
 
+// liveIsNumber is a published release that will never change: npm refuses to
+// republish a version, so its integrity is a constant the test can assert
+// against rather than merely record.
+const (
+	liveIsNumber          = "is-number@7.0.0"
+	liveIsNumberIntegrity = "sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741" +
+		"+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng=="
+)
+
+// TestLiveAnInstalledExtensionIsPinnedToWhatWasFetched is what `pisafe
+// extension install` is for. The version and hash pisafe records have to be the
+// registry's own answer, the tree in the profile has to be that exact release,
+// a hash that does not match has to stop the install, and a run has to find
+// what was installed.
+func TestLiveAnInstalledExtensionIsPinnedToWhatWasFetched(t *testing.T) {
+	if os.Getenv("PISAFE_LIVE_LIMA") != "1" {
+		t.Skip("set PISAFE_LIVE_LIMA=1 to test the dedicated VM")
+	}
+	imageID := liveImageID(t)
+	ensureLiveVM(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	transport := lima.NewTransport()
+	if err := transport.EnsureGlobalStorage(ctx); err != nil {
+		t.Fatal(err)
+	}
+	seedProfileRecord(t, ctx, profile.Record{Version: profile.RecordVersion})
+
+	extension, err := transport.ResolveExtension(ctx, imageID, liveIsNumber)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if extension.Name != "is-number" || extension.Version != "7.0.0" ||
+		extension.Integrity != liveIsNumberIntegrity {
+		t.Fatalf("resolved %+v", extension)
+	}
+
+	// The pin is what the install is checked against, so bytes that hash to
+	// anything else have to stay out of the profile.
+	tampered := extension
+	tampered.Integrity = "sha512-" + strings.Repeat("B", 86) + "=="
+	if err := transport.InstallExtension(ctx, imageID, tampered); err == nil {
+		t.Fatal("a package that did not match its pin was installed")
+	}
+	if listed := runLive(
+		t, ctx, "podman", "unshare", "ls", "-A", runcontainer.ProfileMount().Source,
+	); listed != "" {
+		t.Fatalf("the profile holds %q after a refused install", listed)
+	}
+
+	if err := transport.InstallExtension(ctx, imageID, extension); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := transport.RemoveExtension(context.Background(), extension); err != nil {
+			t.Errorf("remove live extension: %v", err)
+		}
+	})
+	if err := transport.WriteProfileRecord(
+		ctx,
+		profile.Record{Version: profile.RecordVersion}.With(extension),
+	); err != nil {
+		t.Fatal(err)
+	}
+	installed := runcontainer.ExtensionInstallRoot(extension.Directory) +
+		"/node_modules/is-number/package.json"
+	if got := runLive(t, ctx, "podman", "unshare", "grep", "-c", `"version": "7.0.0"`, installed); got != "1" {
+		t.Errorf("the installed tree is not the pinned release: %q", got)
+	}
+
+	// Installing again replaces rather than accumulates, and leaves no
+	// half-installed directory behind for a run to mount.
+	if err := transport.InstallExtension(ctx, imageID, extension); err != nil {
+		t.Fatal(err)
+	}
+	if listed := runLive(
+		t, ctx, "podman", "unshare", "ls", "-A", runcontainer.ProfileMount().Source,
+	); listed != extension.Directory {
+		t.Errorf("the profile holds %q, want only %q", listed, extension.Directory)
+	}
+	record, err := transport.ReadProfileRecord(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(record.Extensions) != 1 || record.Extensions[0] != extension {
+		t.Fatalf("profile record = %+v", record.Extensions)
+	}
+
+	// A run started now finds the package where its settings say it is, which
+	// is what makes an installed extension one Pi loads rather than one that
+	// merely exists.
+	stamp := time.Now().UTC().Format("20060102150405")
+	projectKey := liveProject(t, transport, "liveinstall")
+	spec := liveRun(t, ctx, transport, projectKey, imageID, "liveinstall-"+stamp)
+	inContainer(t, ctx, transport, spec, "mkdir -p /work/project")
+	configureRunProfile(t, ctx, transport, spec, record)
+	listed := inContainer(t, ctx, transport, spec, "cd /work/project && pi list")
+	path := runcontainer.ProfileMount().Destination + "/" +
+		extension.Directory + "/node_modules/is-number"
+	if strings.Count(listed, path) != 2 {
+		t.Errorf("the run does not resolve the installed package:\n%s", listed)
+	}
+}
+
+// configureRunProfile installs the run-side configuration the controller sends
+// at every start.
+func configureRunProfile(
+	t *testing.T,
+	ctx context.Context,
+	transport lima.Transport,
+	spec runcontainer.Spec,
+	record profile.Record,
+) {
+	t.Helper()
+	configuration, err := json.Marshal(
+		record.Configure(runcontainer.ProfileMount().Destination, "/work/project"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, err := spec.ConfigureProfileArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := transport.Execute(
+		ctx,
+		bytes.NewReader(configuration),
+		append([]string{"podman"}, args...)...,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestLiveTheProfileLoadsAndStaysReadOnlyToTheRun is invariant 1 end to end. An
 // extension the user installed has to run in every run, and no code inside a
 // run may change what the next one loads — which is one property, because the
@@ -138,21 +272,7 @@ TS
 sed 's/local-flag/temporary-flag/' /work/project/.pi/extensions/local.ts >/tmp/try.ts
 `)
 
-	configuration, err := json.Marshal(record.Configure("/work/project"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	configureArgs, err := spec.ConfigureProfileArgs()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := transport.Execute(
-		ctx,
-		bytes.NewReader(configuration),
-		append([]string{"podman"}, configureArgs...)...,
-	); err != nil {
-		t.Fatal(err)
-	}
+	configureRunProfile(t, ctx, transport, spec, record)
 
 	// A flag in the help is an extension module that was loaded and run, which
 	// is what the profile is for. Pi needs no provider and no network to get

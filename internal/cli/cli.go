@@ -13,7 +13,8 @@ import (
 )
 
 var errUsage = errors.New(
-	"usage: pisafe <run|connect|stop|resume|diff|cp|apply|discard|cache|gc|list|zed|login|broker|doctor|help>",
+	"usage: pisafe <run|connect|stop|resume|diff|cp|apply|discard|cache|extension" +
+		"|gc|list|zed|login|broker|doctor|help>",
 )
 
 func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
@@ -86,6 +87,8 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 			return errors.New("usage: pisafe cache reset")
 		}
 		return runCacheReset(ctx, out)
+	case "extension":
+		return runExtension(ctx, args[1:], out)
 	case "gc":
 		return runGC(ctx, args[1:], out)
 	case "help", "-h", "--help":
@@ -132,6 +135,15 @@ Usage:
                    share. Nothing needs it to be correct, so the only cost is
                    that the next run fetches from scratch. Session transcripts
                    are not touched.
+  pisafe extension install PACKAGE[@VERSION]
+                   Install a Pi extension into the profile every run mounts
+                   read-only, pinned to an exact version and integrity hash.
+                   Runs cannot install one themselves; inside a run, pi -e
+                   still tries a package for that run alone.
+  pisafe extension remove PACKAGE
+                   Take an extension out of the profile
+  pisafe extension list
+                   Show what the profile has installed, and what it is pinned to
   pisafe gc [--dry-run]
                    Reclaim imported runs older than seven days and prune
                    superseded run images. Their pisafe/RUN branches keep the

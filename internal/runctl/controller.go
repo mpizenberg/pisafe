@@ -325,7 +325,9 @@ func (controller Controller) configureProfile(
 	if err != nil {
 		return err
 	}
-	content, err := json.Marshal(record.Configure(workspace))
+	content, err := json.Marshal(
+		record.Configure(runcontainer.ProfileMount().Destination, workspace),
+	)
 	if err != nil {
 		return fmt.Errorf("encode run profile configuration: %w", err)
 	}

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -140,6 +141,51 @@ done
 ' pisafe-layout "$@"
 `
 
+	// writeProfileRecordScript replaces what the profile has installed. The
+	// record arrives by rename, so a reader either sees the whole of it or the
+	// whole of what it replaced, and a run starting mid-install is never
+	// configured from half a record.
+	writeProfileRecordScript = `set -eu
+exec podman unshare sh -ceu '
+set -eu
+record=$1/extensions.json
+staging=$1/.extensions.json
+cat >"$staging"
+chown 1000:1000 "$staging"
+chmod 0600 "$staging"
+mv -T "$staging" "$record"
+' pisafe-profile "$@"
+`
+
+	// installExtensionScript takes the tree one throwaway container built and
+	// makes it the profile's. Only this script writes the profile, the same way
+	// only pisafe writes a project's cache: the container that fetched the
+	// package never had a handle on anything but its own memory.
+	//
+	// Replacing an installed extension swaps the new tree in before the old one
+	// goes, so a run that starts during an install finds one or the other rather
+	// than nothing.
+	installExtensionScript = `set -euo pipefail
+target="$1"
+staging="$(dirname "$1")/.install-$(basename "$1")"
+shift
+podman unshare rm -rf -- "$staging" "$staging.replaced"
+podman unshare install -d -m 0700 -o 1000 -g 1000 "$staging"
+trap 'podman unshare rm -rf -- "$staging" "$staging.replaced" || true' EXIT
+podman "$@" | podman unshare tar --numeric-owner -C "$staging" -xf -
+if podman unshare test -d "$target"; then
+	podman unshare mv -T "$target" "$staging.replaced"
+fi
+podman unshare mv -T "$staging" "$target"
+`
+
+	// removeExtensionScript takes one extension's tree out of the profile. The
+	// record is written first, so what this removes is already something no run
+	// starting now would load.
+	removeExtensionScript = `set -eu
+exec podman unshare rm -rf -- "$1"
+`
+
 	// readProfileRecordScript prints what the profile has installed. An absent
 	// record is an empty one: a user who has installed nothing still has a
 	// valid profile, and every run mounts it.
@@ -256,6 +302,11 @@ done
 ' pisafe-promote "$@"
 `
 )
+
+// maxResolveBytes bounds what npm may report about one package. Its report
+// lists the tarball's files, so this is far above what any package produces
+// and far below what would make the controller allocate without bound.
+const maxResolveBytes = 1 << 22
 
 // maxApplyArtifactBytes stops a run from filling the Mac's disk through the
 // apply path. Run storage is smaller than this, so no bundle a run can
@@ -634,6 +685,141 @@ func (transport Transport) PromoteSessions(
 		ctx, nil, promoteSessionsScript, projectKey, runID,
 	); err != nil {
 		return fmt.Errorf("promote run sessions: %w", err)
+	}
+	return nil
+}
+
+// WriteProfileRecord replaces pisafe's record of what the profile holds. It is
+// what a run is configured from, so it is written after the tree it names and
+// before the tree it stops naming: a record can be ahead of nothing.
+func (transport Transport) WriteProfileRecord(
+	ctx context.Context,
+	record profile.Record,
+) error {
+	content, err := record.Encode()
+	if err != nil {
+		return err
+	}
+	if _, err := transport.shellScript(
+		ctx,
+		bytes.NewReader(content),
+		writeProfileRecordScript,
+		runcontainer.ProfilePinsPath(),
+	); err != nil {
+		return fmt.Errorf("write profile record: %w", err)
+	}
+	return nil
+}
+
+// ResolveExtension asks npm what a package spec resolves to right now. The
+// exact version and the integrity of that release are the pin, and they come
+// from the registry's own answer rather than from anything pisafe composes.
+func (transport Transport) ResolveExtension(
+	ctx context.Context,
+	imageID string,
+	packageSpec string,
+) (profile.Extension, error) {
+	args, err := runcontainer.ExtensionResolveArgs(imageID, packageSpec)
+	if err != nil {
+		return profile.Extension{}, err
+	}
+	output, err := transport.Execute(ctx, nil, append([]string{"podman"}, args...)...)
+	if err != nil {
+		return profile.Extension{}, fmt.Errorf("resolve %s: %w", packageSpec, err)
+	}
+	return parseResolvedExtension(output)
+}
+
+// parseResolvedExtension reads npm's report. It arrives from a container with
+// network access, so nothing in it is taken on trust: the pin is what pisafe
+// can address, name, and put in a path, or the install does not happen.
+func parseResolvedExtension(output []byte) (profile.Extension, error) {
+	if len(output) > maxResolveBytes {
+		return profile.Extension{}, errors.New("package resolution exceeds size limit")
+	}
+	var reported []struct {
+		Name      string `json:"name"`
+		Version   string `json:"version"`
+		Integrity string `json:"integrity"`
+	}
+	if err := json.Unmarshal(output, &reported); err != nil {
+		return profile.Extension{}, fmt.Errorf("decode package resolution: %w", err)
+	}
+	if len(reported) != 1 {
+		return profile.Extension{}, fmt.Errorf(
+			"expected one resolved package, got %d",
+			len(reported),
+		)
+	}
+	extension := profile.Extension{
+		Name:      reported[0].Name,
+		Version:   reported[0].Version,
+		Integrity: reported[0].Integrity,
+	}
+	directory, err := runid.NewPackageDirectory(extension.Name)
+	if err != nil {
+		return profile.Extension{}, err
+	}
+	extension.Directory = directory
+	if err := extension.Validate(); err != nil {
+		return profile.Extension{}, err
+	}
+	return extension, nil
+}
+
+// InstallExtension puts one resolved package in the profile. The container
+// fetches and builds the tree; this script is what makes it the profile's, so
+// nothing that ran with the network open ever held the profile open for
+// writing.
+func (transport Transport) InstallExtension(
+	ctx context.Context,
+	imageID string,
+	extension profile.Extension,
+) error {
+	if err := extension.Validate(); err != nil {
+		return err
+	}
+	installArgs, err := runcontainer.ExtensionInstallArgs(
+		imageID,
+		extension.Name,
+		extension.Version,
+		extension.Integrity,
+	)
+	if err != nil {
+		return err
+	}
+	arguments := append(
+		[]string{
+			"pisafe-extension",
+			runcontainer.ExtensionInstallRoot(extension.Directory),
+		},
+		installArgs...,
+	)
+	if _, err := transport.Execute(
+		ctx,
+		nil,
+		append([]string{"bash", "-ceu", installExtensionScript}, arguments...)...,
+	); err != nil {
+		return fmt.Errorf("install %s@%s: %w", extension.Name, extension.Version, err)
+	}
+	return nil
+}
+
+// RemoveExtension takes one package out of the profile.
+func (transport Transport) RemoveExtension(
+	ctx context.Context,
+	extension profile.Extension,
+) error {
+	if err := extension.Validate(); err != nil {
+		return err
+	}
+	if _, err := transport.shellScript(
+		ctx,
+		nil,
+		removeExtensionScript,
+		runcontainer.ExtensionInstallRoot(extension.Directory),
+	); err != nil {
+		return fmt.Errorf("remove %s: %w", extension.Name, err)
 	}
 	return nil
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/profile"
 	"github.com/mpizenberg/pisafe/internal/runcontainer"
 )
 
@@ -463,6 +464,70 @@ func TestPromoteSessionsRefusesWhatItCannotAddress(t *testing.T) {
 			context.Background(), arguments[0], arguments[1],
 		); err == nil {
 			t.Errorf("%s was accepted", name)
+		}
+	}
+}
+
+// TestResolveExtensionRefusesWhatItCannotPin is where a pin is decided. The
+// report comes from a container with the network open, so a name that is not a
+// package, a version that is not exact, and a hash that is not one all have to
+// stop the install rather than reach the profile.
+func TestResolveExtensionRefusesWhatItCannotPin(t *testing.T) {
+	integrity := "sha512-" + strings.Repeat("A", 86) + "=="
+	for name, output := range map[string]string{
+		"empty":            "",
+		"not an array":     `{"name":"is-number","version":"7.0.0","integrity":"` + integrity + `"}`,
+		"two packages":     `[{"name":"a","version":"1.0.0","integrity":"` + integrity + `"},{"name":"b","version":"1.0.0","integrity":"` + integrity + `"}]`,
+		"climbing name":    `[{"name":"../../etc","version":"1.0.0","integrity":"` + integrity + `"}]`,
+		"unpinned version": `[{"name":"is-number","version":"^7.0.0","integrity":"` + integrity + `"}]`,
+		"no integrity":     `[{"name":"is-number","version":"7.0.0"}]`,
+		"short integrity":  `[{"name":"is-number","version":"7.0.0","integrity":"sha512-AA=="}]`,
+	} {
+		if _, err := parseResolvedExtension([]byte(output)); err == nil {
+			t.Errorf("%s was accepted as a pin", name)
+		}
+	}
+	extension, err := parseResolvedExtension(
+		[]byte(`[{"name":"is-number","version":"7.0.0","integrity":"` + integrity + `","size":3730}]`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if extension.Directory != "is-number-5e0e83b1" {
+		t.Fatalf("resolved %+v", extension)
+	}
+}
+
+// TestExtensionCommandsRefuseAnUnpinnedPackage keeps anything the record could
+// not vouch for from becoming a container argument or half of a path.
+func TestExtensionCommandsRefuseAnUnpinnedPackage(t *testing.T) {
+	transport := Transport{instance: InstanceName, runner: &fakeRunner{}}
+	integrity := "sha512-" + strings.Repeat("A", 86) + "=="
+	for name, extension := range map[string]profile.Extension{
+		"climbing name": {
+			Name: "../escape", Version: "1.0.0", Integrity: integrity,
+			Directory: "escape-11111111",
+		},
+		"unpinned version": {
+			Name: "is-number", Version: "latest", Integrity: integrity,
+			Directory: "is-number-5e0e83b1",
+		},
+		"misplaced": {
+			Name: "is-number", Version: "7.0.0", Integrity: integrity,
+			Directory: "somewhere-else",
+		},
+		"unhashed": {
+			Name: "is-number", Version: "7.0.0", Integrity: "sha1-short",
+			Directory: "is-number-5e0e83b1",
+		},
+	} {
+		if err := transport.InstallExtension(
+			context.Background(), testRunImage, extension,
+		); err == nil {
+			t.Errorf("%s was installed", name)
+		}
+		if err := transport.RemoveExtension(context.Background(), extension); err == nil {
+			t.Errorf("%s was removed", name)
 		}
 	}
 }
