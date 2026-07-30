@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/profile"
 	"github.com/mpizenberg/pisafe/internal/runcontainer"
 	"github.com/mpizenberg/pisafe/internal/runid"
 	"github.com/mpizenberg/pisafe/internal/runssh"
@@ -25,12 +26,14 @@ type Backend interface {
 	CreateRunStorage(context.Context, string) error
 	VerifyRunStorage(context.Context, string) error
 	EnsureProjectStorage(context.Context, string) error
+	EnsureGlobalStorage(context.Context) error
+	ReadProfileRecord(context.Context) (profile.Record, error)
 	SelectCacheSnapshots(
 		context.Context,
 		string,
 		[]runcontainer.CacheMount,
 	) ([]runcontainer.CacheMount, error)
-	PrepareRunOverlays(context.Context, string, []runcontainer.CacheMount) error
+	PrepareRunLayout(context.Context, string, []runcontainer.CacheMount) error
 	PublishCacheSnapshot(context.Context, runcontainer.Spec, runcontainer.CacheMount) error
 	EvictCacheSnapshots(context.Context, string, string, int, []string) error
 	ResetProjectCache(context.Context, string) error
@@ -109,10 +112,13 @@ func (controller Controller) StartPrepared(
 		return runstate.Manifest{}, err
 	}
 
-	// The project filesystem is not rolled back with a failed run. It is shared
-	// with every other run of the project and outlives all of them, so it is
-	// ensured before the run has anything to roll back.
+	// Neither shared filesystem is rolled back with a failed run. Both outlive
+	// every run that reaches them, so they are ensured before the run has
+	// anything to roll back.
 	if err := controller.backend.EnsureProjectStorage(ctx, spec.ProjectKey); err != nil {
+		return runstate.Manifest{}, err
+	}
+	if err := controller.backend.EnsureGlobalStorage(ctx); err != nil {
 		return runstate.Manifest{}, err
 	}
 	selected, err := controller.backend.SelectCacheSnapshots(ctx, spec.ProjectKey, spec.Caches)
@@ -183,7 +189,7 @@ func (controller Controller) StartPrepared(
 	if err := controller.backend.CreateRunStorage(ctx, spec.RunID); err != nil {
 		return runstate.Manifest{}, err
 	}
-	if err := controller.backend.PrepareRunOverlays(ctx, spec.RunID, spec.Caches); err != nil {
+	if err := controller.backend.PrepareRunLayout(ctx, spec.RunID, spec.Caches); err != nil {
 		return runstate.Manifest{}, err
 	}
 	if err := controller.backend.ImportStage(ctx, spec.RunID); err != nil {
@@ -260,6 +266,9 @@ func (controller Controller) StartPrepared(
 	if err := controller.configureIdentity(ctx, spec, identity); err != nil {
 		return runstate.Manifest{}, err
 	}
+	if err := controller.configureProfile(ctx, spec, "/work/"+project.Directory); err != nil {
+		return runstate.Manifest{}, err
+	}
 	capability, err := runstate.NewInferenceCapability()
 	if err != nil {
 		return runstate.Manifest{}, err
@@ -299,6 +308,33 @@ func (controller Controller) configureIdentity(
 	}
 	if _, err := controller.podman(ctx, bytes.NewReader(content), args...); err != nil {
 		return fmt.Errorf("install run Git identity: %w", err)
+	}
+	return nil
+}
+
+// configureProfile gives the run the packages the profile currently holds and
+// the trust decision for its own workspace. It reads the profile at every start
+// rather than recording it on the run: the profile is shared and mutable, and
+// what a run was told about it dies with the run.
+func (controller Controller) configureProfile(
+	ctx context.Context,
+	spec runcontainer.Spec,
+	workspace string,
+) error {
+	record, err := controller.backend.ReadProfileRecord(ctx)
+	if err != nil {
+		return err
+	}
+	content, err := json.Marshal(record.Configure(workspace))
+	if err != nil {
+		return fmt.Errorf("encode run profile configuration: %w", err)
+	}
+	args, err := spec.ConfigureProfileArgs()
+	if err != nil {
+		return err
+	}
+	if _, err := controller.podman(ctx, bytes.NewReader(content), args...); err != nil {
+		return fmt.Errorf("install run profile configuration: %w", err)
 	}
 	return nil
 }

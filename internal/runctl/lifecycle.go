@@ -42,6 +42,10 @@ type containerMount struct {
 	Source      string   `json:"Source"`
 	Destination string   `json:"Destination"`
 	Options     []string `json:"Options"`
+	// Podman reports a read-only bind here and not among the options, so this
+	// is the only field that distinguishes a read-only profile from a writable
+	// one.
+	Writable bool `json:"RW"`
 }
 
 func (controller Controller) Stop(
@@ -114,6 +118,9 @@ func (controller Controller) Resume(
 	if err := controller.backend.VerifyRunStorage(ctx, runID); err != nil {
 		return runstate.Manifest{}, controller.recordLifecycleError(runID, "resume", err)
 	}
+	if err := controller.backend.EnsureGlobalStorage(ctx); err != nil {
+		return runstate.Manifest{}, controller.recordLifecycleError(runID, "resume", err)
+	}
 
 	existing, err := controller.inspectContainer(ctx, spec)
 	if err != nil {
@@ -157,6 +164,9 @@ func (controller Controller) Resume(
 		)
 	}
 	capability, err := runstate.NewInferenceCapability()
+	if err == nil {
+		err = controller.configureProfile(ctx, spec, manifest.Workspace)
+	}
 	if err == nil {
 		err = controller.configureInference(ctx, spec, capability)
 	}
@@ -344,8 +354,9 @@ func (controller Controller) inspectContainer(
 // source; an overlay by the layers it was stacked from, because Podman
 // substitutes its own merged directory for the source.
 type mountRequirement struct {
-	source  string
-	options []string
+	source   string
+	options  []string
+	readOnly bool
 }
 
 func validateContainerInspection(
@@ -365,9 +376,13 @@ func validateContainerInspection(
 	if inspection.Config.Labels["io.pisafe.run"] != spec.RunID {
 		return errors.New("run container label does not match manifest")
 	}
+	profileMount := runcontainer.ProfileMount()
 	expected := map[string]mountRequirement{
 		"/work":      {source: spec.WorkspacePath()},
 		"/home/node": {source: spec.HomePath()},
+		// A writable profile would be agent code able to change what every
+		// later run of every project loads, so it is checked and not assumed.
+		profileMount.Destination: {source: profileMount.Source, readOnly: true},
 	}
 	// Podman reports an overlay as a bind onto its own merged directory, whose
 	// path it chooses, so a shared layer is pinned by what it was stacked from
@@ -389,7 +404,8 @@ func validateContainerInspection(
 			continue
 		}
 		matched := mount.Type == "bind" &&
-			(required.source == "" || mount.Source == required.source)
+			(required.source == "" || mount.Source == required.source) &&
+			mount.Writable != required.readOnly
 		for _, option := range required.options {
 			matched = matched && slices.Contains(mount.Options, option)
 		}

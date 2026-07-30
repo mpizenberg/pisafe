@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/profile"
 	"github.com/mpizenberg/pisafe/internal/runcontainer"
 	"github.com/mpizenberg/pisafe/internal/runid"
 	"github.com/mpizenberg/pisafe/internal/runssh"
@@ -111,26 +112,44 @@ done
 ' pisafe-select "$@"
 `
 
-	// prepareOverlaysScript builds the run-private half of every overlay. Both
-	// the mode and the ownership are what the container needs to write through
-	// its overlay, and are what the privileged helper would have applied had
-	// the set of names been knowable when it allocated the filesystem.
-	prepareOverlaysScript = `set -eu
+	// prepareRunLayoutScript builds what the run's mounts need inside the
+	// filesystems the privileged helper allocated: the run-private half of
+	// every overlay, and the mountpoint for the read-only profile. Both the
+	// mode and the ownership are what the container needs, and are what the
+	// helper would have applied had any of these names been knowable when it
+	// allocated the filesystem. The mountpoint matters even though Podman would
+	// create one: a mountpoint Podman creates is owned by the container's root,
+	// which would leave Pi unable to write its own settings beside it.
+	prepareRunLayoutScript = `set -eu
 exec podman unshare sh -ceu '
 set -eu
-overlay=/var/lib/pisafe/runs/$1/overlay
+root=/var/lib/pisafe/runs/$1
+overlay=$root/overlay
 shift
 test -d "$overlay"
 create() {
 	install -d -m 0700 -o 1000 -g 1000 "$@"
 }
+create "$root/home/.pi" "$root/home/.pi/agent" "$root/home/.pi/agent/npm"
 create "$overlay/sessions" "$overlay/sessions/upper" "$overlay/sessions/work"
 while [ "$#" -gt 0 ]; do
 	create "$overlay/cache" "$overlay/cache/$1"
 	create "$overlay/cache/$1/upper" "$overlay/cache/$1/work" "$overlay/cache/$1/lower"
 	shift
 done
-' pisafe-overlays "$@"
+' pisafe-layout "$@"
+`
+
+	// readProfileRecordScript prints what the profile has installed. An absent
+	// record is an empty one: a user who has installed nothing still has a
+	// valid profile, and every run mounts it.
+	readProfileRecordScript = `set -eu
+exec podman unshare sh -ceu '
+set -eu
+record=$1/extensions.json
+test -f "$record" || exit 0
+exec cat "$record"
+' pisafe-profile "$@"
 `
 
 	// publishSnapshotScript materializes one cache's merged view into a new
@@ -478,11 +497,12 @@ func (transport Transport) SelectCacheSnapshots(
 	return selected, nil
 }
 
-// PrepareRunOverlays creates the upper, work, and cold-start lower directories
-// the run's overlays need. They sit inside directories the privileged helper
-// already owns to the mapped UID, so the set of cache names — which comes from
-// the repository — never reaches the helper.
-func (transport Transport) PrepareRunOverlays(
+// PrepareRunLayout creates the directories the run's mounts need: the upper,
+// work, and cold-start lower of every overlay, and the mountpoint the profile
+// binds onto. They sit inside directories the privileged helper already owns to
+// the mapped UID, so the set of cache names — which comes from the repository —
+// never reaches the helper.
+func (transport Transport) PrepareRunLayout(
 	ctx context.Context,
 	runID string,
 	caches []runcontainer.CacheMount,
@@ -497,10 +517,30 @@ func (transport Transport) PrepareRunOverlays(
 		}
 		arguments = append(arguments, cache.Name)
 	}
-	if _, err := transport.shellScript(ctx, nil, prepareOverlaysScript, arguments...); err != nil {
-		return fmt.Errorf("prepare run overlay directories: %w", err)
+	if _, err := transport.shellScript(ctx, nil, prepareRunLayoutScript, arguments...); err != nil {
+		return fmt.Errorf("prepare run directories: %w", err)
 	}
 	return nil
+}
+
+// EnsureGlobalStorage allocates the filesystem holding the profile every run
+// mounts, or verifies the one already there. Like a project, it outlives every
+// run, so no run may assume it is creating it.
+func (transport Transport) EnsureGlobalStorage(ctx context.Context) error {
+	return transport.storage(ctx, "ensure", "global", runcontainer.ProfileName)
+}
+
+// ReadProfileRecord reports what the profile has installed. It is read at every
+// run start, because a run's copy of what the profile says does not survive the
+// run and the profile may have changed since the last one.
+func (transport Transport) ReadProfileRecord(ctx context.Context) (profile.Record, error) {
+	output, err := transport.shellScript(
+		ctx, nil, readProfileRecordScript, runcontainer.ProfilePinsPath(),
+	)
+	if err != nil {
+		return profile.Record{}, fmt.Errorf("read profile record: %w", err)
+	}
+	return profile.ParseRecord(output)
 }
 
 // PublishCacheSnapshot keeps what one run added to a declared cache as a new

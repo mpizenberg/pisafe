@@ -46,6 +46,7 @@ func RenderConfig(options ConfigOptions) ([]byte, error) {
 	}
 	securityProfile := securityProfileDigest(prefixes)
 	namespaces := strings.Join(runcontainer.ProjectNamespaces(), " ")
+	globalNamespaces := strings.Join(runcontainer.GlobalNamespaces(), " ")
 
 	replacements := strings.NewReplacer(
 		"@@CPUS@@", fmt.Sprintf("%d", options.CPUs),
@@ -57,6 +58,8 @@ func RenderConfig(options ConfigOptions) ([]byte, error) {
 		"@@RUN_STORAGE_BYTES@@", strconv.FormatInt(runcontainer.DefaultPersistent, 10),
 		"@@PROJECT_STORAGE_BYTES@@", strconv.FormatInt(runcontainer.DefaultProject, 10),
 		"@@PROJECT_NAMESPACES@@", namespaces,
+		"@@GLOBAL_STORAGE_BYTES@@", strconv.FormatInt(runcontainer.DefaultGlobal, 10),
+		"@@GLOBAL_NAMESPACES@@", globalNamespaces,
 		"@@BROKER_ADDRESS@@", BrokerAddress,
 		"@@BROKER_PORT@@", strconv.Itoa(BrokerPort),
 	)
@@ -64,13 +67,13 @@ func RenderConfig(options ConfigOptions) ([]byte, error) {
 }
 
 // securityProfileDigest changes whenever the generated VM definition, its
-// immutable host-network deny set, its persistent storage quotas, or the set
+// immutable host-network deny set, its persistent storage quotas, or the sets
 // of namespaces runs share change. The template is hashed before substitution, so
 // every value substituted into it has to be hashed here too. VM sizing is
 // deliberately excluded because it does not weaken a run boundary.
 func securityProfileDigest(prefixes []string) string {
 	digest := sha256.New()
-	_, _ = digest.Write([]byte("pisafe-lima-security-profile-v2\x00"))
+	_, _ = digest.Write([]byte("pisafe-lima-security-profile-v3\x00"))
 	_, _ = digest.Write([]byte(configTemplate))
 	_, _ = digest.Write([]byte{0})
 	_, _ = digest.Write([]byte(strings.Join(prefixes, "\n")))
@@ -80,6 +83,10 @@ func securityProfileDigest(prefixes []string) string {
 	_, _ = digest.Write([]byte(strconv.FormatInt(runcontainer.DefaultProject, 10)))
 	_, _ = digest.Write([]byte{0})
 	_, _ = digest.Write([]byte(strings.Join(runcontainer.ProjectNamespaces(), "\n")))
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write([]byte(strconv.FormatInt(runcontainer.DefaultGlobal, 10)))
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write([]byte(strings.Join(runcontainer.GlobalNamespaces(), "\n")))
 	return "sha256:" + hex.EncodeToString(digest.Sum(nil))
 }
 
@@ -179,8 +186,11 @@ provision:
     grep -q "^${pisafe_user}:" /etc/subgid ||
       usermod --add-subgids 100000-165535 "${pisafe_user}"
     runuser --login "${pisafe_user}" --command 'podman system migrate'
-    install -d -m 0711 -o root -g root /var/lib/pisafe/runs /var/lib/pisafe/projects
-    install -d -m 0700 -o root -g root /var/lib/pisafe/run-images /var/lib/pisafe/project-images
+    install -d -m 0711 -o root -g root \
+      /var/lib/pisafe/runs /var/lib/pisafe/projects /var/lib/pisafe/global
+    install -d -m 0700 -o root -g root \
+      /var/lib/pisafe/run-images /var/lib/pisafe/project-images \
+      /var/lib/pisafe/global-images
 
     install -d -m 0755 /etc/pisafe /etc/ssh/sshd_config.d
     tee /etc/sysctl.d/90-pisafe.conf >/dev/null <<'PISAFE_SYSCTL'
@@ -309,9 +319,10 @@ provision:
 
     # A run filesystem holds the container's two bind mounts plus the root of
     # the private upper layers it stacks over shared project state. A project
-    # filesystem holds only the two shared namespaces. What lives below either
-    # root depends on the repository, which this helper never learns: the
-    # unprivileged user owns both and builds them itself.
+    # filesystem holds only the shared namespaces, and the global one only the
+    # profile every run mounts read-only. What lives below any of those roots
+    # depends on the repository or on what the user installed, which this helper
+    # never learns: the unprivileged user owns them and builds them itself.
     case "$scope" in
       run)
         storage_root=/var/lib/pisafe/runs
@@ -324,6 +335,12 @@ provision:
         image_root=/var/lib/pisafe/project-images
         storage_bytes=@@PROJECT_STORAGE_BYTES@@
         directories=(@@PROJECT_NAMESPACES@@)
+        ;;
+      global)
+        storage_root=/var/lib/pisafe/global
+        image_root=/var/lib/pisafe/global-images
+        storage_bytes=@@GLOBAL_STORAGE_BYTES@@
+        directories=(@@GLOBAL_NAMESPACES@@)
         ;;
       *) exit 64 ;;
     esac

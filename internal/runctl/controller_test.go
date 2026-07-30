@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/profile"
 	"github.com/mpizenberg/pisafe/internal/runcontainer"
 	"github.com/mpizenberg/pisafe/internal/runcopy"
 	"github.com/mpizenberg/pisafe/internal/runid"
@@ -39,6 +40,7 @@ type fakeBackend struct {
 	failAt      string
 	failAfterAt string
 	snapshot    string
+	profile     profile.Record
 	container   *containerInspection
 	// applyWorkspace and applyPackage stand in for the run's storage: the
 	// capture runs against a real workspace and leaves real bundles behind.
@@ -101,6 +103,22 @@ func (backend *fakeBackend) EnsureProjectStorage(_ context.Context, _ string) er
 	return nil
 }
 
+func (backend *fakeBackend) EnsureGlobalStorage(_ context.Context) error {
+	backend.calls = append(backend.calls, backendCall{kind: "ensure-global-storage"})
+	if backend.failAt == "ensure-global-storage" {
+		return errors.New("ensure global storage failed")
+	}
+	return nil
+}
+
+func (backend *fakeBackend) ReadProfileRecord(_ context.Context) (profile.Record, error) {
+	backend.calls = append(backend.calls, backendCall{kind: "read-profile"})
+	if backend.failAt == "read-profile" {
+		return profile.Record{}, errors.New("read profile failed")
+	}
+	return backend.profile, nil
+}
+
 func (backend *fakeBackend) SelectCacheSnapshots(
 	_ context.Context,
 	_ string,
@@ -118,14 +136,14 @@ func (backend *fakeBackend) SelectCacheSnapshots(
 	return selected, nil
 }
 
-func (backend *fakeBackend) PrepareRunOverlays(
+func (backend *fakeBackend) PrepareRunLayout(
 	_ context.Context,
 	_ string,
 	_ []runcontainer.CacheMount,
 ) error {
-	backend.calls = append(backend.calls, backendCall{kind: "prepare-overlays"})
-	if backend.failAt == "prepare-overlays" {
-		return errors.New("prepare overlays failed")
+	backend.calls = append(backend.calls, backendCall{kind: "prepare-layout"})
+	if backend.failAt == "prepare-layout" {
+		return errors.New("prepare layout failed")
 	}
 	return nil
 }
@@ -752,11 +770,17 @@ func inspectionFromRunArgs(args []string, name string) *containerInspection {
 	return inspection
 }
 
+// bindMount mirrors what Podman reports for type=bind,src=…,dst=…,options.
+// Read-only is reported as a field of its own and never as an option, so a
+// mount is writable here unless its specification says otherwise.
 func bindMount(specification string) containerMount {
-	mount := containerMount{}
+	mount := containerMount{Writable: true}
 	for _, part := range strings.Split(specification, ",") {
 		key, value, found := strings.Cut(part, "=")
 		if !found {
+			if part == "ro" {
+				mount.Writable = false
+			}
 			continue
 		}
 		switch key {
@@ -782,6 +806,7 @@ func overlayMount(specification string) containerMount {
 		Source:      "/containers/storage/overlay/merged",
 		Destination: destination,
 		Options:     []string{"lowerdir=" + lower},
+		Writable:    true,
 	}
 	for _, option := range strings.Split(options, ",") {
 		if option != "O" {

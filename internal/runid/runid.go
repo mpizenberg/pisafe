@@ -49,6 +49,22 @@ func NewProject(repositoryRoot string) (Project, error) {
 	return project, nil
 }
 
+// NewPackageDirectory names the directory one installed npm package lives in.
+// A package name carries a scope and characters a path should not, so it is
+// reduced the same way a project directory is, and disambiguated by a digest of
+// the full name so two names can never reduce to one directory.
+func NewPackageDirectory(name string) (string, error) {
+	if name == "" {
+		return "", fmt.Errorf("package name is required")
+	}
+	digest := sha256.Sum256([]byte(name))
+	directory := projectSlug(name) + "-" + hex.EncodeToString(digest[:4])
+	if err := Validate(directory); err != nil {
+		return "", err
+	}
+	return directory, nil
+}
+
 func New(project string, now time.Time) (string, error) {
 	return newWithEntropy(project, now, rand.Reader)
 }
@@ -67,8 +83,8 @@ func newWithEntropy(project string, now time.Time, entropy io.Reader) (string, e
 	return id, nil
 }
 
-// projectSlug reduces a directory name to something a Git ref, a filesystem
-// path, and a container name all accept.
+// projectSlug reduces a name to something a Git ref, a filesystem path, and a
+// container name all accept.
 func projectSlug(project string) string {
 	var slug strings.Builder
 	lastSeparator := false
@@ -79,7 +95,7 @@ func projectSlug(project string) string {
 			slug.WriteRune(character)
 			lastSeparator = false
 		case unicode.IsSpace(character) || character == '-' ||
-			character == '_' || character == '.':
+			character == '_' || character == '.' || character == '/':
 			if slug.Len() > 0 && !lastSeparator {
 				slug.WriteByte('-')
 				lastSeparator = true

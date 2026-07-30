@@ -14,15 +14,23 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/profile"
 	"github.com/mpizenberg/pisafe/internal/runcopy"
 	"github.com/mpizenberg/pisafe/internal/runssh"
 )
 
 const (
-	runHome               = "/home/node"
+	runHome = "/home/node"
+	// packageRoot is where the read-only profile is mounted and workRoot where
+	// the run's own workspace is. The controller composes what this helper is
+	// told, and the helper still refuses a path outside either, so no
+	// configuration can point Pi at something that is not the run's.
+	packageRoot           = runHome + "/.pi/agent/npm"
+	workRoot              = "/work"
 	sshPublicKeySize      = 4096
 	modelsConfigSizeLimit = int64(1 << 20)
 	documentSizeLimit     = int64(1 << 20)
@@ -75,6 +83,11 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 			return usageError()
 		}
 		return configureIdentity(ctx, runHome, in)
+	case "configure-profile":
+		if len(args) != 1 {
+			return usageError()
+		}
+		return configureProfile(runHome, in)
 	case "serve-ssh":
 		if len(args) != 1 {
 			return usageError()
@@ -96,7 +109,7 @@ func usageError() error {
 			"|prepare-apply <keep|drop> <workspace> <package-directory>" +
 			"|diff <workspace>" +
 			"|export <workspace> <path>" +
-			"|configure-ssh|configure-inference|configure-identity" +
+			"|configure-ssh|configure-inference|configure-identity|configure-profile" +
 			"|serve-ssh|proxy-ssh>",
 	)
 }
@@ -146,7 +159,10 @@ func configureInference(home string, in io.Reader) error {
 	if err := writeAgentFile(agentDirectory, "models.json", content); err != nil {
 		return err
 	}
-	settings, err := pinnedTransportSettings(filepath.Join(agentDirectory, "settings.json"))
+	settings, err := updateAgentSettings(
+		filepath.Join(agentDirectory, "settings.json"),
+		func(settings map[string]any) { settings["transport"] = "sse" },
+	)
 	if err != nil {
 		return err
 	}
@@ -156,28 +172,107 @@ func configureInference(home string, in io.Reader) error {
 	return writeAgentFile(agentDirectory, "settings.json", settings)
 }
 
-// pinnedTransportSettings merges transport=sse into the existing settings,
-// returning nil when the pin is already in place. Settings Pi wrote during
-// the run are preserved; an unreadable file is replaced rather than allowed
-// to break resume.
-func pinnedTransportSettings(path string) ([]byte, error) {
-	settings := map[string]any{}
-	if existing, err := os.ReadFile(path); err == nil &&
-		int64(len(existing)) <= modelsConfigSizeLimit {
-		var parsed map[string]any
-		if json.Unmarshal(existing, &parsed) == nil {
-			settings = parsed
+// configureProfile tells Pi which packages the read-only profile offers and
+// which directory it may load project resources from. Both files it writes are
+// ones Pi writes too, so they are copied into the run rather than mounted, and
+// whatever Pi then makes of them dies with the run.
+func configureProfile(home string, in io.Reader) error {
+	configuration, err := decodeControllerDocument[profile.Configuration](
+		in,
+		"profile configuration",
+	)
+	if err != nil {
+		return err
+	}
+	packages := make([]any, 0, len(configuration.Packages))
+	for _, path := range configuration.Packages {
+		if !strings.HasPrefix(path, packageRoot+"/") || filepath.Clean(path) != path {
+			return fmt.Errorf("profile package %q is not in the mounted profile", path)
+		}
+		packages = append(packages, path)
+	}
+	workspace := configuration.Workspace
+	if !strings.HasPrefix(workspace, workRoot+"/") || filepath.Clean(workspace) != workspace {
+		return fmt.Errorf("workspace %q is not in the run", workspace)
+	}
+
+	agentDirectory := filepath.Join(filepath.Clean(home), ".pi", "agent")
+	if err := os.MkdirAll(agentDirectory, 0o700); err != nil {
+		return fmt.Errorf("create Pi agent directory: %w", err)
+	}
+	settings, err := updateAgentSettings(
+		filepath.Join(agentDirectory, "settings.json"),
+		func(settings map[string]any) { settings["packages"] = packages },
+	)
+	if err != nil {
+		return err
+	}
+	if settings != nil {
+		if err := writeAgentFile(agentDirectory, "settings.json", settings); err != nil {
+			return err
 		}
 	}
-	if settings["transport"] == "sse" {
+	return trustWorkspace(agentDirectory, workspace)
+}
+
+// trustWorkspace records the run's own workspace as trusted, so Pi loads the
+// repository's own settings, extensions, and skills without asking. Project
+// trust guards a Pi that runs outside a sandbox against the repository it opens;
+// here the container is that guard, and leaving the question unanswered would
+// cost a prompt every run and silently drop the repository's own configuration
+// whenever Pi runs non-interactively.
+func trustWorkspace(agentDirectory, workspace string) error {
+	path := filepath.Join(agentDirectory, "trust.json")
+	decisions := readAgentDocument(path)
+	if decisions[workspace] == true {
+		return nil
+	}
+	decisions[workspace] = true
+	content, err := json.MarshalIndent(decisions, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode project trust: %w", err)
+	}
+	return writeAgentFile(agentDirectory, "trust.json", append(content, '\n'))
+}
+
+// updateAgentSettings applies update to the run's Pi settings and returns the
+// result, or nil when they already say what update wants. Settings Pi wrote
+// during the run are preserved; an unreadable file is replaced rather than
+// allowed to break the run.
+func updateAgentSettings(path string, update func(map[string]any)) ([]byte, error) {
+	settings := readAgentDocument(path)
+	before, err := json.Marshal(settings)
+	if err != nil {
+		return nil, fmt.Errorf("encode agent settings: %w", err)
+	}
+	update(settings)
+	after, err := json.Marshal(settings)
+	if err != nil {
+		return nil, fmt.Errorf("encode agent settings: %w", err)
+	}
+	if bytes.Equal(before, after) {
 		return nil, nil
 	}
-	settings["transport"] = "sse"
 	merged, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("encode agent settings: %w", err)
 	}
 	return append(merged, '\n'), nil
+}
+
+// readAgentDocument reads one JSON object Pi maintains. Anything unreadable
+// reads as empty, because a run that cannot be configured is worse than one
+// that loses a setting the agent corrupted.
+func readAgentDocument(path string) map[string]any {
+	existing, err := os.ReadFile(path)
+	if err != nil || int64(len(existing)) > modelsConfigSizeLimit {
+		return map[string]any{}
+	}
+	var parsed map[string]any
+	if json.Unmarshal(existing, &parsed) != nil || parsed == nil {
+		return map[string]any{}
+	}
+	return parsed
 }
 
 func writeAgentFile(agentDirectory, name string, content []byte) error {

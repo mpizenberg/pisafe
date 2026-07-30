@@ -246,9 +246,36 @@ func TestSharedLayersKeepTheProjectSideReadOnlyToTheRun(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(strings.Join(args, " "), "/var/lib/pisafe/projects") {
-			t.Errorf("inspection container mounts project state:\n%s", strings.Join(args, " "))
+		joined := strings.Join(args, " ")
+		for _, shared := range []string{"/var/lib/pisafe/projects", "/var/lib/pisafe/global"} {
+			if strings.Contains(joined, shared) {
+				t.Errorf("inspection container mounts %s:\n%s", shared, joined)
+			}
 		}
+	}
+}
+
+// TestTheProfileMountsWhereAgentCodeWouldInstallGlobally is invariant 1 as the
+// container line expresses it: the one path Pi writes a global package to is
+// the profile, and it arrives read-only.
+func TestTheProfileMountsWhereAgentCodeWouldInstallGlobally(t *testing.T) {
+	args, err := DefaultSpec("run-123", testProjectKey, testImageID).RunArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	expected := "type=bind,src=/var/lib/pisafe/global/default/extensions," +
+		"dst=/home/node/.pi/agent/npm,ro,nodev,nosuid"
+	if !strings.Contains(joined, expected) {
+		t.Errorf("run args lack %q:\n%s", expected, joined)
+	}
+	// The record of what is pinned is pisafe's, not the run's.
+	if strings.Contains(joined, ProfilePinsPath()) {
+		t.Errorf("run args mount the profile record:\n%s", joined)
+	}
+	if got := ExtensionPackagePath("earendil-works-plan-mode-bf0f2759", "@earendil-works/plan-mode"); got !=
+		"/home/node/.pi/agent/npm/earendil-works-plan-mode-bf0f2759/node_modules/@earendil-works/plan-mode" {
+		t.Errorf("extension package path = %q", got)
 	}
 }
 

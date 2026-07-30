@@ -20,7 +20,12 @@ const (
 	DefaultTemporary  = int64(1024 * 1024 * 1024)
 	DefaultPersistent = int64(10 * 1024 * 1024 * 1024)
 	DefaultProject    = int64(10 * 1024 * 1024 * 1024)
-	DefaultWallClock  = int64(8 * 60 * 60)
+	// DefaultGlobal bounds the profile. It holds installed extensions and their
+	// dependencies for every project at once, which is a fraction of what one
+	// project's dependency cache is, and nothing writes it except a command the
+	// user runs deliberately.
+	DefaultGlobal    = int64(2 * 1024 * 1024 * 1024)
+	DefaultWallClock = int64(8 * 60 * 60)
 	// DefaultCacheGenerations bounds how many published generations one cache
 	// namespace keeps, beyond any a run may still mount. One is enough for the
 	// fallback to work — an unmatched key restores the newest generation, and
@@ -39,8 +44,14 @@ const (
 	// variable points it here, so the layer cannot accumulate arbitrary state.
 	containerCacheRoot   = "/cache"
 	containerSessionRoot = "/sessions"
+	// containerPackageRoot is where Pi installs the packages it shares between
+	// projects. The profile mounts there read-only, which is what makes
+	// pi install fail inside a run while pi -e, which installs to a temporary
+	// directory for one run, still works.
+	containerPackageRoot = containerHome + "/.pi/agent/npm"
 	guestStorageRoot     = "/var/lib/pisafe/runs"
 	guestProjectRoot     = "/var/lib/pisafe/projects"
+	guestGlobalRoot      = "/var/lib/pisafe/global"
 
 	// cacheNamespace holds one directory of immutable snapshots per declared
 	// cache. sessionsNamespace is the one shared directory that is not a cache:
@@ -48,6 +59,16 @@ const (
 	// session ID and nothing is implied by its presence.
 	cacheNamespace    = "cache"
 	sessionsNamespace = "sessions"
+
+	// ProfileName is the one profile every run mounts. The path keeps a name
+	// level so a second profile can exist later; nothing reads one from a run.
+	ProfileName = "default"
+
+	// extensionsNamespace holds one npm prefix root per installed extension,
+	// and pinsNamespace pisafe's record of what each was pinned to. Only the
+	// first is mounted: what a run needs is the packages, not the bookkeeping.
+	extensionsNamespace = "extensions"
+	pinsNamespace       = "pins"
 )
 
 // ProjectNamespaces is for the privileged helper, which allocates these two
@@ -55,6 +76,46 @@ const (
 // depends on the repository, which the helper must never learn about.
 func ProjectNamespaces() []string {
 	return []string{cacheNamespace, sessionsNamespace}
+}
+
+// GlobalNamespaces is the same for the profile filesystem. What lives below
+// depends on what the user installed, which the helper never learns either.
+func GlobalNamespaces() []string {
+	return []string{extensionsNamespace, pinsNamespace}
+}
+
+func ProfilePath() string {
+	return guestGlobalRoot + "/" + ProfileName
+}
+
+// ProfilePinsPath holds pisafe's record of every installed extension. It is
+// deliberately outside what a run mounts.
+func ProfilePinsPath() string {
+	return ProfilePath() + "/" + pinsNamespace
+}
+
+// Mount is one path a run receives whole, as opposed to an overlay it stacks
+// its own writes on.
+type Mount struct {
+	Destination string
+	Source      string
+}
+
+// ProfileMount is the shared read-only profile. Every run gets the same one,
+// so it depends on nothing about the run.
+func ProfileMount() Mount {
+	return Mount{
+		Destination: containerPackageRoot,
+		Source:      ProfilePath() + "/" + extensionsNamespace,
+	}
+}
+
+// ExtensionPackagePath is how a run names one installed extension in its Pi
+// settings. Naming a package by path rather than by npm source is what keeps
+// loading it inert: Pi reads what is there instead of reconciling it with a
+// version it would then try to install into a read-only store.
+func ExtensionPackagePath(directory, name string) string {
+	return ProfileMount().Destination + "/" + directory + "/node_modules/" + name
 }
 
 var (
@@ -311,6 +372,8 @@ func (spec Spec) RunArgs() ([]string, error) {
 		"--mount", "type=tmpfs,dst=/run,tmpfs-size=16777216,tmpfs-mode=0755,U=true",
 		"--mount", "type=bind,src=" + spec.WorkspacePath() + ",dst=" + containerWorkRoot + ",nodev,nosuid",
 		"--mount", "type=bind,src=" + spec.HomePath() + ",dst=" + containerHome + ",nodev,nosuid",
+		"--mount", "type=bind,src=" + ProfileMount().Source +
+			",dst=" + ProfileMount().Destination + ",ro,nodev,nosuid",
 	}
 	for _, overlay := range spec.ProjectOverlays() {
 		args = append(args, "--volume", overlay.volume())
@@ -419,6 +482,14 @@ func (spec Spec) ConfigureInferenceArgs() ([]string, error) {
 // run home. It runs once at creation, because the run home keeps it.
 func (spec Spec) ConfigureIdentityArgs() ([]string, error) {
 	return spec.configureArgs("configure-identity")
+}
+
+// ConfigureProfileArgs tells the run which profile packages to load and which
+// directory it may load project resources from. It runs after activation and
+// resume, because the profile changes between runs and the run's own copy of
+// what it says does not survive one.
+func (spec Spec) ConfigureProfileArgs() ([]string, error) {
+	return spec.configureArgs("configure-profile")
 }
 
 func (spec Spec) configureArgs(command string) ([]string, error) {

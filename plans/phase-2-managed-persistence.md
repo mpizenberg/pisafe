@@ -104,6 +104,31 @@ documentation. Reproduce with the commands under [Verification](#verification).
   version when it loads it.
 - **`settings.json` and `trust.json` must be copied in, not mounted
   read-only**, because Pi writes both. The copy dies with the run.
+- **A package on a read-only mount loads, and its code runs.** A package seeded
+  into the profile registered a CLI flag that `pi --help` then printed, offline,
+  in a container with a read-only root and no capabilities.
+- **A package named by absolute path is inert; one named `npm:` is not.** Pi
+  stats a local path and reads its resources. For an `npm:` source it compares
+  the installed version against the configured one at every startup and installs
+  when they disagree, which on a read-only store turns a disagreement into a
+  broken run start rather than a stale package.
+- **Pi installs global packages under `$PI_CODING_AGENT_DIR/npm`.** With the
+  profile mounted there, `pi install` fails on the read-only filesystem while
+  `pi -e` still works, because that path installs to a temporary directory.
+- **A bind mount is unreadable to a container unless it carries the container
+  SELinux label.** The VM enforces, and an unlabelled mount fails as EACCES
+  rather than as a mount error. Everything the storage helper allocates is
+  already relabelled, which is why the profile is allocated by the helper too.
+- **A mountpoint Podman creates inside the run home is root-owned.** Mounting
+  the profile at `~/.pi/agent/npm` without preparing the path first leaves
+  `.pi` and `.pi/agent` owned by the container's root, so Pi can no longer write
+  its own settings. pisafe creates the mountpoint before the run starts.
+- **`npm pack --dry-run --json` reports the version and integrity of what a
+  spec resolves to**, scoped packages included, which is the pin without
+  fetching anything into the profile.
+- **Podman reports a read-only bind as `RW: false`, not as an `ro` option.** A
+  manifest check that only reads mount options cannot tell a read-only profile
+  from a writable one.
 
 ### How caches are shared
 
@@ -175,6 +200,34 @@ promotion adds this run's transcripts to it when the run stops:
 - **Nothing is ever evicted.** A transcript is not reproducible, so the store
   grows with the project's history and `reset` leaves it alone.
 
+### How the profile is shared
+
+The profile is one filesystem every run mounts read-only, at the path Pi
+already uses for its global packages:
+
+```text
+/var/lib/pisafe/global/default/extensions/<directory>/node_modules/<name>
+/var/lib/pisafe/global/default/pins/extensions.json
+```
+
+- **The mount is Pi's own global package store**, `$PI_CODING_AGENT_DIR/npm`.
+  Nothing simulates the invariant: `pi install` fails because the store it
+  writes to is read-only, and `pi -e` works because that path never touches it.
+- **Each extension is its own npm prefix root**, so installing a second one
+  never merges dependency trees with the first. Pi loads packages with separate
+  module roots, so this is its model too.
+- **A run reaches a package by absolute path**, listed in the `packages` array
+  of the `settings.json` pisafe writes into the run home. This keeps loading
+  inert and keeps profile packages out of `pi update`, which is what "offered,
+  never applied" needs.
+- **`settings.json` and `trust.json` are written into the run**, not mounted:
+  Pi writes both, and a read-only copy would turn ordinary use into an I/O
+  error. What pisafe puts in them is the package list, the transport pin, and a
+  trust decision for the run's own workspace. Everything Pi then writes dies
+  with the run.
+- **Only pisafe writes the profile**, from the Mac, through a command the user
+  runs deliberately. A run has no writable handle on it at all.
+
 ### Project configuration
 
 Cache namespaces are declared by the project, in `.config/pisafe.json` at the
@@ -207,7 +260,8 @@ Project key: directory slug plus the first eight hex characters of the SHA-256
 of the Mac-side Git root path, e.g. `api-3f9c2a1b`.
 
 ```text
-/var/lib/pisafe/global/<profile>                    read-only mount, listed in packages
+/var/lib/pisafe/global/default/extensions/          read-only bind → ~/.pi/agent/npm
+/var/lib/pisafe/global/default/pins/                pisafe's record, mounted nowhere
 /var/lib/pisafe/projects/<key>/cache/<ns>/<snap>/   immutable snapshot → overlay lower
 /var/lib/pisafe/projects/<key>/sessions/            overlay lower → session dir
 /var/lib/pisafe/runs/<run>/workspace                bind mount → /work
@@ -216,14 +270,15 @@ of the Mac-side Git root path, e.g. `api-3f9c2a1b`.
 ```
 
 The privileged helper allocates only the two project namespaces (`cache`,
-`sessions`) and the run's bare `overlay` directory. Everything below them —
-snapshot directories and one upper/work pair per declared cache — is created by
-pisafe as the mapped UID, because the set of namespaces comes from the project
-and cannot be known when the filesystem is allocated.
+`sessions`), the two profile namespaces (`extensions`, `pins`), and the run's
+bare `overlay` directory. Everything below them — snapshot directories, one
+upper/work pair per declared cache, one prefix root per installed extension —
+is created by pisafe as the mapped UID, because none of it can be known when
+the filesystem is allocated.
 
-Both the project and the run filesystem are root-owned fixed-capacity ext4
-images allocated by that same helper, which is the only thing that mounts
-anything.
+The profile, the project, and the run filesystem are all root-owned
+fixed-capacity ext4 images allocated by that same helper, which is the only
+thing that mounts anything.
 
 ## Slices
 
@@ -259,10 +314,18 @@ anything.
       reads a finished run's transcript, a live run's transcript reaches no
       concurrent run, and neither a rewrite nor a deletion inside a run follows
       a transcript another run already promoted.
-- [ ] **6. Global profile and `pisafe extension install`.** Read-only profile
-      mount, copied-in `settings.json`/`trust.json`, installer pinning exact
-      version and integrity hash. Live test: a pinned extension loads in a run;
-      `pi install` inside a run fails; `pi -e` still works.
+- [x] **6a. The global profile mount.** A fourth storage scope for the profile,
+      mounted read-only at Pi's own global package store, with the `packages`
+      list and the workspace trust decision written into each run. Live test:
+      `TestLiveTheProfileLoadsAndStaysReadOnlyToTheRun` — a package seeded into
+      the profile registers its flag in `pi --help`, so its code ran; the
+      repository's own extension loads without a trust prompt; `pi -e` still
+      works; and the run can neither write the store nor `pi install` into it.
+- [ ] **6b. `pisafe extension install`.** Resolve the pin from npm's own report,
+      install that exact version into its own module root inside a throwaway
+      container, and stream it into the profile by rename. Live test: an
+      installed extension is pinned to an exact version and integrity, loads in
+      the next run, reinstalls idempotently, and can be removed.
 - [ ] **7. `pisafe extension update` and update notifications.** Offered, never
       applied. Depends on how pinning is recorded in slice 6.
 - [ ] **8. Global tools.** See the open question below — the mechanism is not
@@ -523,6 +586,52 @@ this document is the current truth, not an audit trail. These fold into
   ephemeral and keeping one goes through a pisafe command, without pisafe
   enforcing the split itself.
 
+- **The profile mounts at Pi's own global package store**, `~/.pi/agent/npm`,
+  rather than at a neutral path of pisafe's choosing. A neutral mount needs a
+  second, purely negative one — an empty read-only filesystem over the package
+  store — to keep `pi install` from silently succeeding into a run home and
+  vanishing at stop. One mount states the property directly: the global package
+  store is read-only, so installing globally fails and trying an extension for
+  one run still works.
+- **A run reaches a profile package by absolute path, not as an `npm:`
+  source.** Both spellings load, but an `npm:` source makes Pi re-check the
+  installed version at every startup and install when it disagrees, so a
+  read-only store turns any disagreement into a broken run start. A local path
+  is only stat'ed and read. It also keeps profile packages out of
+  `pi update --extensions`, which is what invariant 2 asks for.
+- **Each installed extension gets its own npm prefix root.** One shared
+  `node_modules` would mean merging dependency trees across installs, which is
+  the problem the cache design already refuses to solve, and Pi documents that
+  packages load with separate module roots anyway. The cost is duplicated
+  dependencies between extensions, which is disk on a bounded filesystem.
+- **The profile is a fourth scope of the privileged helper**, not a directory
+  pisafe creates. A bind mount is unreadable to a container without the
+  container SELinux label, and the helper is what applies it; the helper also
+  gives the profile the same root-owned fixed-capacity image and mapped-UID
+  ownership every other shared filesystem has. This is a helper change, so it
+  moves the security profile digest and forces one VM recreate.
+- **There is one profile, named `default`, and no run selects another.** The
+  path keeps the name level so a second profile can exist later, but nothing
+  reads a profile name from a run: a per-run profile would have to be recorded
+  in the manifest, and there is no use for one yet.
+- **A run's own workspace is trusted without asking.** *Flagged as a judgement
+  call.* Pi's project trust gates whether it loads `.pi/settings.json`,
+  `.pi/extensions`, project skills, and system-prompt files from the working
+  directory, and defaults to asking. Inside pisafe that guard protects nothing
+  the container does not already contain — repository content is exactly what
+  the sandbox exists to hold — while leaving it unanswered costs a prompt on
+  every run and silently drops a team's project settings in non-interactive
+  mode, which is the confusing failure. The consequence worth stating: a hostile
+  repository's `.pi/settings.json` loads and can pull its own packages from npm
+  inside the run. `pi --no-approve` overrides it for one run, and reverting the
+  decision is deleting one line from the trust file pisafe writes.
+- **A user-authored global `settings.json` is deferred.** The mechanism that
+  makes one possible — settings written into the run rather than mounted — lands
+  here, but nothing yet lets a user author the file: it lives in the VM, only
+  pisafe writes it, and copying the Mac's own `~/.pi/agent/settings.json` in
+  would carry host paths and host tool configuration across the boundary. Until
+  a command exists to edit it, the run's settings are what pisafe renders.
+
 ## Open questions
 
 - **Whether the declarable environment variables need an allowlist.** Slice 3
@@ -563,13 +672,17 @@ limactl shell pisafe podman run --rm --user 1000:1000 --network=none \
   -v <lower>:/cache:O,upperdir=<upper>,workdir=<work> \
   docker.io/library/alpine:3.22 sh -ec '...'
 
-# Profile loading from a genuinely read-only mount.
-limactl shell pisafe podman run --rm --user 1000:1000 --network=none \
-  --mount type=bind,src=<profile>,dst=/opt/pisafe/profile,ro \
-  <run-image> sh -ec 'pi list'
-
 # npm cache shape, to confirm it is still not safe to merge.
 ls ~/.npm/_cacache            # content-v2 (by content), index-v5 (by request URL)
+
+# Where Pi installs a global package, and whether a package it loads by path
+# stays inert. The profile mounts at the first, and the second is what keeps a
+# read-only store from turning a version disagreement into a broken run start.
+limactl shell pisafe -- podman run --rm --pull=never --network=none \
+  --entrypoint sh <run-image> -c '
+root=/usr/local/lib/node_modules/@earendil-works/pi-coding-agent
+grep -n "getNpmInstallPath(source, scope)" -A 12 "$root/dist/core/package-manager.js"
+grep -n "resolveLocalExtensionSource(parsed" -B 4 "$root/dist/core/package-manager.js"'
 
 # Session layout, naming, and what Pi locks. A relocated session directory must
 # still be flat, transcript names must still carry a UUID, and no session file

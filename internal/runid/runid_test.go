@@ -57,6 +57,29 @@ func TestProjectSlug(t *testing.T) {
 	}
 }
 
+// TestNewPackageDirectorySeparatesNamesThatReduceAlike matters because two
+// directories in one profile are two packages a run loads: a collision would
+// serve one package's code under another's name.
+func TestNewPackageDirectorySeparatesNamesThatReduceAlike(t *testing.T) {
+	scoped, err := NewPackageDirectory("@earendil-works/plan-mode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scoped != "earendil-works-plan-mode-bf0f2759" {
+		t.Fatalf("directory = %q", scoped)
+	}
+	flat, err := NewPackageDirectory("earendil-works-plan-mode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flat == scoped {
+		t.Fatalf("two package names share directory %q", flat)
+	}
+	if _, err := NewPackageDirectory(""); err == nil {
+		t.Fatal("an empty package name was accepted")
+	}
+}
+
 type errorReader struct{}
 
 func (errorReader) Read([]byte) (int, error) {

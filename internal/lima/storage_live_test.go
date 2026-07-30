@@ -152,7 +152,7 @@ func TestLivePublishedGenerationsAreImmutableAndDisposable(t *testing.T) {
 			t.Errorf("remove live run storage: %v", err)
 		}
 	}()
-	if err := transport.PrepareRunOverlays(ctx, runID, spec.Caches); err != nil {
+	if err := transport.PrepareRunLayout(ctx, runID, spec.Caches); err != nil {
 		t.Fatal(err)
 	}
 	runArgs, err := spec.RunArgs()
@@ -418,7 +418,7 @@ func liveRun(
 			t.Errorf("remove live run storage: %v", err)
 		}
 	})
-	if err := transport.PrepareRunOverlays(ctx, runID, spec.Caches); err != nil {
+	if err := transport.PrepareRunLayout(ctx, runID, spec.Caches); err != nil {
 		t.Fatal(err)
 	}
 	runArgs, err := spec.RunArgs()

@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/profile"
 )
 
 func TestMaterializeCommand(t *testing.T) {
@@ -528,6 +529,100 @@ func TestConfigureInferencePinsSSETransportPreservingSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertSettings(map[string]any{"transport": "sse"})
+}
+
+func TestConfigureProfileNamesThePackagesAndTrustsTheWorkspace(t *testing.T) {
+	home := t.TempDir()
+	agent := filepath.Join(home, ".pi", "agent")
+	installed := packageRoot + "/earendil-works-plan-mode-bf0f2759/node_modules/@earendil-works/plan-mode"
+	configure := func(packages ...string) error {
+		document, err := json.Marshal(profile.Configuration{
+			Packages:  packages,
+			Workspace: "/work/project",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return configureProfile(home, bytes.NewReader(document))
+	}
+	read := func(name string) map[string]any {
+		t.Helper()
+		content, err := os.ReadFile(filepath.Join(agent, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal(content, &parsed); err != nil {
+			t.Fatal(err)
+		}
+		return parsed
+	}
+
+	if err := configure(installed); err != nil {
+		t.Fatal(err)
+	}
+	settings := read("settings.json")
+	packages, _ := settings["packages"].([]any)
+	if len(packages) != 1 || packages[0] != installed {
+		t.Fatalf("settings packages = %v", settings["packages"])
+	}
+	// A repository's own extensions and settings load without a prompt,
+	// because inside a run the container is what project trust would guard.
+	if trust := read("trust.json"); trust["/work/project"] != true {
+		t.Fatalf("trust = %v", trust)
+	}
+
+	// The profile changes between runs, and what a run was told about the
+	// previous one must not survive as a package it can no longer load.
+	if err := os.WriteFile(
+		filepath.Join(agent, "settings.json"),
+		[]byte(`{"theme":"dark","packages":["`+installed+`"]}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := configure(); err != nil {
+		t.Fatal(err)
+	}
+	settings = read("settings.json")
+	if packages, _ := settings["packages"].([]any); len(packages) != 0 {
+		t.Fatalf("settings packages = %v", settings["packages"])
+	}
+	if settings["theme"] != "dark" {
+		t.Fatalf("settings dropped what Pi wrote: %v", settings)
+	}
+}
+
+func TestConfigureProfileRefusesWhatIsNotTheRuns(t *testing.T) {
+	for name, configuration := range map[string]profile.Configuration{
+		"package outside the profile": {
+			Packages:  []string{"/home/node/.ssh"},
+			Workspace: "/work/project",
+		},
+		"climbing package": {
+			Packages:  []string{packageRoot + "/../../.ssh"},
+			Workspace: "/work/project",
+		},
+		"workspace outside the run": {Workspace: "/etc"},
+		"climbing workspace":        {Workspace: "/work/../etc"},
+		"no workspace":              {},
+	} {
+		home := t.TempDir()
+		document, err := json.Marshal(configuration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := configureProfile(home, bytes.NewReader(document)); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+		if _, err := os.Stat(filepath.Join(home, ".pi", "agent", "trust.json")); err == nil {
+			t.Errorf("%s left a trust decision behind", name)
+		}
+	}
+	home := t.TempDir()
+	if err := configureProfile(home, strings.NewReader(`{"unknown":1}`)); err == nil {
+		t.Error("a configuration with an unknown field was accepted")
+	}
 }
 
 func TestConfigureInferenceFailsClosed(t *testing.T) {
