@@ -1,6 +1,6 @@
 # Phase 2 — managed persistence
 
-Working document. Last updated: 2026-07-28.
+Working document. Last updated: 2026-07-30.
 
 This is the plan and progress log for Phase 2, and it is **temporary by
 design**: when Phase 2 lands, its invariants and mechanisms fold back into
@@ -208,7 +208,13 @@ already uses for its global packages:
 ```text
 /var/lib/pisafe/global/default/extensions/<directory>/node_modules/<name>
 /var/lib/pisafe/global/default/pins/extensions.json
+/var/lib/pisafe/global/default/pins/updates.json
 ```
+
+Beside the pins, `pins/updates.json` records what npm last said those names
+resolve to. Nothing installs from it and no run reads it: it exists so the user
+can be told what is available without pisafe reaching the network while they
+wait, and it is refreshed at most once a day, when a run stops.
 
 - **The mount is Pi's own global package store**, `$PI_CODING_AGENT_DIR/npm`.
   Nothing simulates the invariant: `pi install` fails because the store it
@@ -328,8 +334,15 @@ thing that mounts anything.
       is the registry's own answer, bytes that hash to anything else never reach
       the profile, the installed tree is that exact release, reinstalling
       replaces rather than accumulates, and the next run resolves the package.
-- [ ] **7. `pisafe extension update` and update notifications.** Offered, never
-      applied. Depends on how pinning is recorded in slice 6.
+- [x] **7. `pisafe extension update` and update notifications.** Ask npm what
+      the installed names resolve to now, keep the answer beside the pins, and
+      apply it only when the user names a package. The offer is made when a run
+      stops, so no run start depends on the registry. Live test:
+      `TestLiveAnAvailableUpdateIsOfferedAndNeverApplied` — a check leaves the
+      pin, the tree, and the mounted directory exactly as they were; what it
+      found survives storage and is pending only while the record disagrees
+      with it; and applying goes through the same fetch-and-verify path an
+      install takes.
 - [ ] **8. Global tools.** See the open question below — the mechanism is not
       yet decided.
 - [ ] **9. `gc` sweep of project stores.** Reclaim whole project filesystems
@@ -660,6 +673,48 @@ this document is the current truth, not an audit trail. These fold into
 - **Replacing an extension swaps the new tree in before the old one goes**, so a
   run starting during an install finds one release or the other rather than a
   path that briefly does not exist.
+
+- **The offer is made when a run stops, not when one starts.** Starting a run is
+  when the user is waiting and when nothing may depend on the registry being
+  reachable; stopping one is when they have finished, when slow best-effort work
+  already happens, and when they might actually act on it. So `pisafe stop`
+  refreshes the check and prints what is available, run start is untouched, and
+  no run start reaches npm at all. Checking in the background at start was not
+  taken: it buys a fresher answer at the cost of a network call on the path that
+  matters most.
+- **A check is repeated from what it found, and refreshed at most once a day.**
+  The offer is printed at every stop from `pins/updates.json`, so the reminder
+  does not depend on the interval and the network is touched on one stop a day.
+  A check that resolved no package at all does not count as having happened, so
+  an unreachable registry leaves a standing offer alone rather than erasing it.
+  The whole check is bounded to 45 seconds, against the ten minutes an install
+  container is allowed: a stop must never wait on npm.
+- **The offers file is advisory, and reading it cannot fail.** Anything absent,
+  oversized, malformed, or of an unknown shape means the same thing as never
+  having checked, and an entry that is not a name and an exact version is
+  dropped rather than printed — these strings reach a terminal. Failing a stop
+  or a listing because a display cache is corrupt would be the wrong trade, and
+  the next check replaces it either way.
+- **An offer carries no integrity hash, and applying one re-resolves.** The
+  offer names a version and nothing else, so it can never be what fetched bytes
+  are checked against; `pisafe extension update <name>` runs the same
+  resolve-then-verify install path a first install does. It also means an offer
+  can go stale between the check and the apply without weakening anything.
+- **What is pending is derived, never stored.** An offer is shown only while the
+  record disagrees with it, so applying an update or removing a package silences
+  it without anything having to clear the file, and a wrong entry can only
+  produce a wrong sentence. This is also why pisafe does not order versions: it
+  reports that the registry's answer differs from the pin, rather than claiming
+  one is newer, which would mean implementing semver comparison to say something
+  no decision depends on.
+- **An update applied while runs are live reaches them.** *Verified rather than
+  reasoned about.* The run mounts the extensions directory itself, so replacing
+  a tree by rename inside it is visible immediately to a container already
+  holding that mount — a live container was shown reading 6.0.0 through the same
+  mount that had just served it 7.0.0. A Pi process keeps whatever it loaded at
+  startup, but one started later in that same run gets the new release. Pinning
+  still means no update happens without the user asking for it, which is what
+  invariant 2 requires.
 
 ## Open questions
 

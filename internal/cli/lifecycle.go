@@ -42,6 +42,9 @@ func runStop(ctx context.Context, runID string, out io.Writer) error {
 	if manifest.LastError != "" {
 		fmt.Fprintf(out, "Warning: %s\n", manifest.LastError)
 	}
+	// The stopped run's own image is enough to ask npm a question, which keeps
+	// the check off the path that installs and verifies the current one.
+	notifyExtensionUpdates(ctx, lima.NewTransport(), manifest.Image, out)
 	return nil
 }
 

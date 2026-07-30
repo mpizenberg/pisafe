@@ -67,7 +67,7 @@ chmod -R go-w "`+root+`"
 // was installed before the test when it ends.
 func seedProfileRecord(t *testing.T, ctx context.Context, record profile.Record) {
 	t.Helper()
-	path := runcontainer.ProfilePinsPath() + "/extensions.json"
+	path := runcontainer.ProfilePinsPath() + "/" + profile.RecordFile
 	write := func(t *testing.T, ctx context.Context, record profile.Record) {
 		content, err := record.Encode()
 		if err != nil {
@@ -94,14 +94,157 @@ chown 1000:1000 "`+path+`"
 	})
 }
 
+// preserveProfileOffers puts back what the last check found when the test ends,
+// so a test that asks npm a question does not leave its answer standing.
+func preserveProfileOffers(t *testing.T, ctx context.Context) {
+	t.Helper()
+	previous, err := lima.NewTransport().ReadProfileOffers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if len(previous.Latest) == 0 {
+			runLive(
+				t, context.Background(), "podman", "unshare", "rm", "-f", "--",
+				runcontainer.ProfilePinsPath()+"/"+profile.OffersFile,
+			)
+			return
+		}
+		if err := lima.NewTransport().WriteProfileOffers(context.Background(), previous); err != nil {
+			t.Errorf("restore profile offers: %v", err)
+		}
+	})
+}
+
 // liveIsNumber is a published release that will never change: npm refuses to
 // republish a version, so its integrity is a constant the test can assert
-// against rather than merely record.
+// against rather than merely record. liveIsNumberOld is an earlier release of
+// the same package, which is what makes an update available without pisafe
+// having to wait for one.
 const (
 	liveIsNumber          = "is-number@7.0.0"
+	liveIsNumberOld       = "is-number@6.0.0"
 	liveIsNumberIntegrity = "sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741" +
 		"+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng=="
 )
+
+// TestLiveAnAvailableUpdateIsOfferedAndNeverApplied is invariant 2's second
+// half. Asking npm what an installed extension's name resolves to now must
+// change nothing at all — not the pin, not the tree, not the mounted directory
+// — and moving to what was offered must happen only when the user says so, and
+// only through the same fetch-and-verify path an install takes.
+func TestLiveAnAvailableUpdateIsOfferedAndNeverApplied(t *testing.T) {
+	if os.Getenv("PISAFE_LIVE_LIMA") != "1" {
+		t.Skip("set PISAFE_LIVE_LIMA=1 to test the dedicated VM")
+	}
+	imageID := liveImageID(t)
+	ensureLiveVM(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	transport := lima.NewTransport()
+	if err := transport.EnsureGlobalStorage(ctx); err != nil {
+		t.Fatal(err)
+	}
+	seedProfileRecord(t, ctx, profile.Record{Version: profile.RecordVersion})
+	preserveProfileOffers(t, ctx)
+
+	superseded, err := transport.ResolveExtension(ctx, imageID, liveIsNumberOld)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if superseded.Version != "6.0.0" {
+		t.Fatalf("resolved %+v, want the exact version asked for", superseded)
+	}
+	if err := transport.InstallExtension(ctx, imageID, superseded); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := transport.RemoveExtension(context.Background(), superseded); err != nil {
+			t.Errorf("remove live extension: %v", err)
+		}
+	})
+	record := profile.Record{Version: profile.RecordVersion}.With(superseded)
+	if err := transport.WriteProfileRecord(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+
+	checkedAt := time.Now()
+	offers, err := transport.ResolveExtensionUpdates(ctx, imageID, record, checkedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offers.Latest) != 1 || offers.Latest[0] != (profile.Offer{
+		Name:    "is-number",
+		Version: "7.0.0",
+	}) {
+		t.Fatalf("check found %+v", offers.Latest)
+	}
+
+	// The whole point: a check is a question, so the profile after it has to be
+	// byte-for-byte the profile before it.
+	installedManifest := runcontainer.ExtensionInstallRoot(superseded.Directory) +
+		"/node_modules/is-number/package.json"
+	if got := runLive(t, ctx, "podman", "unshare", "grep", "-c", `"version": "6.0.0"`, installedManifest); got != "1" {
+		t.Errorf("the check changed the installed tree: %q", got)
+	}
+	unchanged, err := transport.ReadProfileRecord(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unchanged.Extensions) != 1 || unchanged.Extensions[0] != superseded {
+		t.Fatalf("the check changed the record: %+v", unchanged.Extensions)
+	}
+	if listed := runLive(
+		t, ctx, "podman", "unshare", "ls", "-A", runcontainer.ProfileMount().Source,
+	); listed != superseded.Directory {
+		t.Errorf("the check left %q in the profile, want only %q", listed, superseded.Directory)
+	}
+
+	// What was found survives storage, because the offer is repeated to the user
+	// long after the check that found it.
+	if err := transport.WriteProfileOffers(ctx, offers); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := transport.ReadProfileOffers(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stored.CheckedAt.Equal(checkedAt) {
+		t.Errorf("checkedAt = %v, want %v", stored.CheckedAt, checkedAt)
+	}
+	pending := record.Pending(stored)
+	if len(pending) != 1 || pending[0] != (profile.Update{
+		Name:      "is-number",
+		Installed: "6.0.0",
+		Available: "7.0.0",
+	}) {
+		t.Fatalf("pending = %+v", pending)
+	}
+
+	// Applying is an install: the offer names a version, and the bytes are still
+	// checked against what the registry answers when they are fetched.
+	resolved, err := transport.ResolveExtension(ctx, imageID, "is-number")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Version != "7.0.0" || resolved.Integrity != liveIsNumberIntegrity {
+		t.Fatalf("resolved %+v", resolved)
+	}
+	if err := transport.InstallExtension(ctx, imageID, resolved); err != nil {
+		t.Fatal(err)
+	}
+	updated := record.With(resolved)
+	if err := transport.WriteProfileRecord(ctx, updated); err != nil {
+		t.Fatal(err)
+	}
+	if got := runLive(t, ctx, "podman", "unshare", "grep", "-c", `"version": "7.0.0"`, installedManifest); got != "1" {
+		t.Errorf("the applied update did not replace the tree: %q", got)
+	}
+	if pending := updated.Pending(stored); len(pending) != 0 {
+		t.Errorf("an applied update is still offered: %+v", pending)
+	}
+}
 
 // TestLiveAnInstalledExtensionIsPinnedToWhatWasFetched is what `pisafe
 // extension install` is for. The version and hash pisafe records have to be the

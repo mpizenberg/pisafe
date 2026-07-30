@@ -331,7 +331,6 @@ func TestExtensionRefusesWhatItCannotPinBeforeReachingTheVM(t *testing.T) {
 	var output bytes.Buffer
 	for _, args := range [][]string{
 		{"extension"},
-		{"extension", "update"},
 		{"extension", "install"},
 		{"extension", "install", "a", "b"},
 		{"extension", "list", "extra"},
@@ -340,6 +339,12 @@ func TestExtensionRefusesWhatItCannotPinBeforeReachingTheVM(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "usage: pisafe extension") {
 			t.Fatalf("Run(%v) error = %v", args, err)
 		}
+	}
+	// An update names packages rather than a spec, and every name is bounded
+	// before the command reaches the VM at all.
+	err := Run(context.Background(), []string{"extension", "update", "is-number;id"}, nil, &output)
+	if err == nil || !strings.Contains(err.Error(), "is not an npm package name") {
+		t.Fatalf("update with an unpinnable name: error = %v", err)
 	}
 	for name, spec := range map[string]string{
 		"range":       "is-number@^7.0.0",

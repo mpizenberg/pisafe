@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/mpizenberg/pisafe/internal/runid"
 )
@@ -19,6 +20,17 @@ import (
 // understand is refused rather than guessed at, because what it names is
 // mounted into every run.
 const RecordVersion = 1
+
+// OffersVersion is the shape of the file recording what npm last said. It is
+// separate from RecordVersion because the two files change for different
+// reasons: one is what runs load, the other is what a terminal is told.
+const OffersVersion = 1
+
+// The two files pisafe keeps beside the profile. Neither is mounted into a run.
+const (
+	RecordFile = "extensions.json"
+	OffersFile = "updates.json"
+)
 
 // maxRecordBytes bounds the pin file. It holds a few hundred bytes per
 // installed extension, so anything near this is corruption.
@@ -153,6 +165,118 @@ func (record Record) Without(name string) (Record, Extension, bool) {
 		updated.Extensions = append(updated.Extensions, existing)
 	}
 	return updated, removed, found
+}
+
+// Find reports what one extension is pinned to, and whether it is installed at
+// all.
+func (record Record) Find(name string) (Extension, bool) {
+	for _, existing := range record.Extensions {
+		if existing.Name == name {
+			return existing, true
+		}
+	}
+	return Extension{}, false
+}
+
+// Offer is what npm resolved one installed extension's name to when it was
+// last asked. It carries no integrity hash: applying an offer re-resolves and
+// verifies what it fetches, so an offer is never something an install is
+// checked against.
+type Offer struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+// Offers is the whole of what the last check learned. It is advisory — nothing
+// installs from it, no run reads it, and it exists so a user is told what is
+// available without pisafe reaching the network while they wait.
+type Offers struct {
+	Version   int       `json:"version"`
+	CheckedAt time.Time `json:"checkedAt"`
+	Latest    []Offer   `json:"latest"`
+}
+
+// NewOffers records what a check found.
+func NewOffers(checkedAt time.Time, latest []Offer) Offers {
+	return Offers{Version: OffersVersion, CheckedAt: checkedAt, Latest: latest}
+}
+
+// ParseOffers reads what the last check found. It cannot fail: anything
+// missing, oversized, malformed, or of a shape this pisafe does not know means
+// the same thing as never having checked, and the next check replaces it. An
+// entry that is not a name and an exact version is dropped rather than
+// carried, because these strings reach a terminal.
+func ParseOffers(content []byte) Offers {
+	empty := Offers{Version: OffersVersion}
+	if len(content) > maxRecordBytes {
+		return empty
+	}
+	var offers Offers
+	if err := json.Unmarshal(content, &offers); err != nil || offers.Version != OffersVersion {
+		return empty
+	}
+	kept := make([]Offer, 0, len(offers.Latest))
+	for _, offer := range offers.Latest {
+		if packageNamePattern.MatchString(offer.Name) && versionPattern.MatchString(offer.Version) {
+			kept = append(kept, offer)
+		}
+	}
+	offers.Latest = kept
+	return offers
+}
+
+// Encode renders the offers for storage.
+func (offers Offers) Encode() ([]byte, error) {
+	offers.Version = OffersVersion
+	slices.SortFunc(offers.Latest, func(left, right Offer) int {
+		return strings.Compare(left.Name, right.Name)
+	})
+	content, err := json.MarshalIndent(offers, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encode profile offers: %w", err)
+	}
+	return append(content, '\n'), nil
+}
+
+// Stale reports whether a check is due. A check that never happened is stale,
+// which is what makes the first one happen.
+func (offers Offers) Stale(now time.Time, interval time.Duration) bool {
+	return now.Sub(offers.CheckedAt) >= interval
+}
+
+// Update is one installed extension whose pin is not what npm last resolved
+// its name to. It is stated as a difference rather than an upgrade: pisafe
+// does not order versions, it reports that the registry's answer changed.
+type Update struct {
+	Name      string
+	Installed string
+	Available string
+}
+
+// Pending reports what is on offer. The record is the authority, so an offer
+// for something no longer installed is invisible, and applying one stops it
+// being offered without anything having to clear the file.
+func (record Record) Pending(offers Offers) []Update {
+	available := make(map[string]string, len(offers.Latest))
+	for _, offer := range offers.Latest {
+		available[offer.Name] = offer.Version
+	}
+	var updates []Update
+	for _, extension := range record.Extensions {
+		version, offered := available[extension.Name]
+		if !offered || version == extension.Version {
+			continue
+		}
+		updates = append(updates, Update{
+			Name:      extension.Name,
+			Installed: extension.Version,
+			Available: version,
+		})
+	}
+	slices.SortFunc(updates, func(left, right Update) int {
+		return strings.Compare(left.Name, right.Name)
+	})
+	return updates
 }
 
 // Configuration is what one run is told: the packages it loads, and the one

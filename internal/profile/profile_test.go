@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func planMode() Extension {
@@ -168,5 +169,89 @@ func TestOnlyAnExactlyPinnedNpmPackageMayBeInstalled(t *testing.T) {
 		if err := ValidateIntegrity(integrity); err == nil {
 			t.Errorf("%q was accepted as an integrity hash", integrity)
 		}
+	}
+}
+
+// TestAnOfferIsAdvisoryAndNeverBreaksWhatReadsIt covers the whole offers path.
+// The file is what a terminal is told rather than what a run loads, so nothing
+// in it may fail the command that read it.
+func TestAnOfferIsAdvisoryAndNeverBreaksWhatReadsIt(t *testing.T) {
+	for name, content := range map[string][]byte{
+		"absent":        nil,
+		"blank":         []byte(""),
+		"not json":      []byte("{{{"),
+		"unknown shape": []byte(`{"version":99,"latest":[{"name":"is-number","version":"7.0.0"}]}`),
+		"oversized":     []byte(strings.Repeat("x", maxRecordBytes+1)),
+		"wrong type":    []byte(`{"version":1,"latest":"everything"}`),
+	} {
+		offers := ParseOffers(content)
+		if offers.Version != OffersVersion || len(offers.Latest) != 0 {
+			t.Errorf("%s: offers = %+v", name, offers)
+		}
+		if !offers.Stale(time.Now(), time.Hour) {
+			t.Errorf("%s: an unreadable offer was treated as a check that happened", name)
+		}
+	}
+	// An offer reaches a terminal, so an entry pisafe could not have written is
+	// dropped rather than printed.
+	offers := ParseOffers([]byte(`{"version":1,"latest":[
+		{"name":"is-number","version":"7.0.0"},
+		{"name":"is-number\u001b[2J","version":"7.0.0"},
+		{"name":"cowsay","version":"latest"}
+	]}`))
+	if len(offers.Latest) != 1 || offers.Latest[0].Name != "is-number" {
+		t.Fatalf("offers = %+v", offers.Latest)
+	}
+}
+
+// TestAnOfferSurvivesStorageAndOnlyDiffersFromWhatIsInstalled covers what the
+// user is told: an offer is pending only while the record disagrees with it,
+// so applying an update or removing a package silences it without anything
+// having to clear the file.
+func TestAnOfferSurvivesStorageAndOnlyDiffersFromWhatIsInstalled(t *testing.T) {
+	checkedAt := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	stored, err := NewOffers(checkedAt, []Offer{
+		{Name: "is-number", Version: "7.0.0"},
+		{Name: planMode().Name, Version: "1.2.3"},
+	}).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	offers := ParseOffers(stored)
+	if !offers.CheckedAt.Equal(checkedAt) {
+		t.Fatalf("checkedAt = %v", offers.CheckedAt)
+	}
+	if offers.Stale(checkedAt.Add(23*time.Hour), 24*time.Hour) {
+		t.Error("a check made 23 hours ago was due again after 24")
+	}
+	if !offers.Stale(checkedAt.Add(25*time.Hour), 24*time.Hour) {
+		t.Error("a check made 25 hours ago was not due again after 24")
+	}
+
+	installed := Extension{
+		Name:      "is-number",
+		Version:   "6.0.0",
+		Integrity: "sha512-" + strings.Repeat("B", 86) + "==",
+		Directory: "is-number-5e0e83b1",
+	}
+	record := Record{Version: RecordVersion}.With(installed).With(planMode())
+	updates := record.Pending(offers)
+	if len(updates) != 1 {
+		t.Fatalf("pending = %+v", updates)
+	}
+	if updates[0] != (Update{Name: "is-number", Installed: "6.0.0", Available: "7.0.0"}) {
+		t.Errorf("update = %+v", updates[0])
+	}
+	applied := installed
+	applied.Version = "7.0.0"
+	if pending := record.With(applied).Pending(offers); len(pending) != 0 {
+		t.Errorf("an applied update is still offered: %+v", pending)
+	}
+	removed, _, _ := record.Without("is-number")
+	if pending := removed.Pending(offers); len(pending) != 0 {
+		t.Errorf("a removed extension is still offered: %+v", pending)
+	}
+	if pending := record.Pending(Offers{Version: OffersVersion}); len(pending) != 0 {
+		t.Errorf("an unchecked profile offered %+v", pending)
 	}
 }

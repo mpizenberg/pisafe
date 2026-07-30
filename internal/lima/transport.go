@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/profile"
@@ -141,15 +142,15 @@ done
 ' pisafe-layout "$@"
 `
 
-	// writeProfileRecordScript replaces what the profile has installed. The
-	// record arrives by rename, so a reader either sees the whole of it or the
-	// whole of what it replaced, and a run starting mid-install is never
+	// writeProfileFileScript replaces one of the files pisafe keeps beside the
+	// profile. It arrives by rename, so a reader either sees the whole of it or
+	// the whole of what it replaced, and a run starting mid-install is never
 	// configured from half a record.
-	writeProfileRecordScript = `set -eu
+	writeProfileFileScript = `set -eu
 exec podman unshare sh -ceu '
 set -eu
-record=$1/extensions.json
-staging=$1/.extensions.json
+record=$1/$2
+staging=$1/.$2
 cat >"$staging"
 chown 1000:1000 "$staging"
 chmod 0600 "$staging"
@@ -186,13 +187,14 @@ podman unshare mv -T "$staging" "$target"
 exec podman unshare rm -rf -- "$1"
 `
 
-	// readProfileRecordScript prints what the profile has installed. An absent
-	// record is an empty one: a user who has installed nothing still has a
-	// valid profile, and every run mounts it.
-	readProfileRecordScript = `set -eu
+	// readProfileFileScript prints one of the files pisafe keeps beside the
+	// profile. An absent file is an empty one: a user who has installed nothing
+	// and never checked for an update still has a valid profile, and every run
+	// mounts it.
+	readProfileFileScript = `set -eu
 exec podman unshare sh -ceu '
 set -eu
-record=$1/extensions.json
+record=$1/$2
 test -f "$record" || exit 0
 exec cat "$record"
 ' pisafe-profile "$@"
@@ -585,13 +587,27 @@ func (transport Transport) EnsureGlobalStorage(ctx context.Context) error {
 // run start, because a run's copy of what the profile says does not survive the
 // run and the profile may have changed since the last one.
 func (transport Transport) ReadProfileRecord(ctx context.Context) (profile.Record, error) {
-	output, err := transport.shellScript(
-		ctx, nil, readProfileRecordScript, runcontainer.ProfilePinsPath(),
-	)
+	output, err := transport.readProfileFile(ctx, profile.RecordFile)
 	if err != nil {
 		return profile.Record{}, fmt.Errorf("read profile record: %w", err)
 	}
 	return profile.ParseRecord(output)
+}
+
+// ReadProfileOffers reports what npm last said the installed extensions
+// resolve to.
+func (transport Transport) ReadProfileOffers(ctx context.Context) (profile.Offers, error) {
+	output, err := transport.readProfileFile(ctx, profile.OffersFile)
+	if err != nil {
+		return profile.Offers{}, fmt.Errorf("read profile offers: %w", err)
+	}
+	return profile.ParseOffers(output), nil
+}
+
+func (transport Transport) readProfileFile(ctx context.Context, name string) ([]byte, error) {
+	return transport.shellScript(
+		ctx, nil, readProfileFileScript, runcontainer.ProfilePinsPath(), name,
+	)
 }
 
 // PublishCacheSnapshot keeps what one run added to a declared cache as a new
@@ -700,15 +716,41 @@ func (transport Transport) WriteProfileRecord(
 	if err != nil {
 		return err
 	}
-	if _, err := transport.shellScript(
-		ctx,
-		bytes.NewReader(content),
-		writeProfileRecordScript,
-		runcontainer.ProfilePinsPath(),
-	); err != nil {
+	if err := transport.writeProfileFile(ctx, profile.RecordFile, content); err != nil {
 		return fmt.Errorf("write profile record: %w", err)
 	}
 	return nil
+}
+
+// WriteProfileOffers keeps what a check learned, so the offer can be repeated
+// to the user without asking npm again.
+func (transport Transport) WriteProfileOffers(
+	ctx context.Context,
+	offers profile.Offers,
+) error {
+	content, err := offers.Encode()
+	if err != nil {
+		return err
+	}
+	if err := transport.writeProfileFile(ctx, profile.OffersFile, content); err != nil {
+		return fmt.Errorf("write profile offers: %w", err)
+	}
+	return nil
+}
+
+func (transport Transport) writeProfileFile(
+	ctx context.Context,
+	name string,
+	content []byte,
+) error {
+	_, err := transport.shellScript(
+		ctx,
+		bytes.NewReader(content),
+		writeProfileFileScript,
+		runcontainer.ProfilePinsPath(),
+		name,
+	)
+	return err
 }
 
 // ResolveExtension asks npm what a package spec resolves to right now. The
@@ -728,6 +770,33 @@ func (transport Transport) ResolveExtension(
 		return profile.Extension{}, fmt.Errorf("resolve %s: %w", packageSpec, err)
 	}
 	return parseResolvedExtension(output)
+}
+
+// ResolveExtensionUpdates asks npm what each installed extension's name
+// resolves to now. It installs nothing and touches the profile not at all: the
+// answer is only what an offer is made from, and applying one resolves again.
+// A package that cannot be resolved is left out rather than failing the check,
+// because one unpublished or renamed package should not hide the others.
+func (transport Transport) ResolveExtensionUpdates(
+	ctx context.Context,
+	imageID string,
+	record profile.Record,
+	checkedAt time.Time,
+) (profile.Offers, error) {
+	latest := make([]profile.Offer, 0, len(record.Extensions))
+	var failures []error
+	for _, extension := range record.Extensions {
+		resolved, err := transport.ResolveExtension(ctx, imageID, extension.Name)
+		if err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		latest = append(latest, profile.Offer{
+			Name:    resolved.Name,
+			Version: resolved.Version,
+		})
+	}
+	return profile.NewOffers(checkedAt, latest), errors.Join(failures...)
 }
 
 // parseResolvedExtension reads npm's report. It arrives from a container with

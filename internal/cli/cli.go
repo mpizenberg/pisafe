@@ -140,6 +140,10 @@ Usage:
                    read-only, pinned to an exact version and integrity hash.
                    Runs cannot install one themselves; inside a run, pi -e
                    still tries a package for that run alone.
+  pisafe extension update [PACKAGE...]
+                   Named, move those pins to what npm resolves them to now.
+                   Named none, report what is available and change nothing:
+                   an update is offered, never applied on pisafe's initiative.
   pisafe extension remove PACKAGE
                    Take an extension out of the profile
   pisafe extension list
