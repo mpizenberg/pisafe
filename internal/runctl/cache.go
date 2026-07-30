@@ -25,7 +25,7 @@ func (controller Controller) publishCaches(
 	spec := specForManifest(manifest, manifest.Image)
 	records, err := controller.store.List()
 	if err != nil {
-		return err
+		return fmt.Errorf("publish run caches: %w", err)
 	}
 	var failures []error
 	for _, cache := range manifest.Caches {
@@ -43,7 +43,10 @@ func (controller Controller) publishCaches(
 			failures = append(failures, err)
 		}
 	}
-	return errors.Join(failures...)
+	if failures == nil {
+		return nil
+	}
+	return fmt.Errorf("publish run caches: %w", errors.Join(failures...))
 }
 
 // ResetProjectCache empties one project's shared cache, which is what makes

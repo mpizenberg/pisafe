@@ -89,6 +89,19 @@ documentation. Reproduce with the commands under [Verification](#verification).
 - **Sessions relocate.** `PI_CODING_AGENT_SESSION_DIR` is read by Pi — the
   literal never appears in `dist` because the name is assembled from `APP_NAME`
   at build time — and `--session-dir` overrides it. Both are ours to set.
+- **A relocated session directory is flat.** Pi's default layout segregates
+  transcripts per working directory under `sessions/--<cwd>--/`, but
+  `SessionManager.list` and `listAll` use a directory handed to them verbatim,
+  so the store pisafe points Pi at holds transcripts directly with no cwd level.
+  Listing a relocated directory additionally filters by each transcript's own
+  recorded cwd, which is one value for every run of a project.
+- **A transcript's name cannot collide, and Pi deliberately never locks one.**
+  The file is `<ISO timestamp>_<randomUUID>.jsonl`, appended a line at a time.
+  Pi does use `proper-lockfile`, for `settings.json`, `trust.json` and its auth
+  store — the files it genuinely shares — and for no session file: concurrent
+  agents in one project share a directory and never a file. The only case where
+  Pi rewrites an existing transcript is migrating it to the current session
+  version when it loads it.
 - **`settings.json` and `trust.json` must be copied in, not mounted
   read-only**, because Pi writes both. The copy dies with the run.
 
@@ -132,6 +145,35 @@ Sessions are not a cache and do not use this. They have no key and no
 invalidation: filenames are session IDs, nothing is implied by a file's
 presence, and folding a run's transcripts into the project store is pure
 addition.
+
+### How sessions are shared
+
+The store is one flat directory, mounted as the sessions overlay's lower, and
+promotion adds this run's transcripts to it when the run stops:
+
+```text
+/var/lib/pisafe/projects/<project>/sessions/<timestamp>_<uuid>.jsonl
+```
+
+- **Promotion only adds.** A name the store already holds is skipped, and a
+  transcript the run deleted is a whiteout device rather than a file and is
+  skipped too. So a run can neither rewrite nor delete what another run handed
+  over — including when Pi rewrites a transcript in place to migrate it to the
+  current session version on load, which promotion leaves in the run's own
+  upper.
+- **Nothing needs a merge**, because a transcript's name carries a UUID and no
+  two runs ever choose the same one. This is Pi's own reason for having no lock
+  on a session file while locking the settings, trust, and auth files it does
+  share.
+- **Each transcript arrives by rename** from a staging dot entry on the same
+  filesystem, so a concurrent reader sees a whole transcript or none of it.
+- **This is the one place a mounted lower gains entries.** overlayfs calls a
+  lower changing underneath a mount undefined, and what is bounded here is the
+  consequence: nothing existing is touched, so the only undefined part is
+  whether a live run's listing shows the new names — which invariant 3 says it
+  must not show anyway.
+- **Nothing is ever evicted.** A transcript is not reproducible, so the store
+  grows with the project's history and `reset` leaves it alone.
 
 ### Project configuration
 
@@ -211,10 +253,12 @@ anything.
       it restored is byte-unchanged, the next run falls back to what was just
       published, eviction spares a generation a run may still mount, and reset
       empties the cache while leaving the session store alone.
-- [ ] **5. Session promotion.** Fold a finished run's transcripts into the
-      project session store — additive, no key, no invalidation. Live test: a
-      second run of the project reads an earlier run's finished transcript,
-      while still not seeing a concurrent run's live one.
+- [x] **5. Session promotion.** Fold a finished run's transcripts into the
+      project session store — additive, no key, no invalidation. Live test:
+      `TestLiveFinishedTranscriptsPromoteWhileLiveOnesStayPrivate` — a later run
+      reads a finished run's transcript, a live run's transcript reaches no
+      concurrent run, and neither a rewrite nor a deletion inside a run follows
+      a transcript another run already promoted.
 - [ ] **6. Global profile and `pisafe extension install`.** Read-only profile
       mount, copied-in `settings.json`/`trust.json`, installer pinning exact
       version and integrity hash. Live test: a pinned extension loads in a run;
@@ -397,12 +441,43 @@ this document is the current truth, not an audit trail. These fold into
   additive and unkeyed. Slice 2 recorded sessions as riding the cache's
   mechanism; that was right about the mount and wrong about the promotion, and
   this splits them.
-- **A second run of a project still cannot read an earlier run's finished
-  transcripts.** Delivered by slice 5. Slices 1 and 2 built the isolation half
-  of sharing, whose value lives entirely in the publishing half; slice 4
-  delivered that half for caches, and until slice 5 lands the session lower
-  stays permanently empty and its overlay is behaviourally equivalent to a
-  per-run directory.
+- **A second run of a project can read an earlier run's finished transcripts.**
+  Delivered by slice 5, which closes the gap slices 1 and 2 opened: they built
+  the isolation half of sharing, whose value lives entirely in the publishing
+  half, and until this landed the session lower stayed permanently empty and its
+  overlay was behaviourally equivalent to a per-run directory.
+- **Promotion writes into the mounted lower, rather than avoiding it.** This is
+  the one place pisafe adds entries to a directory live runs have mounted, and
+  overlayfs calls a lower changing underneath a mount undefined. Two shapes that
+  never touch a mounted lower were weighed and not taken: immutable session
+  generations reusing slice 4's publish path, which would copy the project's
+  whole transcript history forward on every run and could drop a concurrent
+  run's transcripts under keep-newest eviction; and dropping the overlay for a
+  run-private directory seeded by copying the history in at start, which costs
+  that copy on every run. What makes the chosen shape defensible is that the
+  undefined part is bounded to one observable: nothing existing is ever written,
+  so the only question is whether a live run's listing shows the new names, and
+  invariant 3 requires that it not show them. Reversibility: the seeded-directory
+  shape stays available and would replace the overlay rather than extend it, so
+  changing course later is a rewrite of the sessions mount, not a migration of
+  stored data.
+- **A name the store already holds is skipped rather than replaced**, which is
+  what keeps promotion additive in the one case where names do repeat: Pi
+  rewrites a transcript in place to migrate it to the current session version
+  when it loads one. Promoting that rewrite would modify a file concurrent runs
+  have mounted, to no benefit — each run migrates its own copy on load anyway.
+  The consequence worth stating: a migration never reaches the store, and a
+  transcript deleted from Pi's own picker inside a run stays in the store.
+- **Sessions are never evicted and `reset` leaves them alone.** A transcript is
+  not reproducible, so the store grows with the project's history. Bounding it
+  belongs with the slice 9 sweep that reclaims whole project filesystems, not
+  with a per-namespace rule modelled on the cache.
+- **Publishing caches and promoting sessions are joined, not sequenced.** Both
+  run after the stop is recorded, both are recorded against the run rather than
+  failing a stop that worked, and neither short-circuits the other — an
+  unpublished cache costs a later run time, and an unpromoted transcript stays in
+  the run's own storage until it is discarded, so silence about either would be
+  worse than the failure.
 - **The shared cache is a directory pisafe owns, and tools are redirected into
   it by cache-specific environment variables.** Overlaying each tool's own
   location instead — `~/.npm`, `~/.cargo/registry`, `~/go/pkg/mod` — was not
@@ -495,6 +570,17 @@ limactl shell pisafe podman run --rm --user 1000:1000 --network=none \
 
 # npm cache shape, to confirm it is still not safe to merge.
 ls ~/.npm/_cacache            # content-v2 (by content), index-v5 (by request URL)
+
+# Session layout, naming, and what Pi locks. A relocated session directory must
+# still be flat, transcript names must still carry a UUID, and no session file
+# may acquire a lock, or promotion needs a merge it cannot perform.
+limactl shell pisafe -- podman run --rm --pull=never --network=none \
+  --entrypoint sh <run-image> -c '
+root=/usr/local/lib/node_modules/@earendil-works/pi-coding-agent
+sed -n "1,12p" "$root/docs/session-format.md"
+grep -n "sessionFile = join\|getDefaultSessionDirPath\|listSessionsFromDir" \
+  "$root/dist/core/session-manager.js"
+grep -rln "proper-lockfile" "$root/dist"'
 ```
 
 The lower's contents must be owned by the mapped UID (`podman unshare chown -R

@@ -204,6 +204,38 @@ test -d "$cache" || exit 0
 find "$cache" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 ' pisafe-reset "$@"
 `
+
+	// promoteSessionsScript adds the transcripts one run wrote to the project
+	// session store. A transcript's name carries a UUID, so two runs never choose
+	// the same one and promotion needs no merge or key. Promotion only ever adds:
+	// the store is a lower that other runs have mounted, and a name it already
+	// holds is a transcript an earlier run promoted and this one rewrote when it
+	// was migrated on load. Each file arrives by rename from the same
+	// filesystem, so no reader ever sees a partial transcript.
+	promoteSessionsScript = `set -eu
+exec podman unshare sh -ceu '
+set -eu
+store=/var/lib/pisafe/projects/$1/sessions
+upper=/var/lib/pisafe/runs/$2/overlay/sessions/upper
+staging=$store/.promote-$2
+test -d "$store"
+test -d "$upper" || exit 0
+trap "rm -f -- \"$staging\"" EXIT
+for path in "$upper"/*.jsonl; do
+	# Only a regular file is a transcript. A transcript the run deleted is a
+	# whiteout device under the same name, and a deletion is not something an
+	# additive promotion carries; anything else so named is a run trying to make
+	# promotion fail on it.
+	test -f "$path" || continue
+	name=${path##*/}
+	if [ -e "$store/$name" ]; then
+		continue
+	fi
+	install -m 0600 -o 1000 -g 1000 "$path" "$staging"
+	mv -T "$staging" "$store/$name"
+done
+' pisafe-promote "$@"
+`
 )
 
 // maxApplyArtifactBytes stops a run from filling the Mac's disk through the
@@ -539,6 +571,29 @@ func (transport Transport) ResetProjectCache(ctx context.Context, projectKey str
 	}
 	if _, err := transport.shellScript(ctx, nil, resetProjectCacheScript, projectKey); err != nil {
 		return fmt.Errorf("reset project cache: %w", err)
+	}
+	return nil
+}
+
+// PromoteSessions folds the transcripts one run wrote into the project session
+// store, where the project's later runs can read them. Sessions are not a
+// cache: they have no key, nothing is implied by a transcript's absence, and
+// nothing already promoted is ever replaced or evicted.
+func (transport Transport) PromoteSessions(
+	ctx context.Context,
+	projectKey string,
+	runID string,
+) error {
+	if err := runid.Validate(projectKey); err != nil {
+		return err
+	}
+	if err := runid.Validate(runID); err != nil {
+		return err
+	}
+	if _, err := transport.shellScript(
+		ctx, nil, promoteSessionsScript, projectKey, runID,
+	); err != nil {
+		return fmt.Errorf("promote run sessions: %w", err)
 	}
 	return nil
 }

@@ -215,10 +215,10 @@ func (spec Spec) overlayRoot(namespace string) string {
 	return spec.StoragePath() + "/overlay/" + namespace
 }
 
-// ProjectOverlay is one shared layer as the run sees it. Lower is immutable
-// and never written: a published snapshot when the project has one, an empty
-// run-local directory when it does not. Upper and Work belong to the run
-// alone, which is what keeps one run's writes out of every other run.
+// ProjectOverlay is one shared layer as the run sees it. Nothing already in
+// Lower is rewritten while a run holds it: a cache generation is immutable, and
+// the session store only ever gains transcripts. Upper and Work belong to the
+// run alone, which is what keeps one run's writes out of every other run.
 type ProjectOverlay struct {
 	Destination string
 	Lower       string

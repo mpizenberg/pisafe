@@ -448,6 +448,25 @@ func TestPublishAndEvictionRefuseWhatTheyCannotAddress(t *testing.T) {
 	}
 }
 
+// TestPromoteSessionsRefusesWhatItCannotAddress keeps either name from becoming
+// a path. Both halves are directories the script writes into, and the project
+// key half names a store that other projects' runs have mounted.
+func TestPromoteSessionsRefusesWhatItCannotAddress(t *testing.T) {
+	transport := Transport{instance: InstanceName, runner: &fakeRunner{}}
+	for name, arguments := range map[string][2]string{
+		"climbing project": {"../../projects/other", "run-1"},
+		"climbing run":     {"project-3f9c2a1b", "../../runs/other"},
+		"empty project":    {"", "run-1"},
+		"empty run":        {"project-3f9c2a1b", ""},
+	} {
+		if err := transport.PromoteSessions(
+			context.Background(), arguments[0], arguments[1],
+		); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+}
+
 // TestSelectCacheSnapshotsRefusesAnUnexpectedListing keeps a directory name
 // the VM produced from becoming half of a mount argument unchecked.
 func TestSelectCacheSnapshotsRefusesAnUnexpectedListing(t *testing.T) {

@@ -251,8 +251,6 @@ func TestLiveProjectLayersAreSharedToReadAndPrivateToWrite(t *testing.T) {
 
 	specs := map[string]runcontainer.Spec{}
 	for _, name := range []string{"a", "b"} {
-		runID := "livelayers-" + name + "-" + stamp
-		spec := runcontainer.DefaultSpec(runID, projectKey, imageID)
 		selected, err := transport.SelectCacheSnapshots(
 			ctx,
 			projectKey,
@@ -261,31 +259,10 @@ func TestLiveProjectLayersAreSharedToReadAndPrivateToWrite(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		spec.Caches = selected
-		specs[name] = spec
-		if err := transport.CreateRunStorage(ctx, runID); err != nil {
-			t.Fatal(err)
-		}
-		defer func() {
-			runLive(t, context.Background(), "podman", "rm", "--force", "--ignore", spec.ContainerName())
-			if err := transport.RemoveRunStorage(context.Background(), runID); err != nil {
-				t.Errorf("remove live run storage: %v", err)
-			}
-		}()
-		if err := transport.PrepareRunOverlays(ctx, runID, spec.Caches); err != nil {
-			t.Fatal(err)
-		}
-		runArgs, err := spec.RunArgs()
-		if err != nil {
-			t.Fatal(err)
-		}
-		// Every mount and limit of a real run is kept; only the SSH server it
-		// would start is replaced, because this test drives the container
-		// directly rather than over SSH.
-		runArgs = append(runArgs[:len(runArgs)-2:len(runArgs)-2], "sleep", "infinity")
-		if _, err := transport.Execute(ctx, nil, append([]string{"podman"}, runArgs...)...); err != nil {
-			t.Fatal(err)
-		}
+		specs[name] = liveRun(
+			t, ctx, transport, projectKey, imageID,
+			"livelayers-"+name+"-"+stamp, selected...,
+		)
 	}
 
 	// Both runs are live throughout: each writes before either reads, so a
@@ -320,6 +297,139 @@ func TestLiveProjectLayersAreSharedToReadAndPrivateToWrite(t *testing.T) {
 			t.Errorf("project layer %s = %q after two runs wrote to it", lower, got)
 		}
 	}
+}
+
+// liveStoreListing is what the project's session store holds, read the way
+// only pisafe can read it. Dot entries are included because a half-promoted
+// transcript would be one, and finding one left behind is a failure.
+func liveStoreListing(t *testing.T, ctx context.Context, store string) string {
+	t.Helper()
+	listed := runLive(t, ctx, "podman", "unshare", "ls", "-A", store)
+	return strings.Join(strings.Fields(listed), " ")
+}
+
+// TestLiveFinishedTranscriptsPromoteWhileLiveOnesStayPrivate is what the
+// session store is for: a project's next run opens with the history of its
+// finished ones, and never with the transcript of a run still writing one.
+// Promotion only ever adds, so a run can neither rewrite nor delete a
+// transcript another run already handed over.
+func TestLiveFinishedTranscriptsPromoteWhileLiveOnesStayPrivate(t *testing.T) {
+	if os.Getenv("PISAFE_LIVE_LIMA") != "1" {
+		t.Skip("set PISAFE_LIVE_LIMA=1 to test the dedicated VM")
+	}
+	imageID := liveImageID(t)
+	ensureLiveVM(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	stamp := time.Now().UTC().Format("20060102150405")
+	transport := lima.NewTransport()
+	projectKey := liveProject(t, transport, "livesessions")
+
+	// A transcript's name carries a UUID, so these stand in for real ones only by
+	// being distinct. The file that is not a transcript is here because the store
+	// is Pi's session directory and nothing else belongs in it.
+	first := liveRun(t, ctx, transport, projectKey, imageID, "livesessions-a-"+stamp)
+	inContainer(t, ctx, transport, first, "printf first > /sessions/1_aaaa.jsonl")
+	inContainer(t, ctx, transport, first, "printf kept > /sessions/2_bbbb.jsonl")
+	inContainer(t, ctx, transport, first, "printf ignored > /sessions/notes.txt")
+	runLive(t, ctx, "podman", "rm", "--force", first.ContainerName())
+	if err := transport.PromoteSessions(ctx, projectKey, first.RunID); err != nil {
+		t.Fatal(err)
+	}
+
+	store := first.ProjectPath() + "/sessions"
+	if listed := liveStoreListing(t, ctx, store); listed != "1_aaaa.jsonl 2_bbbb.jsonl" {
+		t.Fatalf("store after the first run = %q", listed)
+	}
+
+	// The whole point of the slice: a later run of the project starts with what
+	// an earlier one wrote.
+	second := liveRun(t, ctx, transport, projectKey, imageID, "livesessions-b-"+stamp)
+	if got := inContainer(t, ctx, transport, second, "cat /sessions/1_aaaa.jsonl"); got != "first" {
+		t.Errorf("the second run reads the first run's transcript as %q", got)
+	}
+
+	// The third run is live throughout, and its transcript is the one thing the
+	// second run must not be able to read.
+	third := liveRun(t, ctx, transport, projectKey, imageID, "livesessions-c-"+stamp)
+	inContainer(t, ctx, transport, third, "printf live > /sessions/3_cccc.jsonl")
+	if listed := inContainer(t, ctx, transport, second, "ls /sessions"); strings.Contains(listed, "3_cccc") {
+		t.Errorf("a live transcript reached a concurrent run: %q", listed)
+	}
+
+	// Pi rewrites a transcript in place when it migrates one on load, and can
+	// delete one outright from its own picker. Neither may follow the file back
+	// into a store that other runs have mounted.
+	inContainer(t, ctx, transport, second, "printf migrated > /sessions/1_aaaa.jsonl")
+	inContainer(t, ctx, transport, second, "rm /sessions/2_bbbb.jsonl")
+	inContainer(t, ctx, transport, second, "printf second > /sessions/4_dddd.jsonl")
+	runLive(t, ctx, "podman", "rm", "--force", second.ContainerName())
+	if err := transport.PromoteSessions(ctx, projectKey, second.RunID); err != nil {
+		t.Fatal(err)
+	}
+	if listed := liveStoreListing(t, ctx, store); listed != "1_aaaa.jsonl 2_bbbb.jsonl 4_dddd.jsonl" {
+		t.Fatalf("store after the second run = %q", listed)
+	}
+	for name, want := range map[string]string{
+		"1_aaaa.jsonl": "first",
+		"2_bbbb.jsonl": "kept",
+		"4_dddd.jsonl": "second",
+	} {
+		got := runLive(t, ctx, "podman", "unshare", "cat", store+"/"+name)
+		if got != want {
+			t.Errorf("store holds %s as %q, want %q", name, got, want)
+		}
+	}
+
+	// A run that starts now inherits both finished runs and neither of the live
+	// one's writes, and can read what was promoted rather than merely list it.
+	fourth := liveRun(t, ctx, transport, projectKey, imageID, "livesessions-d-"+stamp)
+	listed := inContainer(t, ctx, transport, fourth, "ls /sessions")
+	if joined := strings.Join(strings.Fields(listed), " "); joined != "1_aaaa.jsonl 2_bbbb.jsonl 4_dddd.jsonl" {
+		t.Errorf("the fourth run sees %q", joined)
+	}
+	if got := inContainer(t, ctx, transport, fourth, "cat /sessions/4_dddd.jsonl"); got != "second" {
+		t.Errorf("the fourth run reads a promoted transcript as %q", got)
+	}
+}
+
+// liveRun starts one container with every mount and limit a real run gets.
+// Only the SSH server it would launch is replaced, because these tests drive
+// the container directly rather than over SSH.
+func liveRun(
+	t *testing.T,
+	ctx context.Context,
+	transport lima.Transport,
+	projectKey string,
+	imageID string,
+	runID string,
+	caches ...runcontainer.CacheMount,
+) runcontainer.Spec {
+	t.Helper()
+	spec := runcontainer.DefaultSpec(runID, projectKey, imageID)
+	spec.Caches = caches
+	if err := transport.CreateRunStorage(ctx, runID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		runLive(t, context.Background(), "podman", "rm", "--force", "--ignore", spec.ContainerName())
+		if err := transport.RemoveRunStorage(context.Background(), runID); err != nil {
+			t.Errorf("remove live run storage: %v", err)
+		}
+	})
+	if err := transport.PrepareRunOverlays(ctx, runID, spec.Caches); err != nil {
+		t.Fatal(err)
+	}
+	runArgs, err := spec.RunArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runArgs = append(runArgs[:len(runArgs)-2:len(runArgs)-2], "sleep", "infinity")
+	if _, err := transport.Execute(ctx, nil, append([]string{"podman"}, runArgs...)...); err != nil {
+		t.Fatal(err)
+	}
+	return spec
 }
 
 func liveImageID(t *testing.T) string {

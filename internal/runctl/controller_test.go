@@ -162,6 +162,21 @@ func (backend *fakeBackend) EvictCacheSnapshots(
 	return nil
 }
 
+func (backend *fakeBackend) PromoteSessions(
+	_ context.Context,
+	projectKey string,
+	runID string,
+) error {
+	backend.calls = append(backend.calls, backendCall{
+		kind: "promote-sessions",
+		args: []string{projectKey, runID},
+	})
+	if backend.failAt == "promote-sessions" {
+		return errors.New("promote sessions failed")
+	}
+	return nil
+}
+
 func (backend *fakeBackend) ResetProjectCache(_ context.Context, projectKey string) error {
 	backend.calls = append(backend.calls, backendCall{
 		kind: "reset-project-cache",

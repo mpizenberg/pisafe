@@ -67,19 +67,22 @@ func (controller Controller) Stop(
 	if err != nil {
 		return runstate.Manifest{}, controller.recordLifecycleError(runID, "record stop", err)
 	}
-	publishErr := controller.publishCaches(ctx, stopped)
-	if publishErr == nil {
+	// What the run produced is handed to the project whatever the run's outcome
+	// was: a cache a failed run warmed still restores, and a failed run's
+	// transcript is the one most worth reading. Neither half is worth failing a
+	// stop that worked — an unpublished cache costs a later run time, and an
+	// unpromoted transcript stays in the run's own storage until it is discarded
+	// — so both are recorded against the run instead.
+	persistErr := errors.Join(
+		controller.publishCaches(ctx, stopped),
+		controller.backend.PromoteSessions(ctx, stopped.ProjectKey, runID),
+	)
+	if persistErr == nil {
 		return stopped, nil
 	}
-	// A cache that did not publish costs a later run time and nothing else, so
-	// it is recorded against this run rather than failing a stop that worked.
-	// Only being unable to record it is worth failing on.
-	recorded, err := controller.store.RecordError(
-		runID,
-		fmt.Errorf("publish run caches: %w", publishErr),
-	)
+	recorded, err := controller.store.RecordError(runID, persistErr)
 	if err != nil {
-		return stopped, errors.Join(publishErr, err)
+		return stopped, errors.Join(persistErr, err)
 	}
 	return recorded, nil
 }

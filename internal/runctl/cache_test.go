@@ -23,9 +23,9 @@ var (
 	}
 )
 
-// stoppedWithCaches drives one run of a project all the way to stopped, which
-// is where a run's caches are published.
-func stoppedWithCaches(
+// stoppedByController drives one run of a project all the way to stopped,
+// where what the run produced is handed to the project.
+func stoppedByController(
 	t *testing.T,
 	store runstate.Store,
 	backend *fakeBackend,
@@ -56,7 +56,7 @@ func stoppedWithCaches(
 func TestStoppingPublishesAndTrimsEveryDeclaredCache(t *testing.T) {
 	store := runstate.NewStore(t.TempDir())
 	backend := &fakeBackend{}
-	stopped := stoppedWithCaches(t, store, backend, testNPMCache, testCargoCache)
+	stopped := stoppedByController(t, store, backend, testNPMCache, testCargoCache)
 	if stopped.LastError != "" {
 		t.Fatalf("stop recorded %q", stopped.LastError)
 	}
@@ -92,7 +92,7 @@ func TestStoppingPublishesAndTrimsEveryDeclaredCache(t *testing.T) {
 func TestARunDeclaringNoCachePublishesNothing(t *testing.T) {
 	store := runstate.NewStore(t.TempDir())
 	backend := &fakeBackend{}
-	stoppedWithCaches(t, store, backend)
+	stoppedByController(t, store, backend)
 	if joined := callsString(backend.calls); strings.Contains(joined, "publish-snapshot") ||
 		strings.Contains(joined, "evict-snapshots") {
 		t.Fatalf("a run sharing nothing still touched the project store:\n%s", joined)
@@ -105,7 +105,7 @@ func TestARunDeclaringNoCachePublishesNothing(t *testing.T) {
 func TestAFailedPublishIsRecordedRatherThanFailingTheStop(t *testing.T) {
 	store := runstate.NewStore(t.TempDir())
 	backend := &fakeBackend{failAt: "publish-snapshot"}
-	stopped := stoppedWithCaches(t, store, backend, testNPMCache)
+	stopped := stoppedByController(t, store, backend, testNPMCache)
 	if stopped.State != runstate.StateStopped {
 		t.Fatalf("stopped = %#v", stopped)
 	}
@@ -123,7 +123,7 @@ func TestAFailedPublishIsRecordedRatherThanFailingTheStop(t *testing.T) {
 func TestResetRefusesWhileARunCouldStillMountAGeneration(t *testing.T) {
 	store := runstate.NewStore(t.TempDir())
 	backend := &fakeBackend{}
-	stoppedWithCaches(t, store, backend, testNPMCache)
+	stoppedByController(t, store, backend, testNPMCache)
 	controller := New(backend, store, &fakeSSHStore{}, testInference{})
 
 	err := controller.ResetProjectCache(context.Background(), testProject)
@@ -140,7 +140,7 @@ func TestResetEmptiesACacheNoRunIsHolding(t *testing.T) {
 	backend := &fakeBackend{}
 	// A run that restored nothing never mounted a published generation, so it
 	// is no reason to refuse.
-	stoppedWithCaches(t, store, backend, testCargoCache)
+	stoppedByController(t, store, backend, testCargoCache)
 	controller := New(backend, store, &fakeSSHStore{}, testInference{})
 
 	if err := controller.ResetProjectCache(context.Background(), testProject); err != nil {
