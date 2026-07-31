@@ -52,19 +52,19 @@ type RunSource interface {
 }
 
 type Server struct {
-	runs     RunSource
-	provider *Provider
-	client   *http.Client
-	now      func() time.Time
+	runs      RunSource
+	providers Catalog
+	client    *http.Client
+	now       func() time.Time
 
 	mu       sync.Mutex
 	inFlight map[string]int
 }
 
-func NewServer(runs RunSource, provider *Provider) *Server {
+func NewServer(runs RunSource, providers Catalog) *Server {
 	return &Server{
-		runs:     runs,
-		provider: provider,
+		runs:      runs,
+		providers: providers,
 		client: &http.Client{
 			Transport: &http.Transport{
 				DialContext:           (&net.Dialer{Timeout: upstreamDialTimeout}).DialContext,
@@ -81,48 +81,51 @@ func NewServer(runs RunSource, provider *Provider) *Server {
 }
 
 func (server *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	// The path names the upstream, so every refusal below can be written in
+	// the wire shape the client that sent it knows how to read.
+	provider, routed := server.providers.find(request.URL.Path)
 	runID, ok := server.authorize(request)
 	if !ok {
-		server.writeError(writer, http.StatusUnauthorized, unauthorizedMessage)
+		server.writeError(writer, http.StatusUnauthorized, provider, unauthorizedMessage)
 		return
 	}
-	if server.provider == nil {
-		server.writeError(writer, http.StatusServiceUnavailable, unconfiguredUpstream)
+	if len(server.providers) == 0 {
+		server.writeError(writer, http.StatusServiceUnavailable, provider, unconfiguredUpstream)
 		return
 	}
 	if request.Method != http.MethodPost {
-		server.writeError(writer, http.StatusMethodNotAllowed, "only POST is relayed")
+		server.writeError(writer, http.StatusMethodNotAllowed, provider, "only POST is relayed")
 		return
 	}
-	if request.URL.Path != server.provider.CanonicalPath() {
-		server.writeError(writer, http.StatusNotFound, fmt.Sprintf(
-			"only %s is relayed", server.provider.CanonicalPath(),
+	if !routed {
+		server.writeError(writer, http.StatusNotFound, provider, fmt.Sprintf(
+			"only %s is relayed", strings.Join(server.providers.routes(), ", "),
 		))
 		return
 	}
 	if request.ContentLength > maxRequestBytes {
-		server.writeError(writer, http.StatusRequestEntityTooLarge, "request exceeds relay size limit")
+		server.writeError(writer, http.StatusRequestEntityTooLarge, provider, "request exceeds relay size limit")
 		return
 	}
 	if !server.acquire(runID) {
-		server.writeError(writer, http.StatusTooManyRequests, "run exceeded its concurrent request limit")
+		server.writeError(writer, http.StatusTooManyRequests, provider, "run exceeded its concurrent request limit")
 		return
 	}
 	defer server.release(runID)
 
-	server.relay(writer, request)
+	server.relay(writer, provider, request)
 }
 
-func (server *Server) relay(writer http.ResponseWriter, request *http.Request) {
+func (server *Server) relay(writer http.ResponseWriter, provider Provider, request *http.Request) {
 	body := http.MaxBytesReader(writer, request.Body, maxRequestBytes)
 	upstream, err := http.NewRequestWithContext(
 		request.Context(),
 		http.MethodPost,
-		server.provider.upstreamEndpoint(),
+		provider.upstreamEndpoint(),
 		body,
 	)
 	if err != nil {
-		server.writeError(writer, http.StatusBadGateway, "build upstream request failed")
+		server.writeError(writer, http.StatusBadGateway, provider, "build upstream request failed")
 		return
 	}
 	upstream.ContentLength = request.ContentLength
@@ -131,9 +134,9 @@ func (server *Server) relay(writer http.ResponseWriter, request *http.Request) {
 			upstream.Header.Set(header, value)
 		}
 	}
-	credentials, err := server.provider.Credentials.UpstreamAuth(request.Context())
+	credentials, err := provider.Credentials.UpstreamAuth(request.Context())
 	if err != nil {
-		server.writeError(writer, http.StatusServiceUnavailable, credentialFailure)
+		server.writeError(writer, http.StatusServiceUnavailable, provider, credentialFailure)
 		return
 	}
 	for header, values := range credentials {
@@ -142,7 +145,7 @@ func (server *Server) relay(writer http.ResponseWriter, request *http.Request) {
 
 	response, err := server.client.Do(upstream)
 	if err != nil {
-		server.writeError(writer, http.StatusBadGateway, "upstream inference request failed")
+		server.writeError(writer, http.StatusBadGateway, provider, "upstream inference request failed")
 		return
 	}
 	defer response.Body.Close()
@@ -229,14 +232,21 @@ func (server *Server) release(runID string) {
 	}
 }
 
-// writeError uses the wire shape of the configured API so the Pi client
-// surfaces the message instead of a decode failure.
-func (server *Server) writeError(writer http.ResponseWriter, status int, message string) {
+// writeError uses the wire shape of the API the request was addressed to so
+// the Pi client surfaces the message instead of a decode failure. A request
+// that named no configured upstream gets the OpenAI shape, which is what every
+// client that is not Anthropic's own reads.
+func (server *Server) writeError(
+	writer http.ResponseWriter,
+	status int,
+	provider Provider,
+	message string,
+) {
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(status)
 	escaped := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(message)
 	var body string
-	if server.provider != nil && server.provider.API == APIAnthropicMessages {
+	if provider.API == APIAnthropicMessages {
 		body = `{"type":"error","error":{"type":"invalid_request_error","message":"` +
 			escaped + `"}}`
 	} else {

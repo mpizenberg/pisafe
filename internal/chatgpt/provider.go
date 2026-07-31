@@ -18,6 +18,10 @@ import (
 //go:embed models.json
 var modelCatalog []byte
 
+// Name is what this upstream is called on the command line, in a run's
+// models.json, and in the relay path that reaches it.
+const Name = "chatgpt"
+
 // Provider is the brokered ChatGPT subscription upstream.
 func Provider(source *Source) (*broker.Provider, error) {
 	var models []json.RawMessage
@@ -25,6 +29,7 @@ func Provider(source *Source) (*broker.Provider, error) {
 		return nil, fmt.Errorf("parse embedded chatgpt model catalog: %w", err)
 	}
 	return &broker.Provider{
+		Name:        Name,
 		Upstream:    &url.URL{Scheme: "https", Host: "chatgpt.com", Path: "/backend-api"},
 		API:         broker.APIOpenAICodexResponses,
 		Models:      models,

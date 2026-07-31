@@ -388,8 +388,20 @@ thing that mounts anything.
       leaves neither the mount nor the directory, reclaiming again is not a
       failure, and the same key then allocates a filesystem with none of the old
       project in it.
-- [ ] **10. Other providers.** Additional `pisafe login <provider>` commands
-      over the existing broker interface.
+- [x] **10a. One relay, several upstreams.** Turn the broker's single provider
+      into a catalog: one models.json entry per configured upstream, one relay
+      route per provider name, and a registry the login commands fill. A run
+      sees every configured provider at once and picks between them in Pi's own
+      model list. Covered by contract tests against stub upstreams rather than a
+      live test, because a live one would need real provider credentials:
+      `TestServerRelaysEachProviderOnItsOwnRoute` — two upstreams answer on
+      their own routes with their own credentials, one run capability reaches
+      both, and one provider's name with another's API path reaches neither.
+- [ ] **10b. `pisafe login` for API-key providers.** `anthropic` and `openai`
+      against their published endpoints, plus a named custom endpoint for
+      anything OpenAI-compatible, with the key read off stdin and kept in the
+      Keychain beside the ChatGPT tokens. Plus the commands that make several
+      logins manageable: listing them and taking one away.
 - [ ] **11. Backup, reset, recovery.** Cheapest useful piece is resetting or
       removing a scope, which is nearly free once scopes exist.
 
@@ -881,6 +893,32 @@ this document is the current truth, not an audit trail. These fold into
   happen in the controller immediately before the filesystem is ensured rather
   than in the caller that happens to know the path. Colocating them is what
   makes the ordering unbreakable by a future caller.
+
+- **A run sees every configured upstream, not one active one.** The alternative
+  was keeping the broker's single provider and letting the newest login win,
+  which is a much smaller change: nothing about routing, models.json, or the
+  relay would have moved. It was not taken because the thing a user wants from
+  a second provider is to choose per task — a subscription for long sessions, a
+  metered key for a one-off — and an active-provider switch makes that choice a
+  command plus a run restart. Pi already namespaces models by provider, so
+  several entries cost the run nothing.
+- **The provider's name leads its relay path.** `/<name>` prefixes the API path
+  the client would send on its own, matched exactly. Routing on the model ID in
+  the request body was the alternative and was rejected outright: it would make
+  the relay parse what a run sends, which is the one thing it currently never
+  does. The name is validated as a lowercase slug because it is simultaneously
+  a URL path segment, a models.json key, and a Keychain account.
+- **A dead login no longer stops the broker from starting.** With one provider,
+  failing at startup was right: nothing worked anyway, so failing loudly beat
+  failing per request. With several it inverts — one expired refresh token
+  would withhold every other upstream — so the broker now names the unusable
+  logins and serves the rest. Nothing is weakened: the relay's per-request
+  fail-closed path is what actually refuses a request whose credentials cannot
+  be produced, and it was already there.
+- **Consequence of the route change:** a run that is active across this change
+  has a models.json pointing at the old unprefixed path and gets 404s from the
+  relay until it is stopped and resumed, which rewrites it. No data is at risk
+  and no run needs recreating.
 
 ## Open questions
 

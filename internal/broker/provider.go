@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -36,10 +37,26 @@ type CredentialSource interface {
 // complete Pi models.json model definitions so runs see curated context and
 // cost metadata instead of Pi's defaults.
 type Provider struct {
+	Name        string
 	Upstream    *url.URL
 	API         string
 	Models      []json.RawMessage
 	Credentials CredentialSource
+}
+
+var providerName = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
+
+// ValidateName bounds what an upstream may be called. One name is at once a
+// path segment in the relay's own URL space, a key in every run's models.json,
+// and the account its credential is filed under, so it is held to what all
+// three can carry unambiguously.
+func ValidateName(name string) error {
+	if !providerName.MatchString(name) {
+		return fmt.Errorf(
+			"invalid provider name %q: use lowercase letters, digits, and hyphens", name,
+		)
+	}
+	return nil
 }
 
 // CanonicalPath is the only request path the broker relays. It matches what
@@ -62,11 +79,18 @@ func (provider Provider) upstreamEndpoint() string {
 	return provider.Upstream.String() + provider.CanonicalPath()
 }
 
+// route is the path a run's client requests for this provider. One relay
+// serves every configured upstream over one address, so the provider's name
+// leads the path its client would otherwise send on its own.
+func (provider Provider) route() string {
+	return "/" + provider.Name + provider.CanonicalPath()
+}
+
 // runBaseURL is the models.json baseUrl inside a run. The Anthropic and
 // Codex clients append their full request paths themselves while the OpenAI
 // clients expect the /v1 prefix in the base URL.
 func (provider Provider) runBaseURL() string {
-	base := fmt.Sprintf("http://%s:%d", lima.BrokerAddress, lima.BrokerPort)
+	base := fmt.Sprintf("http://%s:%d/%s", lima.BrokerAddress, lima.BrokerPort, provider.Name)
 	if provider.API == APIOpenAICompletions || provider.API == APIOpenAIResponses {
 		return base + "/v1"
 	}
@@ -99,14 +123,27 @@ func presentedCapability(token string) string {
 	return token
 }
 
-// ModelsJSON renders the ~/.pi/agent/models.json content for one run. The
-// only secret it contains is that run's revocable capability.
-func (provider Provider) ModelsJSON(capability string) ([]byte, error) {
+// Describe summarizes the provider without exposing credentials.
+func (provider Provider) Describe() string {
+	return provider.Name + ": " + provider.API + " via " + provider.Upstream.Redacted() +
+		" (" + strconv.Itoa(len(provider.Models)) + " model(s))"
+}
+
+// Catalog is every upstream configured on the Mac. A run reaches all of them
+// through one relay and one capability, because a capability names the run
+// rather than a provider: what separates two upstreams is the path, and the
+// credential each is answered with never leaves the Mac either way.
+type Catalog []Provider
+
+// ModelsJSON renders the ~/.pi/agent/models.json content for one run, one
+// entry per configured upstream. The only secret it contains is that run's
+// revocable capability.
+func (catalog Catalog) ModelsJSON(capability string) ([]byte, error) {
 	if !runstate.ValidInferenceCapability(capability) {
 		return nil, errors.New("models configuration requires a valid run capability")
 	}
-	if len(provider.Models) == 0 {
-		return nil, errors.New("inference provider lists no models")
+	if len(catalog) == 0 {
+		return nil, errors.New("no inference provider is configured")
 	}
 	type providerEntry struct {
 		Name    string            `json:"name"`
@@ -115,19 +152,30 @@ func (provider Provider) ModelsJSON(capability string) ([]byte, error) {
 		APIKey  string            `json:"apiKey"`
 		Models  []json.RawMessage `json:"models"`
 	}
+	entries := make(map[string]providerEntry, len(catalog))
+	for _, provider := range catalog {
+		if err := ValidateName(provider.Name); err != nil {
+			return nil, err
+		}
+		if _, taken := entries[provider.Name]; taken {
+			// Two upstreams under one name would share a relay path, so
+			// whichever answered would be a matter of ordering.
+			return nil, fmt.Errorf("two inference providers are named %q", provider.Name)
+		}
+		if len(provider.Models) == 0 {
+			return nil, fmt.Errorf("inference provider %q lists no models", provider.Name)
+		}
+		entries[provider.Name] = providerEntry{
+			Name:    "pisafe: " + provider.Name,
+			BaseURL: provider.runBaseURL(),
+			API:     provider.API,
+			APIKey:  provider.runAPIKey(capability),
+			Models:  provider.Models,
+		}
+	}
 	content := struct {
 		Providers map[string]providerEntry `json:"providers"`
-	}{
-		Providers: map[string]providerEntry{
-			"pisafe": {
-				Name:    "pisafe brokered inference",
-				BaseURL: provider.runBaseURL(),
-				API:     provider.API,
-				APIKey:  provider.runAPIKey(capability),
-				Models:  provider.Models,
-			},
-		},
-	}
+	}{Providers: entries}
 	encoded, err := json.MarshalIndent(content, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("encode models configuration: %w", err)
@@ -135,8 +183,30 @@ func (provider Provider) ModelsJSON(capability string) ([]byte, error) {
 	return append(encoded, '\n'), nil
 }
 
-// Describe summarizes the provider without exposing credentials.
-func (provider Provider) Describe() string {
-	return provider.API + " via " + provider.Upstream.Redacted() +
-		" (" + strconv.Itoa(len(provider.Models)) + " model(s))"
+// Describe summarizes each configured upstream without exposing credentials.
+func (catalog Catalog) Describe() []string {
+	lines := make([]string, 0, len(catalog))
+	for _, provider := range catalog {
+		lines = append(lines, provider.Describe())
+	}
+	return lines
+}
+
+// find resolves the upstream a request path names. The match is exact, so no
+// provider's route can be reached by a path meant for another.
+func (catalog Catalog) find(path string) (Provider, bool) {
+	for _, provider := range catalog {
+		if provider.route() == path {
+			return provider, true
+		}
+	}
+	return Provider{}, false
+}
+
+func (catalog Catalog) routes() []string {
+	routes := make([]string, 0, len(catalog))
+	for _, provider := range catalog {
+		routes = append(routes, provider.route())
+	}
+	return routes
 }

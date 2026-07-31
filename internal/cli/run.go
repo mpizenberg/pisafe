@@ -10,10 +10,10 @@ import (
 	"strings"
 
 	"github.com/mpizenberg/pisafe/internal/broker"
-	"github.com/mpizenberg/pisafe/internal/chatgpt"
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/hostnet"
 	"github.com/mpizenberg/pisafe/internal/lima"
+	"github.com/mpizenberg/pisafe/internal/providers"
 	"github.com/mpizenberg/pisafe/internal/runctl"
 	"github.com/mpizenberg/pisafe/internal/runimage"
 	"github.com/mpizenberg/pisafe/internal/runssh"
@@ -61,7 +61,7 @@ func runCreate(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	provider, err := chatgpt.LoadProvider(ctx)
+	catalog, err := providers.Load(ctx)
 	if err != nil {
 		return err
 	}
@@ -78,7 +78,7 @@ func runCreate(ctx context.Context, args []string, out io.Writer) error {
 		transport,
 		runstate.NewStore(stateRoot),
 		runssh.NewStore(filepath.Join(stateRoot, "ssh")),
-		inferenceConfig(provider),
+		inferenceConfig(catalog),
 	)
 	service := runstart.New(
 		lima.NewManager(),
@@ -92,16 +92,16 @@ func runCreate(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return printRunResult(out, result, provider != nil)
+	return printRunResult(out, result, len(catalog) > 0)
 }
 
-// inferenceConfig avoids handing runctl a non-nil interface wrapping a nil
-// provider when no upstream is configured.
-func inferenceConfig(provider *broker.Provider) runctl.InferenceConfig {
-	if provider == nil {
+// inferenceConfig keeps "no upstream is configured" a nil the controller can
+// test, rather than an interface holding an empty catalog.
+func inferenceConfig(catalog broker.Catalog) runctl.InferenceConfig {
+	if len(catalog) == 0 {
 		return nil
 	}
-	return provider
+	return catalog
 }
 
 // packagedRunArtifacts loads what the managed run image is built from. Both

@@ -63,10 +63,10 @@ func TestServerRejectsMissingUnknownAndInactiveCapabilities(t *testing.T) {
 		activeRun("run-a", testCapability()),
 		stopped,
 		exhausted,
-	}}, testProvider(t, "https://upstream.example", APIAnthropicMessages))
+	}}, Catalog{testProvider(t, "https://upstream.example", APIAnthropicMessages)})
 
 	for name, request := range map[string]*http.Request{
-		"no auth": httptest.NewRequest(http.MethodPost, "/v1/messages", nil),
+		"no auth": httptest.NewRequest(http.MethodPost, "/main/v1/messages", nil),
 		"unknown capability": requestWithKey(
 			"pisafe-cap-" + strings.Repeat("ef", 32),
 		),
@@ -84,7 +84,7 @@ func TestServerRejectsMissingUnknownAndInactiveCapabilities(t *testing.T) {
 }
 
 func requestWithKey(key string) *http.Request {
-	request := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	request := httptest.NewRequest(http.MethodPost, "/main/v1/messages", nil)
 	request.Header.Set("x-api-key", key)
 	return request
 }
@@ -98,8 +98,8 @@ func TestServerFailsClosedWithoutProviderMethodOrPath(t *testing.T) {
 		t.Errorf("no provider: status = %d", recorder.Code)
 	}
 
-	server := NewServer(runs, testProvider(t, "https://upstream.example", APIAnthropicMessages))
-	get := httptest.NewRequest(http.MethodGet, "/v1/messages", nil)
+	server := NewServer(runs, Catalog{testProvider(t, "https://upstream.example", APIAnthropicMessages)})
+	get := httptest.NewRequest(http.MethodGet, "/main/v1/messages", nil)
 	get.Header.Set("x-api-key", testCapability())
 	recorder = httptest.NewRecorder()
 	server.ServeHTTP(recorder, get)
@@ -107,21 +107,86 @@ func TestServerFailsClosedWithoutProviderMethodOrPath(t *testing.T) {
 		t.Errorf("GET: status = %d", recorder.Code)
 	}
 
-	wrongPath := httptest.NewRequest(http.MethodPost, "/v1/complete", nil)
-	wrongPath.Header.Set("x-api-key", testCapability())
-	recorder = httptest.NewRecorder()
-	server.ServeHTTP(recorder, wrongPath)
-	if recorder.Code != http.StatusNotFound {
-		t.Errorf("wrong path: status = %d", recorder.Code)
+	// The unprefixed API path is what a client configured to talk to the
+	// provider directly would send, and it names no upstream here.
+	for name, path := range map[string]string{
+		"wrong path":    "/main/v1/complete",
+		"no provider":   "/v1/messages",
+		"unknown name":  "/other/v1/messages",
+		"provider only": "/main",
+	} {
+		wrongPath := httptest.NewRequest(http.MethodPost, path, nil)
+		wrongPath.Header.Set("x-api-key", testCapability())
+		recorder = httptest.NewRecorder()
+		server.ServeHTTP(recorder, wrongPath)
+		if recorder.Code != http.StatusNotFound {
+			t.Errorf("%s: status = %d", name, recorder.Code)
+		}
 	}
 
-	oversize := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}"))
+	oversize := httptest.NewRequest(http.MethodPost, "/main/v1/messages", strings.NewReader("{}"))
 	oversize.Header.Set("x-api-key", testCapability())
 	oversize.ContentLength = maxRequestBytes + 1
 	recorder = httptest.NewRecorder()
 	server.ServeHTTP(recorder, oversize)
 	if recorder.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("oversize: status = %d", recorder.Code)
+	}
+}
+
+// Several logins are configured at once, and one run capability reaches all of
+// them: a capability names a run, not an upstream. What must not mix is the
+// credentials, so each route has to arrive at its own upstream carrying only
+// what that provider was logged in with.
+func TestServerRelaysEachProviderOnItsOwnRoute(t *testing.T) {
+	seen := map[string]string{}
+	var mutex sync.Mutex
+	upstreamFor := func(label string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(
+			func(writer http.ResponseWriter, request *http.Request) {
+				mutex.Lock()
+				seen[label] = request.Header.Get("x-api-key") +
+					request.Header.Get("Authorization") + " " + request.URL.Path
+				mutex.Unlock()
+				writer.WriteHeader(http.StatusOK)
+			},
+		))
+	}
+	anthropic := upstreamFor("anthropic")
+	defer anthropic.Close()
+	openai := upstreamFor("openai")
+	defer openai.Close()
+
+	catalog := Catalog{
+		namedProvider(t, "work", anthropic.URL, APIAnthropicMessages, "work-secret"),
+		namedProvider(t, "personal", openai.URL, APIOpenAIResponses, "personal-secret"),
+	}
+	runs := fakeRuns{manifests: []runstate.Manifest{activeRun("run-a", testCapability())}}
+	server := NewServer(runs, catalog)
+
+	for _, path := range []string{"/work/v1/messages", "/personal/v1/responses"} {
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}"))
+		request.Header.Set("x-api-key", testCapability())
+		recorder := httptest.NewRecorder()
+		server.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d body = %s", path, recorder.Code, recorder.Body)
+		}
+	}
+	if seen["anthropic"] != "work-secret /v1/messages" {
+		t.Errorf("anthropic upstream saw %q", seen["anthropic"])
+	}
+	if seen["openai"] != "Bearer personal-secret /v1/responses" {
+		t.Errorf("openai upstream saw %q", seen["openai"])
+	}
+
+	// One provider's name with another's API path belongs to neither.
+	crossed := httptest.NewRequest(http.MethodPost, "/work/v1/responses", strings.NewReader("{}"))
+	crossed.Header.Set("x-api-key", testCapability())
+	recorder := httptest.NewRecorder()
+	server.ServeHTTP(recorder, crossed)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("crossed route: status = %d", recorder.Code)
 	}
 }
 
@@ -154,13 +219,13 @@ func TestServerRelaysWithUpstreamCredentialAndStreams(t *testing.T) {
 	defer upstream.Close()
 
 	runs := fakeRuns{manifests: []runstate.Manifest{activeRun("run-a", testCapability())}}
-	server := NewServer(runs, testProvider(t, upstream.URL, APIAnthropicMessages))
+	server := NewServer(runs, Catalog{testProvider(t, upstream.URL, APIAnthropicMessages)})
 	front := httptest.NewServer(server)
 	defer front.Close()
 
 	request, err := http.NewRequest(
 		http.MethodPost,
-		front.URL+"/v1/messages",
+		front.URL+"/main/v1/messages",
 		strings.NewReader(`{"model":"model-a"}`),
 	)
 	if err != nil {
@@ -208,8 +273,8 @@ func TestServerUsesBearerAuthForOpenAIAndAcceptsBearerCapability(t *testing.T) {
 	defer upstream.Close()
 
 	runs := fakeRuns{manifests: []runstate.Manifest{activeRun("run-a", testCapability())}}
-	server := NewServer(runs, testProvider(t, upstream.URL, APIOpenAIResponses))
-	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader("{}"))
+	server := NewServer(runs, Catalog{testProvider(t, upstream.URL, APIOpenAIResponses)})
+	request := httptest.NewRequest(http.MethodPost, "/main/v1/responses", strings.NewReader("{}"))
 	request.Header.Set("Authorization", "Bearer "+testCapability())
 	recorder := httptest.NewRecorder()
 	server.ServeHTTP(recorder, request)
@@ -230,7 +295,7 @@ func TestServerRefusesUpstreamRedirects(t *testing.T) {
 	defer upstream.Close()
 
 	runs := fakeRuns{manifests: []runstate.Manifest{activeRun("run-a", testCapability())}}
-	server := NewServer(runs, testProvider(t, upstream.URL, APIAnthropicMessages))
+	server := NewServer(runs, Catalog{testProvider(t, upstream.URL, APIAnthropicMessages)})
 	recorder := httptest.NewRecorder()
 	server.ServeHTTP(recorder, requestWithKey(testCapability()))
 	if recorder.Code != http.StatusBadGateway {
@@ -251,7 +316,7 @@ func TestServerCapsConcurrentRequestsPerRun(t *testing.T) {
 	defer upstream.Close()
 
 	runs := fakeRuns{manifests: []runstate.Manifest{activeRun("run-a", testCapability())}}
-	server := NewServer(runs, testProvider(t, upstream.URL, APIAnthropicMessages))
+	server := NewServer(runs, Catalog{testProvider(t, upstream.URL, APIAnthropicMessages)})
 	front := httptest.NewServer(server)
 	defer front.Close()
 
@@ -262,7 +327,7 @@ func TestServerCapsConcurrentRequestsPerRun(t *testing.T) {
 			defer waiting.Done()
 			request, _ := http.NewRequest(
 				http.MethodPost,
-				front.URL+"/v1/messages",
+				front.URL+"/main/v1/messages",
 				strings.NewReader("{}"),
 			)
 			request.Header.Set("x-api-key", testCapability())
@@ -282,7 +347,7 @@ func TestServerCapsConcurrentRequestsPerRun(t *testing.T) {
 
 	request, _ := http.NewRequest(
 		http.MethodPost,
-		front.URL+"/v1/messages",
+		front.URL+"/main/v1/messages",
 		strings.NewReader("{}"),
 	)
 	request.Header.Set("x-api-key", testCapability())
@@ -328,10 +393,10 @@ func TestServerRelaysCodexWithAccountHeaderAndForwardsClientHeaders(t *testing.T
 	provider := testProvider(t, upstream.URL, APIOpenAICodexResponses)
 	provider.Credentials = codexCredentials{}
 	runs := fakeRuns{manifests: []runstate.Manifest{activeRun("run-a", testCapability())}}
-	server := NewServer(runs, provider)
+	server := NewServer(runs, Catalog{provider})
 
 	wrapped := provider.runAPIKey(testCapability())
-	request := httptest.NewRequest(http.MethodPost, "/codex/responses", strings.NewReader("{}"))
+	request := httptest.NewRequest(http.MethodPost, "/main/codex/responses", strings.NewReader("{}"))
 	request.Header.Set("Authorization", "Bearer "+wrapped)
 	request.Header.Set("chatgpt-account-id", "pisafe")
 	request.Header.Set("OpenAI-Beta", "responses=experimental")
@@ -367,7 +432,7 @@ func TestServerFailsClosedWhenCredentialsUnavailable(t *testing.T) {
 	provider := testProvider(t, "https://upstream.example", APIAnthropicMessages)
 	provider.Credentials = staticCredentials{err: errors.New("refresh failed")}
 	runs := fakeRuns{manifests: []runstate.Manifest{activeRun("run-a", testCapability())}}
-	server := NewServer(runs, provider)
+	server := NewServer(runs, Catalog{provider})
 	recorder := httptest.NewRecorder()
 	server.ServeHTTP(recorder, requestWithKey(testCapability()))
 	if recorder.Code != http.StatusServiceUnavailable {
@@ -380,7 +445,7 @@ func TestServerFailsClosedWhenCredentialsUnavailable(t *testing.T) {
 
 func TestServerErrorShapeMatchesConfiguredAPI(t *testing.T) {
 	runs := fakeRuns{err: errors.New("unavailable")}
-	server := NewServer(runs, testProvider(t, "https://upstream.example", APIAnthropicMessages))
+	server := NewServer(runs, Catalog{testProvider(t, "https://upstream.example", APIAnthropicMessages)})
 	recorder := httptest.NewRecorder()
 	server.ServeHTTP(recorder, requestWithKey(testCapability()))
 	if recorder.Code != http.StatusUnauthorized {

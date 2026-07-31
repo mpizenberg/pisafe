@@ -20,18 +20,24 @@ func testModels(ids ...string) []json.RawMessage {
 	return models
 }
 
-func testProvider(t *testing.T, upstream string, api string) *Provider {
+func testProvider(t *testing.T, upstream string, api string) Provider {
+	t.Helper()
+	return namedProvider(t, "main", upstream, api, "upstream-secret")
+}
+
+func namedProvider(t *testing.T, name, upstream, api, secret string) Provider {
 	t.Helper()
 	parsed, err := url.Parse(upstream)
 	if err != nil {
 		t.Fatal(err)
 	}
 	header := "Authorization"
-	value := "Bearer upstream-secret"
+	value := "Bearer " + secret
 	if api == APIAnthropicMessages {
-		header, value = "X-Api-Key", "upstream-secret"
+		header, value = "X-Api-Key", secret
 	}
-	return &Provider{
+	return Provider{
+		Name:        name,
 		Upstream:    parsed,
 		API:         api,
 		Models:      testModels("model-a"),
@@ -40,11 +46,21 @@ func testProvider(t *testing.T, upstream string, api string) *Provider {
 }
 
 func TestCanonicalPathAndEndpointPerAPI(t *testing.T) {
-	for api, expected := range map[string][2]string{
-		APIAnthropicMessages:    {"/v1/messages", "https://upstream.example/v1/messages"},
-		APIOpenAICompletions:    {"/v1/chat/completions", "https://upstream.example/v1/chat/completions"},
-		APIOpenAIResponses:      {"/v1/responses", "https://upstream.example/v1/responses"},
-		APIOpenAICodexResponses: {"/codex/responses", "https://upstream.example/codex/responses"},
+	for api, expected := range map[string][3]string{
+		APIAnthropicMessages: {
+			"/v1/messages", "https://upstream.example/v1/messages", "/main/v1/messages",
+		},
+		APIOpenAICompletions: {
+			"/v1/chat/completions",
+			"https://upstream.example/v1/chat/completions",
+			"/main/v1/chat/completions",
+		},
+		APIOpenAIResponses: {
+			"/v1/responses", "https://upstream.example/v1/responses", "/main/v1/responses",
+		},
+		APIOpenAICodexResponses: {
+			"/codex/responses", "https://upstream.example/codex/responses", "/main/codex/responses",
+		},
 	} {
 		provider := testProvider(t, "https://upstream.example", api)
 		if provider.CanonicalPath() != expected[0] {
@@ -53,20 +69,42 @@ func TestCanonicalPathAndEndpointPerAPI(t *testing.T) {
 		if provider.upstreamEndpoint() != expected[1] {
 			t.Errorf("%s endpoint = %q", api, provider.upstreamEndpoint())
 		}
+		// What the client appends is the provider's own API path, so the name
+		// has to lead it for one relay to serve several upstreams.
+		if provider.route() != expected[2] {
+			t.Errorf("%s route = %q", api, provider.route())
+		}
+	}
+}
+
+// A catalog that cannot be routed must never reach a run: the name is what
+// separates two upstreams, and a run configured with an ambiguous one would
+// send a request to whichever provider happened to be checked first.
+func TestModelsJSONRefusesACatalogNoRunCouldUse(t *testing.T) {
+	provider := testProvider(t, "https://upstream.example", APIAnthropicMessages)
+	unnamed := provider
+	unnamed.Name = "Not A Name"
+	empty := provider
+	empty.Models = nil
+	for name, catalog := range map[string]Catalog{
+		"nothing configured": nil,
+		"unusable name":      {unnamed},
+		"no models":          {empty},
+		"one name twice":     {provider, provider},
+	} {
+		if _, err := catalog.ModelsJSON(testCapability()); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
 	}
 }
 
 func TestModelsJSONContainsOnlyTheRunCapability(t *testing.T) {
 	provider := testProvider(t, "https://api.anthropic.com", APIAnthropicMessages)
-	if _, err := provider.ModelsJSON("garbage"); err == nil {
+	if _, err := (Catalog{provider}).ModelsJSON("garbage"); err == nil {
 		t.Fatal("invalid capability was accepted")
 	}
-	provider.Models = nil
-	if _, err := provider.ModelsJSON(testCapability()); err == nil {
-		t.Fatal("provider without models was accepted")
-	}
 	provider.Models = testModels("claude-x")
-	content, err := provider.ModelsJSON(testCapability())
+	content, err := (Catalog{provider}).ModelsJSON(testCapability())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,11 +124,11 @@ func TestModelsJSONContainsOnlyTheRunCapability(t *testing.T) {
 	if err := json.Unmarshal(content, &parsed); err != nil {
 		t.Fatal(err)
 	}
-	entry, ok := parsed.Providers["pisafe"]
+	entry, ok := parsed.Providers["main"]
 	if !ok {
 		t.Fatalf("parsed = %#v", parsed)
 	}
-	if entry.BaseURL != "http://192.0.2.1:18080" ||
+	if entry.BaseURL != "http://192.0.2.1:18080/main" ||
 		entry.API != APIAnthropicMessages ||
 		entry.APIKey != testCapability() ||
 		len(entry.Models) != 1 || entry.Models[0].ID != "claude-x" {
@@ -98,13 +136,22 @@ func TestModelsJSONContainsOnlyTheRunCapability(t *testing.T) {
 	}
 
 	// The OpenAI clients expect the /v1 prefix inside the base URL.
-	provider = testProvider(t, "https://api.openai.com", APIOpenAIResponses)
-	content, err = provider.ModelsJSON(testCapability())
+	openai := namedProvider(t, "second", "https://api.openai.com", APIOpenAIResponses, "other-secret")
+	content, err = (Catalog{provider, openai}).ModelsJSON(testCapability())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(content), `"baseUrl": "http://192.0.2.1:18080/v1"`) {
-		t.Fatalf("content = %s", content)
+	if err := json.Unmarshal(content, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Providers) != 2 {
+		t.Fatalf("a run was told about %d provider(s)", len(parsed.Providers))
+	}
+	if parsed.Providers["second"].BaseURL != "http://192.0.2.1:18080/second/v1" {
+		t.Fatalf("entry = %#v", parsed.Providers["second"])
+	}
+	if strings.Contains(string(content), "other-secret") {
+		t.Fatal("run configuration leaks the upstream key")
 	}
 }
 
@@ -113,7 +160,7 @@ func TestModelsJSONContainsOnlyTheRunCapability(t *testing.T) {
 // /codex/responses to the base URL itself.
 func TestModelsJSONWrapsCodexCapabilityAsJWT(t *testing.T) {
 	provider := testProvider(t, "https://chatgpt.com/backend-api", APIOpenAICodexResponses)
-	content, err := provider.ModelsJSON(testCapability())
+	content, err := (Catalog{provider}).ModelsJSON(testCapability())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,8 +173,8 @@ func TestModelsJSONWrapsCodexCapabilityAsJWT(t *testing.T) {
 	if err := json.Unmarshal(content, &parsed); err != nil {
 		t.Fatal(err)
 	}
-	entry := parsed.Providers["pisafe"]
-	if entry.BaseURL != "http://192.0.2.1:18080" {
+	entry := parsed.Providers["main"]
+	if entry.BaseURL != "http://192.0.2.1:18080/main" {
 		t.Fatalf("baseUrl = %q", entry.BaseURL)
 	}
 	parts := strings.Split(entry.APIKey, ".")

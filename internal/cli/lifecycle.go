@@ -8,10 +8,10 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/mpizenberg/pisafe/internal/chatgpt"
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/hostnet"
 	"github.com/mpizenberg/pisafe/internal/lima"
+	"github.com/mpizenberg/pisafe/internal/providers"
 	"github.com/mpizenberg/pisafe/internal/runctl"
 	"github.com/mpizenberg/pisafe/internal/runid"
 	"github.com/mpizenberg/pisafe/internal/runimage"
@@ -211,7 +211,7 @@ func prepareLifecycle(ctx context.Context) (runctl.Controller, error) {
 	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
 		return runctl.Controller{}, fmt.Errorf("pisafe lifecycle commands require macOS on ARM64")
 	}
-	provider, err := chatgpt.LoadProvider(ctx)
+	catalog, err := providers.Load(ctx)
 	if err != nil {
 		return runctl.Controller{}, err
 	}
@@ -234,6 +234,6 @@ func prepareLifecycle(ctx context.Context) (runctl.Controller, error) {
 		lima.NewTransport(),
 		runstate.NewStore(root),
 		runssh.NewStore(filepath.Join(root, "ssh")),
-		inferenceConfig(provider),
+		inferenceConfig(catalog),
 	), nil
 }
