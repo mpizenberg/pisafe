@@ -92,7 +92,7 @@ func installExtension(
 	packageSpec string,
 	out io.Writer,
 ) error {
-	if err := validateExtensionSpec(packageSpec); err != nil {
+	if err := validatePackageSpec(packageSpec); err != nil {
 		return err
 	}
 	imageID, err := ensureRunImage(ctx, transport)
@@ -106,7 +106,7 @@ func installExtension(
 	if err != nil {
 		return err
 	}
-	extension, err := transport.ResolveExtension(ctx, imageID, packageSpec)
+	extension, err := transport.ResolvePackage(ctx, imageID, packageSpec)
 	if err != nil {
 		return err
 	}
@@ -214,7 +214,7 @@ func applyExtensionUpdate(
 			name,
 		)
 	}
-	resolved, err := transport.ResolveExtension(ctx, imageID, name)
+	resolved, err := transport.ResolvePackage(ctx, imageID, name)
 	if err != nil {
 		return record, err
 	}
@@ -329,11 +329,11 @@ func removeExtension(
 	return nil
 }
 
-// validateExtensionSpec bounds what may be asked for before it becomes an
+// validatePackageSpec bounds what may be asked for before it becomes an
 // argument inside a container: an npm name, and at most an exact version. A
 // range is refused rather than resolved, because two installs of one spec would
 // otherwise produce two different profiles.
-func validateExtensionSpec(packageSpec string) error {
+func validatePackageSpec(packageSpec string) error {
 	name := packageSpec
 	if index := strings.LastIndex(packageSpec, "@"); index > 0 {
 		name = packageSpec[:index]

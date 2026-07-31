@@ -503,7 +503,7 @@ func TestResolveExtensionRefusesWhatItCannotPin(t *testing.T) {
 func TestExtensionCommandsRefuseAnUnpinnedPackage(t *testing.T) {
 	transport := Transport{instance: InstanceName, runner: &fakeRunner{}}
 	integrity := "sha512-" + strings.Repeat("A", 86) + "=="
-	for name, extension := range map[string]profile.Extension{
+	for name, extension := range map[string]profile.Pin{
 		"climbing name": {
 			Name: "../escape", Version: "1.0.0", Integrity: integrity,
 			Directory: "escape-11111111",
@@ -554,5 +554,51 @@ func TestSelectCacheSnapshotsRefusesAnUnexpectedListing(t *testing.T) {
 		); err == nil {
 			t.Errorf("%s was accepted", name)
 		}
+	}
+}
+
+// TestToolCommandsRefuseANameTheyCannotVouchFor keeps a binary name, which the
+// package chooses rather than the user, from becoming half of a path or a link
+// pointing anywhere but into the tool that claimed it.
+func TestToolCommandsRefuseANameTheyCannotVouchFor(t *testing.T) {
+	pin := profile.Pin{
+		Name:      "is-number",
+		Version:   "7.0.0",
+		Integrity: "sha512-" + strings.Repeat("A", 86) + "==",
+		Directory: "is-number-5e0e83b1",
+	}
+	for name, reported := range map[string]string{
+		"climbing":  "../../bin/sh\n",
+		"hidden":    ".profile\n",
+		"separated": "rg rg;rm\n",
+	} {
+		transport := Transport{
+			instance: InstanceName,
+			runner:   &fakeRunner{outputs: [][]byte{[]byte(reported)}},
+		}
+		if _, err := transport.ToolBinaries(context.Background(), pin); err == nil {
+			t.Errorf("%s was accepted as a command name", name)
+		}
+	}
+	transport := Transport{
+		instance: InstanceName,
+		runner:   &fakeRunner{outputs: [][]byte{[]byte("isnumber\n")}},
+	}
+	binaries, err := transport.ToolBinaries(context.Background(), pin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(binaries, []string{"isnumber"}) {
+		t.Fatalf("binaries = %v", binaries)
+	}
+
+	// The links are built from the record, so a record that was edited between
+	// installs has to fail here rather than reach the profile.
+	escaping := profile.Tools{Version: profile.ToolsVersion, Tools: []profile.Tool{{
+		Pin:      pin,
+		Binaries: []string{"../../../bin/sh"},
+	}}}
+	if err := transport.LinkToolBinaries(context.Background(), escaping); err == nil {
+		t.Error("a link escaping the profile was accepted")
 	}
 }

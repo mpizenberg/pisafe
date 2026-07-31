@@ -11,7 +11,7 @@ import (
 )
 
 func testProfile() profile.Record {
-	return profile.Record{Version: profile.RecordVersion}.With(profile.Extension{
+	return profile.Record{Version: profile.RecordVersion}.With(profile.Pin{
 		Name:      "@earendil-works/plan-mode",
 		Version:   "1.2.3",
 		Integrity: "sha512-" + strings.Repeat("A", 86) + "==",

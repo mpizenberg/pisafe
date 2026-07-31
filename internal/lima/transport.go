@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -158,7 +159,7 @@ mv -T "$staging" "$record"
 ' pisafe-profile "$@"
 `
 
-	// installExtensionScript takes the tree one throwaway container built and
+	// installPackageScript takes the tree one throwaway container built and
 	// makes it the profile's. Only this script writes the profile, the same way
 	// only pisafe writes a project's cache: the container that fetched the
 	// package never had a handle on anything but its own memory.
@@ -166,7 +167,7 @@ mv -T "$staging" "$record"
 	// Replacing an installed extension swaps the new tree in before the old one
 	// goes, so a run that starts during an install finds one or the other rather
 	// than nothing.
-	installExtensionScript = `set -euo pipefail
+	installPackageScript = `set -euo pipefail
 target="$1"
 staging="$(dirname "$1")/.install-$(basename "$1")"
 shift
@@ -180,11 +181,61 @@ fi
 podman unshare mv -T "$staging" "$target"
 `
 
-	// removeExtensionScript takes one extension's tree out of the profile. The
+	// removePackageScript takes one extension's tree out of the profile. The
 	// record is written first, so what this removes is already something no run
 	// starting now would load.
-	removeExtensionScript = `set -eu
+	removePackageScript = `set -eu
 exec podman unshare rm -rf -- "$1"
+`
+
+	// toolBinariesScript reports the commands one installed tree claims. npm
+	// writes a link per binary of every package in the tree, dependencies
+	// included, and only the ones pointing into the package the user asked for
+	// are the tool's to claim; the rest belong to packages that were pulled in
+	// and were never named. Reading the tree rather than the registry's metadata
+	// means what is reported is what was actually installed.
+	toolBinariesScript = `set -eu
+exec podman unshare sh -ceu '
+set -eu
+links=$1/node_modules/.bin
+test -d "$links" || exit 0
+for path in "$links"/*; do
+	test -h "$path" || continue
+	case "$(readlink "$path")" in
+	"../$2/"*) printf %s\\n "${path##*/}" ;;
+	esac
+done
+' pisafe-tool-binaries "$@"
+`
+
+	// linkToolBinariesScript rebuilds the one directory a run searches for
+	// installed commands. It is built whole from what the record names and then
+	// swapped in, so a name no tool claims any more cannot survive, and a run
+	// that starts mid-install finds the directory as it was or as it will be.
+	// Every link is relative and is checked against the tree it names, so a
+	// record that has drifted from the profile fails here rather than leaving a
+	// run with a command that resolves to nothing.
+	linkToolBinariesScript = `set -eu
+exec podman unshare sh -ceu '
+set -eu
+root=$1
+shift
+staging=$root/.bin
+replaced=$root/.bin-replaced
+rm -rf -- "$staging" "$replaced"
+install -d -m 0700 -o 1000 -g 1000 "$staging"
+trap "rm -rf -- \"$staging\" \"$replaced\"" EXIT
+while [ "$#" -gt 0 ]; do
+	test -x "$root/${2#../}"
+	ln -s "$2" "$staging/$1"
+	chown -h 1000:1000 "$staging/$1"
+	shift 2
+done
+if [ -d "$root/bin" ]; then
+	mv -T "$root/bin" "$replaced"
+fi
+mv -T "$staging" "$root/bin"
+' pisafe-tool-links "$@"
 `
 
 	// readProfileFileScript prints one of the files pisafe keeps beside the
@@ -604,6 +655,17 @@ func (transport Transport) ReadProfileOffers(ctx context.Context) (profile.Offer
 	return profile.ParseOffers(output), nil
 }
 
+// ReadProfileTools reports what commands the profile has installed. It is what
+// the directory a run searches is rebuilt from, so it is the authority on that
+// directory's contents rather than a description of them.
+func (transport Transport) ReadProfileTools(ctx context.Context) (profile.Tools, error) {
+	output, err := transport.readProfileFile(ctx, profile.ToolsFile)
+	if err != nil {
+		return profile.Tools{}, fmt.Errorf("read profile tool record: %w", err)
+	}
+	return profile.ParseTools(output)
+}
+
 func (transport Transport) readProfileFile(ctx context.Context, name string) ([]byte, error) {
 	return transport.shellScript(
 		ctx, nil, readProfileFileScript, runcontainer.ProfilePinsPath(), name,
@@ -738,6 +800,23 @@ func (transport Transport) WriteProfileOffers(
 	return nil
 }
 
+// WriteProfileTools replaces pisafe's record of the installed commands. The
+// directory a run searches is rebuilt from it first, so the record is never
+// ahead of what a run would find.
+func (transport Transport) WriteProfileTools(
+	ctx context.Context,
+	tools profile.Tools,
+) error {
+	content, err := tools.Encode()
+	if err != nil {
+		return err
+	}
+	if err := transport.writeProfileFile(ctx, profile.ToolsFile, content); err != nil {
+		return fmt.Errorf("write profile tool record: %w", err)
+	}
+	return nil
+}
+
 func (transport Transport) writeProfileFile(
 	ctx context.Context,
 	name string,
@@ -753,21 +832,21 @@ func (transport Transport) writeProfileFile(
 	return err
 }
 
-// ResolveExtension asks npm what a package spec resolves to right now. The
+// ResolvePackage asks npm what a package spec resolves to right now. The
 // exact version and the integrity of that release are the pin, and they come
 // from the registry's own answer rather than from anything pisafe composes.
-func (transport Transport) ResolveExtension(
+func (transport Transport) ResolvePackage(
 	ctx context.Context,
 	imageID string,
 	packageSpec string,
-) (profile.Extension, error) {
-	args, err := runcontainer.ExtensionResolveArgs(imageID, packageSpec)
+) (profile.Pin, error) {
+	args, err := runcontainer.PackageResolveArgs(imageID, packageSpec)
 	if err != nil {
-		return profile.Extension{}, err
+		return profile.Pin{}, err
 	}
 	output, err := transport.Execute(ctx, nil, append([]string{"podman"}, args...)...)
 	if err != nil {
-		return profile.Extension{}, fmt.Errorf("resolve %s: %w", packageSpec, err)
+		return profile.Pin{}, fmt.Errorf("resolve %s: %w", packageSpec, err)
 	}
 	return parseResolvedExtension(output)
 }
@@ -786,7 +865,7 @@ func (transport Transport) ResolveExtensionUpdates(
 	latest := make([]profile.Offer, 0, len(record.Extensions))
 	var failures []error
 	for _, extension := range record.Extensions {
-		resolved, err := transport.ResolveExtension(ctx, imageID, extension.Name)
+		resolved, err := transport.ResolvePackage(ctx, imageID, extension.Name)
 		if err != nil {
 			failures = append(failures, err)
 			continue
@@ -802,9 +881,9 @@ func (transport Transport) ResolveExtensionUpdates(
 // parseResolvedExtension reads npm's report. It arrives from a container with
 // network access, so nothing in it is taken on trust: the pin is what pisafe
 // can address, name, and put in a path, or the install does not happen.
-func parseResolvedExtension(output []byte) (profile.Extension, error) {
+func parseResolvedExtension(output []byte) (profile.Pin, error) {
 	if len(output) > maxResolveBytes {
-		return profile.Extension{}, errors.New("package resolution exceeds size limit")
+		return profile.Pin{}, errors.New("package resolution exceeds size limit")
 	}
 	var reported []struct {
 		Name      string `json:"name"`
@@ -812,83 +891,173 @@ func parseResolvedExtension(output []byte) (profile.Extension, error) {
 		Integrity string `json:"integrity"`
 	}
 	if err := json.Unmarshal(output, &reported); err != nil {
-		return profile.Extension{}, fmt.Errorf("decode package resolution: %w", err)
+		return profile.Pin{}, fmt.Errorf("decode package resolution: %w", err)
 	}
 	if len(reported) != 1 {
-		return profile.Extension{}, fmt.Errorf(
+		return profile.Pin{}, fmt.Errorf(
 			"expected one resolved package, got %d",
 			len(reported),
 		)
 	}
-	extension := profile.Extension{
+	extension := profile.Pin{
 		Name:      reported[0].Name,
 		Version:   reported[0].Version,
 		Integrity: reported[0].Integrity,
 	}
 	directory, err := runid.NewPackageDirectory(extension.Name)
 	if err != nil {
-		return profile.Extension{}, err
+		return profile.Pin{}, err
 	}
 	extension.Directory = directory
 	if err := extension.Validate(); err != nil {
-		return profile.Extension{}, err
+		return profile.Pin{}, err
 	}
 	return extension, nil
 }
 
-// InstallExtension puts one resolved package in the profile. The container
-// fetches and builds the tree; this script is what makes it the profile's, so
-// nothing that ran with the network open ever held the profile open for
-// writing.
-func (transport Transport) InstallExtension(
+// InstallPackage puts one resolved package in the profile, under the module
+// root the caller names. The container fetches and builds the tree; this script
+// is what makes it the profile's, so nothing that ran with the network open
+// ever held the profile open for writing.
+func (transport Transport) InstallPackage(
 	ctx context.Context,
 	imageID string,
-	extension profile.Extension,
+	root string,
+	pin profile.Pin,
 ) error {
-	if err := extension.Validate(); err != nil {
+	if err := pin.Validate(); err != nil {
 		return err
 	}
-	installArgs, err := runcontainer.ExtensionInstallArgs(
+	installArgs, err := runcontainer.PackageInstallArgs(
 		imageID,
-		extension.Name,
-		extension.Version,
-		extension.Integrity,
+		pin.Name,
+		pin.Version,
+		pin.Integrity,
 	)
 	if err != nil {
 		return err
 	}
-	arguments := append(
-		[]string{
-			"pisafe-extension",
-			runcontainer.ExtensionInstallRoot(extension.Directory),
-		},
-		installArgs...,
-	)
+	arguments := append([]string{"pisafe-package", root}, installArgs...)
 	if _, err := transport.Execute(
 		ctx,
 		nil,
-		append([]string{"bash", "-ceu", installExtensionScript}, arguments...)...,
+		append([]string{"bash", "-ceu", installPackageScript}, arguments...)...,
 	); err != nil {
-		return fmt.Errorf("install %s@%s: %w", extension.Name, extension.Version, err)
+		return fmt.Errorf("install %s@%s: %w", pin.Name, pin.Version, err)
 	}
 	return nil
 }
 
-// RemoveExtension takes one package out of the profile.
-func (transport Transport) RemoveExtension(
+// RemovePackage takes one module root out of the profile.
+func (transport Transport) RemovePackage(ctx context.Context, root string) error {
+	if _, err := transport.shellScript(ctx, nil, removePackageScript, root); err != nil {
+		return fmt.Errorf("remove %s: %w", root, err)
+	}
+	return nil
+}
+
+// An extension and a tool are installed the same way and differ only in where
+// they land and what a run then does with them, so which namespace a package
+// belongs in is decided here rather than by whoever asked for it. A pin that
+// does not describe itself consistently never becomes half of a path, whichever
+// namespace it was headed for.
+
+func (transport Transport) InstallExtension(
 	ctx context.Context,
-	extension profile.Extension,
+	imageID string,
+	extension profile.Pin,
 ) error {
 	if err := extension.Validate(); err != nil {
 		return err
 	}
-	if _, err := transport.shellScript(
+	return transport.InstallPackage(
+		ctx, imageID, runcontainer.ExtensionInstallRoot(extension.Directory), extension,
+	)
+}
+
+func (transport Transport) RemoveExtension(
+	ctx context.Context,
+	extension profile.Pin,
+) error {
+	if err := extension.Validate(); err != nil {
+		return err
+	}
+	return transport.RemovePackage(
+		ctx, runcontainer.ExtensionInstallRoot(extension.Directory),
+	)
+}
+
+func (transport Transport) InstallTool(
+	ctx context.Context,
+	imageID string,
+	tool profile.Pin,
+) error {
+	if err := tool.Validate(); err != nil {
+		return err
+	}
+	return transport.InstallPackage(
+		ctx, imageID, runcontainer.ToolInstallRoot(tool.Directory), tool,
+	)
+}
+
+func (transport Transport) RemoveTool(ctx context.Context, tool profile.Pin) error {
+	if err := tool.Validate(); err != nil {
+		return err
+	}
+	return transport.RemovePackage(ctx, runcontainer.ToolInstallRoot(tool.Directory))
+}
+
+// ToolBinaries reports the commands one installed tool claims. Which names a
+// package installs is the package's own choice, so they are read back from the
+// tree rather than asked for, and every one of them is held to what pisafe can
+// put in a path and print.
+func (transport Transport) ToolBinaries(
+	ctx context.Context,
+	tool profile.Pin,
+) ([]string, error) {
+	if err := tool.Validate(); err != nil {
+		return nil, err
+	}
+	output, err := transport.shellScript(
 		ctx,
 		nil,
-		removeExtensionScript,
-		runcontainer.ExtensionInstallRoot(extension.Directory),
-	); err != nil {
-		return fmt.Errorf("remove %s: %w", extension.Name, err)
+		toolBinariesScript,
+		runcontainer.ToolInstallRoot(tool.Directory),
+		tool.Name,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("read the commands %s provides: %w", tool.Name, err)
+	}
+	var binaries []string
+	for _, binary := range strings.Fields(string(output)) {
+		if err := profile.ValidateBinaryName(binary); err != nil {
+			return nil, fmt.Errorf("%s provides %w", tool.Name, err)
+		}
+		binaries = append(binaries, binary)
+	}
+	slices.Sort(binaries)
+	return binaries, nil
+}
+
+// LinkToolBinaries rebuilds the directory a run searches so that it holds
+// exactly what the record names.
+func (transport Transport) LinkToolBinaries(
+	ctx context.Context,
+	tools profile.Tools,
+) error {
+	arguments := []string{runcontainer.ToolsMount().Source}
+	for _, link := range tools.Links() {
+		if err := profile.ValidateBinaryName(link.Binary); err != nil {
+			return err
+		}
+		arguments = append(
+			arguments,
+			link.Binary,
+			runcontainer.ToolBinaryTarget(link.Directory, link.Binary),
+		)
+	}
+	if _, err := transport.shellScript(ctx, nil, linkToolBinariesScript, arguments...); err != nil {
+		return fmt.Errorf("link the profile's commands: %w", err)
 	}
 	return nil
 }

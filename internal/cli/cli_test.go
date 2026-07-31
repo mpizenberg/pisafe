@@ -355,7 +355,7 @@ func TestExtensionRefusesWhatItCannotPinBeforeReachingTheVM(t *testing.T) {
 		"empty":       "",
 		"shell metac": "is-number;id",
 	} {
-		if err := validateExtensionSpec(spec); err == nil {
+		if err := validatePackageSpec(spec); err == nil {
 			t.Errorf("%s %q was accepted", name, spec)
 		}
 	}
@@ -365,7 +365,7 @@ func TestExtensionRefusesWhatItCannotPinBeforeReachingTheVM(t *testing.T) {
 		"@earendil-works/plan-mode",
 		"@earendil-works/plan-mode@1.2.3",
 	} {
-		if err := validateExtensionSpec(spec); err != nil {
+		if err := validatePackageSpec(spec); err != nil {
 			t.Errorf("%q: %v", spec, err)
 		}
 	}

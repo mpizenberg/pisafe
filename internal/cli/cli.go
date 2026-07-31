@@ -14,7 +14,7 @@ import (
 
 var errUsage = errors.New(
 	"usage: pisafe <run|connect|stop|resume|diff|cp|apply|discard|cache|extension" +
-		"|gc|list|zed|login|broker|doctor|help>",
+		"|tool|gc|list|zed|login|broker|doctor|help>",
 )
 
 func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
@@ -89,6 +89,8 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 		return runCacheReset(ctx, out)
 	case "extension":
 		return runExtension(ctx, args[1:], out)
+	case "tool":
+		return runTool(ctx, args[1:], out)
 	case "gc":
 		return runGC(ctx, args[1:], out)
 	case "help", "-h", "--help":
@@ -149,6 +151,17 @@ Usage:
   pisafe extension list
                    Show what the profile has installed, what it is pinned to,
                    and any update still on offer
+  pisafe tool install PACKAGE[@VERSION]
+                   Install a command-line package into the profile every run
+                   mounts read-only, pinned the same way an extension is. The
+                   commands it provides are on every run's PATH, behind the
+                   run image's own, and a name another tool already provides
+                   is refused rather than shadowed. Runs cannot install one
+                   themselves.
+  pisafe tool remove PACKAGE
+                   Take a tool out of the profile
+  pisafe tool list Show what commands the profile provides and what each is
+                   pinned to
   pisafe gc [--dry-run]
                    Reclaim imported runs older than seven days and prune
                    superseded run images. Their pisafe/RUN branches keep the

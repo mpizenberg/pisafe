@@ -48,6 +48,8 @@ RUN set -eu; \
 # profile mounts read-only, so a binary that is not here does not exist. Debian
 # supplies what it carries; pnpm and uv are pinned to a digest recorded here, so
 # a build whose artifact changed fails rather than installing something else.
+# The last directory is where the commands the user installed are mounted, and
+# it belongs to the image so that a run always finds it whether or not any were.
 RUN set -eu; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -72,7 +74,8 @@ RUN set -eu; \
         | sha256sum -c -; \
     tar -xzf uv.tar.gz --strip-components=1 -C /usr/local/bin; \
     rm -f uv.tar.gz; \
-    rm -rf /root/.npm /root/.cache
+    rm -rf /root/.npm /root/.cache; \
+    install -d -m 0755 /opt/pisafe/tools
 
 COPY --chmod=0755 pisafe-guest /usr/local/bin/pisafe-guest
 

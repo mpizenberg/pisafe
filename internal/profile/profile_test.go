@@ -7,8 +7,8 @@ import (
 	"time"
 )
 
-func planMode() Extension {
-	return Extension{
+func planMode() Pin {
+	return Pin{
 		Name:      "@earendil-works/plan-mode",
 		Version:   "1.2.3",
 		Integrity: "sha512-" + strings.Repeat("A", 86) + "==",
@@ -49,13 +49,13 @@ func TestAPinTheRecordCannotVouchForIsRefused(t *testing.T) {
 	climbing.Name = "../../etc"
 
 	for name, record := range map[string]Record{
-		"misplaced": {Version: RecordVersion, Extensions: []Extension{misplaced}},
-		"unpinned":  {Version: RecordVersion, Extensions: []Extension{unpinned}},
-		"unhashed":  {Version: RecordVersion, Extensions: []Extension{unhashed}},
-		"climbing":  {Version: RecordVersion, Extensions: []Extension{climbing}},
+		"misplaced": {Version: RecordVersion, Extensions: []Pin{misplaced}},
+		"unpinned":  {Version: RecordVersion, Extensions: []Pin{unpinned}},
+		"unhashed":  {Version: RecordVersion, Extensions: []Pin{unhashed}},
+		"climbing":  {Version: RecordVersion, Extensions: []Pin{climbing}},
 		"twice": {
 			Version:    RecordVersion,
-			Extensions: []Extension{planMode(), planMode()},
+			Extensions: []Pin{planMode(), planMode()},
 		},
 		"future": {Version: RecordVersion + 1},
 	} {
@@ -78,7 +78,7 @@ func TestAPinTheRecordCannotVouchForIsRefused(t *testing.T) {
 }
 
 func TestInstalledExtensionsBecomeThePackagesARunLoads(t *testing.T) {
-	second := Extension{
+	second := Pin{
 		Name:      "aardvark",
 		Version:   "0.1.0",
 		Integrity: "sha512-" + strings.Repeat("B", 86) + "==",
@@ -228,7 +228,7 @@ func TestAnOfferSurvivesStorageAndOnlyDiffersFromWhatIsInstalled(t *testing.T) {
 		t.Error("a check made 25 hours ago was not due again after 24")
 	}
 
-	installed := Extension{
+	installed := Pin{
 		Name:      "is-number",
 		Version:   "6.0.0",
 		Integrity: "sha512-" + strings.Repeat("B", 86) + "==",
@@ -260,7 +260,7 @@ func TestAnOfferSurvivesStorageAndOnlyDiffersFromWhatIsInstalled(t *testing.T) {
 // worth reading: an unsolicited offer appears when a check moved the answer,
 // and says nothing when it would repeat one the user has already declined.
 func TestAnOfferNobodyAskedForIsMadeOncePerChange(t *testing.T) {
-	installed := Extension{
+	installed := Pin{
 		Name:      "is-number",
 		Version:   "6.0.0",
 		Integrity: "sha512-" + strings.Repeat("B", 86) + "==",
@@ -298,5 +298,165 @@ func TestAnOfferNobodyAskedForIsMadeOncePerChange(t *testing.T) {
 	})
 	if rode := record.With(planMode()).PendingChange(offered, both); len(rode) != 2 {
 		t.Errorf("a new offer left the standing one out: %+v", rode)
+	}
+}
+
+func ripgrep() Tool {
+	return Tool{
+		Pin: Pin{
+			Name:      "ripgrep",
+			Version:   "14.1.1",
+			Integrity: "sha512-" + strings.Repeat("A", 86) + "==",
+			Directory: "ripgrep-33165223",
+		},
+		Binaries: []string{"rg"},
+	}
+}
+
+// TestAToolIsAPinAndTheNamesItClaims is what separates a tool from an
+// extension. The pin is held to the same rules; what is new is that a package
+// with no command is not a tool at all, and that a name it claims has to be
+// something pisafe can put in a path and print.
+func TestAToolIsAPinAndTheNamesItClaims(t *testing.T) {
+	silent := ripgrep()
+	silent.Binaries = nil
+	hidden := ripgrep()
+	hidden.Binaries = []string{".hidden"}
+	climbing := ripgrep()
+	climbing.Binaries = []string{"../../bin/sh"}
+	repeated := ripgrep()
+	repeated.Binaries = []string{"rg", "rg"}
+	misplaced := ripgrep()
+	misplaced.Directory = "somewhere-else-71e17b6c"
+
+	for name, tool := range map[string]Tool{
+		"no command":       silent,
+		"hidden command":   hidden,
+		"climbing command": climbing,
+		"repeated command": repeated,
+		"misplaced":        misplaced,
+	} {
+		if err := tool.Validate(); err == nil {
+			t.Errorf("%s was accepted as a tool", name)
+		}
+		encoded, err := Tools{Version: ToolsVersion, Tools: []Tool{tool}}.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ParseTools(encoded); err == nil {
+			t.Errorf("%s survived the record", name)
+		}
+	}
+	if err := ripgrep().Validate(); err != nil {
+		t.Errorf("a pinned tool with one command was refused: %v", err)
+	}
+}
+
+// TestTwoToolsMayNotAnswerToOneName is what stops installing a second tool from
+// quietly changing what a command already on every run's PATH means. Which
+// names a package claims is the package's own choice, so the collision is
+// reported rather than resolved.
+func TestTwoToolsMayNotAnswerToOneName(t *testing.T) {
+	installed := Tools{Version: ToolsVersion}.With(ripgrep())
+	rival := Tool{
+		Pin: Pin{
+			Name:      "rg-lookalike",
+			Version:   "1.0.0",
+			Integrity: "sha512-" + strings.Repeat("B", 86) + "==",
+			Directory: "rg-lookalike-f9d011a6",
+		},
+		Binaries: []string{"rg", "rgl"},
+	}
+	conflicts := installed.Conflicts(rival)
+	if len(conflicts) != 1 || conflicts[0] != (Conflict{Binary: "rg", Holder: "ripgrep"}) {
+		t.Fatalf("conflicts = %+v", conflicts)
+	}
+	// Replacing a tool with another release of itself is not a collision, or no
+	// tool could ever be reinstalled.
+	newer := ripgrep()
+	newer.Version = "14.1.2"
+	if conflicts := installed.Conflicts(newer); len(conflicts) != 0 {
+		t.Errorf("a tool collided with itself: %+v", conflicts)
+	}
+	// Two tools claiming one name cannot arrive through the record either, which
+	// is what a record hand-edited between installs would do.
+	encoded, err := Tools{Version: ToolsVersion, Tools: []Tool{ripgrep(), rival}}.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseTools(encoded); err == nil {
+		t.Error("a record claiming one name twice was accepted")
+	}
+}
+
+// TestTheLinksARunSearchesAreDerivedFromTheRecord is why nothing edits that
+// directory. It is rebuilt whole every time, so a name that is no longer
+// claimed cannot survive the tool that claimed it.
+func TestTheLinksARunSearchesAreDerivedFromTheRecord(t *testing.T) {
+	fd := Tool{
+		Pin: Pin{
+			Name:      "fd-find",
+			Version:   "10.2.0",
+			Integrity: "sha512-" + strings.Repeat("C", 86) + "==",
+			Directory: "fd-find-35860d41",
+		},
+		Binaries: []string{"fd", "fdfind"},
+	}
+	installed := Tools{Version: ToolsVersion}.With(ripgrep()).With(fd)
+	links := installed.Links()
+	expected := []Link{
+		{Binary: "fd", Directory: fd.Directory},
+		{Binary: "fdfind", Directory: fd.Directory},
+		{Binary: "rg", Directory: ripgrep().Directory},
+	}
+	if !slices.Equal(links, expected) {
+		t.Fatalf("links = %+v", links)
+	}
+	remaining, removed, found := installed.Without("fd-find")
+	if !found || removed.Name != "fd-find" {
+		t.Fatalf("removed %+v, found %v", removed, found)
+	}
+	if links := remaining.Links(); !slices.Equal(links, expected[2:]) {
+		t.Errorf("removing a tool left %+v", links)
+	}
+}
+
+// TestAToolRecordSurvivesStorage keeps what a tool claims addressable after a
+// round trip, because the directory a run searches is rebuilt from it long
+// after the install that wrote it.
+func TestAToolRecordSurvivesStorage(t *testing.T) {
+	for name, content := range map[string][]byte{
+		"absent": nil,
+		"blank":  []byte("\n"),
+	} {
+		record, err := ParseTools(content)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(record.Tools) != 0 || record.Version != ToolsVersion {
+			t.Errorf("%s: record = %+v", name, record)
+		}
+	}
+	for name, content := range map[string][]byte{
+		"future shape": []byte(`{"version":` + strings.Repeat("9", 3) + `,"tools":[]}`),
+		"unknown field": []byte(
+			`{"version":1,"tools":[],"binaries":["rg"]}`),
+		"trailing data": []byte(`{"version":1,"tools":[]}{"version":1}`),
+	} {
+		if _, err := ParseTools(content); err == nil {
+			t.Errorf("%s was accepted as a tool record", name)
+		}
+	}
+	encoded, err := Tools{Version: ToolsVersion}.With(ripgrep()).Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := ParseTools(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool, found := stored.Find("ripgrep")
+	if !found || !slices.Equal(tool.Binaries, []string{"rg"}) || tool.Version != "14.1.1" {
+		t.Fatalf("stored %+v, found %v", tool, found)
 	}
 }

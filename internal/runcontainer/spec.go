@@ -27,10 +27,10 @@ const (
 	// user runs deliberately.
 	DefaultGlobal    = int64(2 * 1024 * 1024 * 1024)
 	DefaultWallClock = int64(8 * 60 * 60)
-	// extensionSeconds bounds an install. It is generous for fetching one
+	// packageSeconds bounds an install. It is generous for fetching one
 	// package and its dependencies, and short enough that a wedged registry
 	// fails the command rather than hanging it.
-	extensionSeconds = 600
+	packageSeconds = 600
 	// DefaultCacheGenerations bounds how many published generations one cache
 	// namespace keeps, beyond any a run may still mount. One is enough for the
 	// fallback to work — an unmatched key restores the newest generation, and
@@ -58,9 +58,13 @@ const (
 	// pi install fail inside a run while pi -e, which installs to a temporary
 	// directory for one run, still works.
 	containerPackageRoot = containerHome + "/.pi/agent/npm"
-	guestStorageRoot     = "/var/lib/pisafe/runs"
-	guestProjectRoot     = "/var/lib/pisafe/projects"
-	guestGlobalRoot      = "/var/lib/pisafe/global"
+	// containerToolRoot is where the installed commands are mounted. It is
+	// outside the run's home, which is writable, and outside the image's own
+	// directories, which the run must not be able to appear to have changed.
+	containerToolRoot = "/opt/pisafe/tools"
+	guestStorageRoot  = "/var/lib/pisafe/runs"
+	guestProjectRoot  = "/var/lib/pisafe/projects"
+	guestGlobalRoot   = "/var/lib/pisafe/global"
 
 	// cacheNamespace holds one directory of immutable snapshots per declared
 	// cache. sessionsNamespace is the one shared directory that is not a cache:
@@ -74,10 +78,17 @@ const (
 	ProfileName = "default"
 
 	// extensionsNamespace holds one npm prefix root per installed extension,
-	// and pinsNamespace pisafe's record of what each was pinned to. Only the
-	// first is mounted: what a run needs is the packages, not the bookkeeping.
+	// toolsNamespace the same per installed command, and pinsNamespace pisafe's
+	// record of what each was pinned to. Only the first two are mounted: what a
+	// run needs is the packages, not the bookkeeping.
 	extensionsNamespace = "extensions"
+	toolsNamespace      = "tools"
 	pinsNamespace       = "pins"
+
+	// toolBinDirectory is the single entry the installed commands add to a
+	// run's PATH. It holds a relative link per claimed name, so a tool is
+	// reachable without its module root having to be searched for anything else.
+	toolBinDirectory = "bin"
 )
 
 // ProjectNamespaces is for the privileged helper, which allocates these two
@@ -90,7 +101,7 @@ func ProjectNamespaces() []string {
 // GlobalNamespaces is the same for the profile filesystem. What lives below
 // depends on what the user installed, which the helper never learns either.
 func GlobalNamespaces() []string {
-	return []string{extensionsNamespace, pinsNamespace}
+	return []string{extensionsNamespace, toolsNamespace, pinsNamespace}
 }
 
 func ProfilePath() string {
@@ -119,11 +130,38 @@ func ProfileMount() Mount {
 	}
 }
 
+// ToolsMount is the shared read-only directory of installed commands. Like the
+// profile packages it depends on nothing about the run, and like them a run has
+// no writable handle on it at all.
+func ToolsMount() Mount {
+	return Mount{
+		Destination: containerToolRoot,
+		Source:      ProfilePath() + "/" + toolsNamespace,
+	}
+}
+
+// ToolBinPath is the directory of links a run searches, on the VM side.
+func ToolBinPath() string {
+	return ToolsMount().Source + "/" + toolBinDirectory
+}
+
 // ExtensionInstallRoot is the module root one extension is installed into.
 // Each gets its own, so installing a second never merges dependency trees with
 // the first.
 func ExtensionInstallRoot(directory string) string {
 	return ProfileMount().Source + "/" + directory
+}
+
+// ToolInstallRoot is the same for one installed command.
+func ToolInstallRoot(directory string) string {
+	return ToolsMount().Source + "/" + directory
+}
+
+// ToolBinaryTarget is what one link in the shared directory points at. It is
+// relative, so the whole namespace resolves identically on the VM and at the
+// path a run mounts it on.
+func ToolBinaryTarget(directory, binary string) string {
+	return "../" + directory + "/node_modules/.bin/" + binary
 }
 
 var (
@@ -334,7 +372,8 @@ var runEnvironment = [][2]string{
 	// The image's own binaries come first, so an installed tool never decides
 	// what git or node means. What a run puts in its home directory is reachable
 	// but last, which is where uv and pip leave an executable.
-	{"PATH", imagePath + ":" + containerHome + "/.local/bin"},
+	{"PATH", imagePath + ":" + containerToolRoot + "/" + toolBinDirectory +
+		":" + containerHome + "/.local/bin"},
 	{"GIT_TERMINAL_PROMPT", "0"},
 	{"PI_CODING_AGENT_DIR", containerHome + "/.pi/agent"},
 	{"PI_CODING_AGENT_SESSION_DIR", containerSessionRoot},
@@ -386,6 +425,8 @@ func (spec Spec) RunArgs() ([]string, error) {
 		"--mount", "type=bind,src=" + spec.HomePath() + ",dst=" + containerHome + ",nodev,nosuid",
 		"--mount", "type=bind,src=" + ProfileMount().Source +
 			",dst=" + ProfileMount().Destination + ",ro,nodev,nosuid",
+		"--mount", "type=bind,src=" + ToolsMount().Source +
+			",dst=" + ToolsMount().Destination + ",ro,nodev,nosuid",
 	}
 	for _, overlay := range spec.ProjectOverlays() {
 		args = append(args, "--volume", overlay.volume())
@@ -441,24 +482,24 @@ func (spec Spec) PublishArgs(cache CacheMount) ([]string, error) {
 	}, nil
 }
 
-// ExtensionResolveArgs renders the throwaway container that asks npm what a
+// PackageResolveArgs renders the throwaway container that asks npm what a
 // spec resolves to. It reports npm's own JSON, which carries the exact version
 // and the integrity of the tarball that spec names, so the pin comes from the
 // registry's own answer rather than from anything pisafe invents.
-func ExtensionResolveArgs(imageID, packageSpec string) ([]string, error) {
-	args, err := extensionArgs(imageID, "resolve")
+func PackageResolveArgs(imageID, packageSpec string) ([]string, error) {
+	args, err := packageArgs(imageID, "resolve")
 	if err != nil {
 		return nil, err
 	}
-	return append(args, "bash", "-ceu", resolveExtensionScript, "pisafe-resolve", packageSpec), nil
+	return append(args, "bash", "-ceu", resolvePackageScript, "pisafe-resolve", packageSpec), nil
 }
 
-// ExtensionInstallArgs renders the throwaway container that fetches one exact
+// PackageInstallArgs renders the throwaway container that fetches one exact
 // release, checks it against the pin pisafe already holds, installs it into a
 // module root of its own, and streams the tree out. It writes nothing outside
 // its own temporary filesystem: no container ever holds the profile open for
 // writing, exactly as no container holds the project store open.
-func ExtensionInstallArgs(imageID, name, version, integrity string) ([]string, error) {
+func PackageInstallArgs(imageID, name, version, integrity string) ([]string, error) {
 	if err := profile.ValidatePackageName(name); err != nil {
 		return nil, err
 	}
@@ -468,21 +509,21 @@ func ExtensionInstallArgs(imageID, name, version, integrity string) ([]string, e
 	if err := profile.ValidateIntegrity(integrity); err != nil {
 		return nil, err
 	}
-	args, err := extensionArgs(imageID, "install")
+	args, err := packageArgs(imageID, "install")
 	if err != nil {
 		return nil, err
 	}
 	return append(
 		args,
-		"bash", "-ceu", installExtensionScript, "pisafe-install", name, version, integrity,
+		"bash", "-ceu", installPackageScript, "pisafe-install", name, version, integrity,
 	), nil
 }
 
-// extensionArgs is the container both halves of an install run in. It is a run
+// packageArgs is the container both halves of an install run in. It is a run
 // container in every respect except that it has no storage at all: managing the
 // profile is the one thing pisafe does that needs the network and needs nothing
 // of any run or project.
-func extensionArgs(imageID, kind string) ([]string, error) {
+func packageArgs(imageID, kind string) ([]string, error) {
 	if !imageIDPattern.MatchString(imageID) {
 		return nil, fmt.Errorf("image must be an immutable sha256 ID")
 	}
@@ -491,7 +532,7 @@ func extensionArgs(imageID, kind string) ([]string, error) {
 		"run",
 		"--rm",
 		"--pull=never",
-		"--label", "io.pisafe.kind=extension-" + kind,
+		"--label", "io.pisafe.kind=package-" + kind,
 		"--user", containerUser,
 		"--read-only",
 		"--cap-drop=all",
@@ -502,7 +543,7 @@ func extensionArgs(imageID, kind string) ([]string, error) {
 		"--memory", memory,
 		"--memory-swap", memory,
 		"--pids-limit", strconv.Itoa(DefaultPIDs),
-		"--timeout", strconv.Itoa(extensionSeconds),
+		"--timeout", strconv.Itoa(packageSeconds),
 		"--tmpfs", "/tmp:rw,nosuid,nodev,size=" + strconv.FormatInt(DefaultTemporary, 10),
 		"--env", "HOME=/tmp",
 		"--env", "npm_config_cache=/tmp/npm-cache",
@@ -515,14 +556,14 @@ func extensionArgs(imageID, kind string) ([]string, error) {
 }
 
 const (
-	resolveExtensionScript = `exec npm pack --dry-run --json -- "$1"`
+	resolvePackageScript = `exec npm pack --dry-run --json -- "$1"`
 
-	// installExtensionScript fetches the pinned release, refuses to install
+	// installPackageScript fetches the pinned release, refuses to install
 	// anything whose bytes do not hash to what pisafe recorded, and then lets
 	// npm resolve the package's own dependencies into the same root. Install
 	// scripts are not run: a package that needs a build step is not installable
 	// this way, which is the same discipline the run image is built with.
-	installExtensionScript = `
+	installPackageScript = `
 tarball=$(npm pack --ignore-scripts --silent -- "$1@$2")
 test "sha512-$(openssl dgst -sha512 -binary "$tarball" | openssl base64 -A)" = "$3"
 mkdir /tmp/root

@@ -377,12 +377,16 @@ func validateContainerInspection(
 		return errors.New("run container label does not match manifest")
 	}
 	profileMount := runcontainer.ProfileMount()
+	toolsMount := runcontainer.ToolsMount()
 	expected := map[string]mountRequirement{
 		"/work":      {source: spec.WorkspacePath()},
 		"/home/node": {source: spec.HomePath()},
 		// A writable profile would be agent code able to change what every
 		// later run of every project loads, so it is checked and not assumed.
 		profileMount.Destination: {source: profileMount.Source, readOnly: true},
+		// The installed commands are on every run's PATH, so a writable one
+		// would be agent code able to change what a later run executes.
+		toolsMount.Destination: {source: toolsMount.Source, readOnly: true},
 	}
 	// Podman reports an overlay as a bind onto its own merged directory, whose
 	// path it chooses, so a shared layer is pinned by what it was stacked from

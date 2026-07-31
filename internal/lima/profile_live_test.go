@@ -19,7 +19,7 @@ import (
 // the VM side and with nothing inside a container able to write it. The
 // integrity is a placeholder: what a run loads follows from the record and the
 // tree, and nothing re-derives the hash at run start.
-func seedProfileExtension(t *testing.T, ctx context.Context, name, flag string) profile.Extension {
+func seedProfileExtension(t *testing.T, ctx context.Context, name, flag string) profile.Pin {
 	t.Helper()
 	directory, err := runid.NewPackageDirectory(name)
 	if err != nil {
@@ -55,7 +55,7 @@ chmod -R go-w "`+root+`"
 	t.Cleanup(func() {
 		runLive(t, context.Background(), "podman", "unshare", "rm", "-rf", "--", root)
 	})
-	return profile.Extension{
+	return profile.Pin{
 		Name:      name,
 		Version:   "1.0.0",
 		Integrity: "sha512-" + strings.Repeat("A", 86) + "==",
@@ -149,7 +149,7 @@ func TestLiveAnAvailableUpdateIsOfferedAndNeverApplied(t *testing.T) {
 	seedProfileRecord(t, ctx, profile.Record{Version: profile.RecordVersion})
 	preserveProfileOffers(t, ctx)
 
-	superseded, err := transport.ResolveExtension(ctx, imageID, liveIsNumberOld)
+	superseded, err := transport.ResolvePackage(ctx, imageID, liveIsNumberOld)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ func TestLiveAnAvailableUpdateIsOfferedAndNeverApplied(t *testing.T) {
 
 	// Applying is an install: the offer names a version, and the bytes are still
 	// checked against what the registry answers when they are fetched.
-	resolved, err := transport.ResolveExtension(ctx, imageID, "is-number")
+	resolved, err := transport.ResolvePackage(ctx, imageID, "is-number")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func TestLiveAnInstalledExtensionIsPinnedToWhatWasFetched(t *testing.T) {
 	}
 	seedProfileRecord(t, ctx, profile.Record{Version: profile.RecordVersion})
 
-	extension, err := transport.ResolveExtension(ctx, imageID, liveIsNumber)
+	extension, err := transport.ResolvePackage(ctx, imageID, liveIsNumber)
 	if err != nil {
 		t.Fatal(err)
 	}

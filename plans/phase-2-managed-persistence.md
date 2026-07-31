@@ -268,6 +268,8 @@ of the Mac-side Git root path, e.g. `api-3f9c2a1b`.
 
 ```text
 /var/lib/pisafe/global/default/extensions/          read-only bind → ~/.pi/agent/npm
+/var/lib/pisafe/global/default/tools/               read-only bind → /opt/pisafe/tools
+/var/lib/pisafe/global/default/tools/bin/           one relative link per command
 /var/lib/pisafe/global/default/pins/                pisafe's record, mounted nowhere
 /var/lib/pisafe/projects/<key>/cache/<ns>/<snap>/   immutable snapshot → overlay lower
 /var/lib/pisafe/projects/<key>/sessions/            overlay lower → session dir
@@ -277,11 +279,13 @@ of the Mac-side Git root path, e.g. `api-3f9c2a1b`.
 ```
 
 The privileged helper allocates only the two project namespaces (`cache`,
-`sessions`), the two profile namespaces (`extensions`, `pins`), and the run's
-bare `overlay` directory. Everything below them — snapshot directories, one
-upper/work pair per declared cache, one prefix root per installed extension —
-is created by pisafe as the mapped UID, because none of it can be known when
-the filesystem is allocated.
+`sessions`), the three profile namespaces (`extensions`, `tools`, `pins`), and
+the run's bare `overlay` directory. Everything below them — snapshot
+directories, one upper/work pair per declared cache, one prefix root per
+installed extension or tool, and the directory of links — is created by pisafe
+as the mapped UID, because none of it can be known when the filesystem is
+allocated. That list is hashed into the VM's security profile, so adding a
+namespace makes an existing VM stale and it has to be recreated.
 
 The profile, the project, and the run filesystem are all root-owned
 fixed-capacity ext4 images allocated by that same helper, which is the only
@@ -353,11 +357,15 @@ thing that mounts anything.
       installs on purpose resolves inside a run, an executable the run drops in
       its home is invocable by name, and one named `git` still loses to the
       image's.
-- [ ] **8b. `pisafe tool install`.** A `tools` namespace in the profile, one
+- [x] **8b. `pisafe tool install`.** A `tools` namespace in the profile, one
       module root per tool as extensions already get, and a `bin` directory of
       relative symlinks so `PATH` gains one entry rather than one per tool. The
-      installer question is settled in the Decisions below; what remains is
-      collision reporting between two tools claiming one binary name.
+      directory is rebuilt whole from the record rather than edited, so nothing
+      a failed install left behind outlives the record that named it. Live test:
+      `TestLiveAnInstalledToolIsOnEveryRunsPathAndNeverWritable` — an installed
+      command resolves and runs inside a run, its dependencies' commands do not
+      reach the run's `PATH`, the run cannot add, replace, or delete a link, and
+      removing one stops it resolving even in a run that is already live.
 - [ ] **9. `gc` sweep of project stores.** Reclaim whole project filesystems
       whose repository is gone. Per-namespace eviction lands in slice 4; this
       is the outer sweep the design already specifies.
@@ -777,6 +785,42 @@ this document is the current truth, not an audit trail. These fold into
   means, and the run's own `~/.local/bin` comes last so `uv tool install` yields
   something invocable. Restating the image's search path is a copy of something
   the base image owns, which is why a live test fails if a base bump moves it.
+- **A tool claims the names its own tree gives it, read back after the
+  install.** npm writes a link in `node_modules/.bin` for every package in the
+  tree, dependencies included, so the alternative was to trust the registry's
+  metadata (`npm view <spec> bin`) before installing. The tree is the truth and
+  the metadata is a copy of it, and filtering the links by whether they point
+  into the named package needs no JSON parsing on the VM at all — a `readlink`
+  and a prefix test. The cost is ordering: the tree has to land in the profile
+  before pisafe knows what it claims, so a package that turns out to provide no
+  command is installed and then removed. That is safe because a tree nothing
+  links to is inert.
+- **A name another tool already provides refuses the install.** Letting the
+  newer win and merely reporting the shadowing were both defensible; refusing
+  is the one that never silently changes what an existing command means, and it
+  is the easiest to relax later if it turns out to be annoying. Reversible: the
+  check is one call to `Tools.Conflicts` in the installer.
+- **Tools get no `update` command.** Installing a tool again resolves the name
+  afresh and replaces it, which is the whole of what an update would do, so a
+  second command would be a second name for one idea. What is genuinely missing
+  is the *offer* — see the open question.
+- **`profile.Extension` became `profile.Pin`.** A tool and an extension are the
+  same four fields plus, for a tool, the names it claims, so `Tool` embeds the
+  shared type. Keeping the old name would have made `Tool` embed `Extension`,
+  which reads as a tool being an extension. Duplicating the four fields and
+  their validation instead was the alternative not taken. The three record
+  operations that were about to be written twice — add, remove, look up — are
+  now one generic helper each.
+- **The `tools` namespace costs a VM recreation.** The set of namespaces the
+  privileged helper allocates is hashed into the VM's security profile, and the
+  helper's `verify` asserts each one exists rather than creating it, so a third
+  profile namespace cannot reach an already-provisioned VM. Putting the tools
+  under `extensions/` would have avoided that, at the price of a directory that
+  is mounted as Pi's global package store holding things that are not packages
+  Pi loads, and of two records sharing one directory namespace where installing
+  one package as both a tool and an extension would collide. The recreation is
+  a one-time cost during development and the plan already specified a `tools`
+  namespace.
 
 ## Open questions
 
@@ -787,11 +831,12 @@ this document is the current truth, not an audit trail. These fold into
   breaks — but a compromised run would then read what an earlier one left. This
   stays open because the answer is a documentation question as much as a code
   one: nothing tells a repository which variables are a bad idea.
-- **Whether two tools may claim one binary name.** A package's `bin` entries
-  are its own choice, not the user's, so installing a second tool can collide
-  with the first. Refusing the install, letting the newer win, and reporting
-  the shadowing are all defensible; nothing decides between them until there is
-  a real collision to look at.
+- **Whether a tool should be updatable in place.** Extensions have `update`,
+  which offers without applying; tools do not, because installing one again
+  replaces it and that is the whole of what an update would do. What tools then
+  lack is the offer: nothing tells the user that a newer release exists. Giving
+  them one means either a second `updates.json` or a shared one keyed across
+  both records, and neither is worth building before someone wants it.
 - **Whether a moved repository can adopt its orphaned store.** A rebind command
   is possible and does not change the key scheme, so this can stay deferred.
 

@@ -285,11 +285,11 @@ func TestTheProfileMountsWhereAgentCodeWouldInstallGlobally(t *testing.T) {
 // the tar stream pisafe reads.
 func TestInstallingAnExtensionRunsWithNetworkAndNoStorage(t *testing.T) {
 	integrity := "sha512-" + strings.Repeat("A", 86) + "=="
-	resolve, err := ExtensionResolveArgs(testImageID, "is-number@7.0.0")
+	resolve, err := PackageResolveArgs(testImageID, "is-number@7.0.0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	install, err := ExtensionInstallArgs(testImageID, "is-number", "7.0.0", integrity)
+	install, err := PackageInstallArgs(testImageID, "is-number", "7.0.0", integrity)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,11 +333,11 @@ func TestInstallingAnExtensionRunsWithNetworkAndNoStorage(t *testing.T) {
 		"unpinned version": {"is-number", "^7.0.0", integrity},
 		"unhashed":         {"is-number", "7.0.0", "sha1-short"},
 	} {
-		if _, err := ExtensionInstallArgs(testImageID, pin[0], pin[1], pin[2]); err == nil {
+		if _, err := PackageInstallArgs(testImageID, pin[0], pin[1], pin[2]); err == nil {
 			t.Errorf("%s was accepted", name)
 		}
 	}
-	if _, err := ExtensionResolveArgs("localhost/pisafe-run:latest", "is-number"); err == nil {
+	if _, err := PackageResolveArgs("localhost/pisafe-run:latest", "is-number"); err == nil {
 		t.Error("a mutable image was accepted")
 	}
 }
@@ -455,5 +455,41 @@ func TestSpecRefusesAProjectKeyItCannotAddress(t *testing.T) {
 		if _, err := spec.RunArgs(); err == nil {
 			t.Errorf("project key %q was accepted", key)
 		}
+	}
+}
+
+// TestInstalledToolsAreReachableAndNotWritable is the tool half of the profile.
+// A run has to find what the user installed without being able to change what a
+// later run executes, and the image's own binaries have to keep answering
+// first, so an installed tool can never decide what git means.
+func TestInstalledToolsAreReachableAndNotWritable(t *testing.T) {
+	args, err := DefaultSpec("run-123", testProjectKey, testImageID).RunArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	expected := "type=bind,src=/var/lib/pisafe/global/default/tools," +
+		"dst=/opt/pisafe/tools,ro,nodev,nosuid"
+	if !strings.Contains(joined, expected) {
+		t.Errorf("run args lack %q:\n%s", expected, joined)
+	}
+	path := "PATH=" + imagePath + ":/opt/pisafe/tools/bin:/home/node/.local/bin"
+	if !strings.Contains(joined, path) {
+		t.Errorf("run args lack %q:\n%s", path, joined)
+	}
+	// Rebinding PATH through a declared cache would let a repository choose what
+	// every command in its own runs resolves to.
+	if err := ValidateCacheEnvironment([]string{"PATH"}); err == nil {
+		t.Error("a declared cache was allowed to rebind PATH")
+	}
+	if got := ToolInstallRoot("ripgrep-33165223"); got !=
+		"/var/lib/pisafe/global/default/tools/ripgrep-33165223" {
+		t.Errorf("tool install root = %q", got)
+	}
+	// Every link is relative, so the directory resolves the same on the VM and
+	// at the path a run mounts it on.
+	if got := ToolBinaryTarget("ripgrep-33165223", "rg"); got !=
+		"../ripgrep-33165223/node_modules/.bin/rg" {
+		t.Errorf("tool link target = %q", got)
 	}
 }
