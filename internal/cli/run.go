@@ -180,7 +180,7 @@ func printRunResult(out io.Writer, result runstart.Result, inferenceConfigured b
 	if inferenceConfigured {
 		fmt.Fprintln(out, "Pi:        keep `pisafe broker` running on this Mac to serve inference")
 	} else {
-		fmt.Fprintln(out, "Pi:        inference unavailable; run pisafe login chatgpt, then pisafe broker")
+		fmt.Fprintln(out, "Pi:        inference unavailable; run pisafe login, then pisafe broker")
 	}
 	return nil
 }

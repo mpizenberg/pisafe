@@ -1,38 +1,37 @@
 package chatgpt
 
 import (
-	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os/exec"
-	"strings"
-)
 
-const (
-	keychainService = "pisafe"
-	keychainAccount = "chatgpt"
+	"github.com/mpizenberg/pisafe/internal/keychain"
 )
 
 // ErrNotLoggedIn distinguishes "no credential stored" from Keychain failures
 // so callers can prompt for pisafe login instead of failing opaquely.
 var ErrNotLoggedIn = errors.New("no ChatGPT login is stored; run: pisafe login chatgpt")
 
-// Keychain persists the credential in the macOS login keychain through
-// /usr/bin/security. The secret is written over security's interactive stdin
-// so tokens never appear in process arguments, and it is base64-wrapped so
-// the JSON survives security's whitespace-based command tokenizer.
+// secretStore is the durable half of a login, kept as an interface so what a
+// credential means stays here and where it is kept stays there.
+type secretStore interface {
+	Save(ctx context.Context, account string, secret []byte) error
+	Load(ctx context.Context, account string) ([]byte, error)
+	Delete(ctx context.Context, account string) error
+}
+
+// Keychain persists the OAuth credential as JSON under the provider's own
+// name.
 type Keychain struct {
-	execute func(ctx context.Context, stdin string, args ...string) (string, error)
+	secrets secretStore
 }
 
 func NewKeychain() Keychain {
-	return Keychain{execute: runSecurity}
+	return Keychain{secrets: keychain.New()}
 }
 
-func (keychain Keychain) Save(ctx context.Context, credential Credential) error {
+func (store Keychain) Save(ctx context.Context, credential Credential) error {
 	if err := credential.validate(); err != nil {
 		return err
 	}
@@ -40,61 +39,30 @@ func (keychain Keychain) Save(ctx context.Context, credential Credential) error 
 	if err != nil {
 		return fmt.Errorf("encode chatgpt credential: %w", err)
 	}
-	command := fmt.Sprintf(
-		"add-generic-password -U -s %s -a %s -w %s\n",
-		keychainService,
-		keychainAccount,
-		base64.StdEncoding.EncodeToString(encoded),
-	)
-	if _, err := keychain.execute(ctx, command, "-i"); err != nil {
-		return fmt.Errorf("store chatgpt credential in the keychain: %w", err)
-	}
-	return nil
+	return store.secrets.Save(ctx, Name, encoded)
 }
 
-func (keychain Keychain) Load(ctx context.Context) (Credential, error) {
-	output, err := keychain.execute(
-		ctx,
-		"",
-		"find-generic-password",
-		"-s", keychainService,
-		"-a", keychainAccount,
-		"-w",
-	)
-	if err != nil {
-		if strings.Contains(err.Error(), "could not be found") {
-			return Credential{}, ErrNotLoggedIn
-		}
-		return Credential{}, fmt.Errorf("read chatgpt credential from the keychain: %w", err)
+// Forget drops the login. The refresh token it held may still be live at the
+// provider until it is used or expires, which is why the message a user gets
+// says where to revoke it rather than claiming this did.
+func (store Keychain) Forget(ctx context.Context) error {
+	return store.secrets.Delete(ctx, Name)
+}
+
+func (store Keychain) Load(ctx context.Context) (Credential, error) {
+	content, err := store.secrets.Load(ctx, Name)
+	if errors.Is(err, keychain.ErrNotFound) {
+		return Credential{}, ErrNotLoggedIn
 	}
-	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(output))
 	if err != nil {
-		return Credential{}, fmt.Errorf("decode stored chatgpt credential: %w", err)
+		return Credential{}, err
 	}
 	var credential Credential
-	if err := json.Unmarshal(decoded, &credential); err != nil {
+	if err := json.Unmarshal(content, &credential); err != nil {
 		return Credential{}, fmt.Errorf("parse stored chatgpt credential: %w", err)
 	}
 	if err := credential.validate(); err != nil {
 		return Credential{}, fmt.Errorf("stored chatgpt credential is incomplete: %w", err)
 	}
 	return credential, nil
-}
-
-func runSecurity(ctx context.Context, stdin string, args ...string) (string, error) {
-	command := exec.CommandContext(ctx, "/usr/bin/security", args...)
-	if stdin != "" {
-		command.Stdin = strings.NewReader(stdin)
-	}
-	var stdout, stderr bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
-		detail := strings.TrimSpace(stderr.String())
-		if detail == "" {
-			detail = err.Error()
-		}
-		return "", errors.New(detail)
-	}
-	return stdout.String(), nil
 }

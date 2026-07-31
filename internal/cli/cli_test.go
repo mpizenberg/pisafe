@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -690,6 +691,87 @@ func TestPrintReplayConflictQuotesPathsAndNamesEveryWayForward(t *testing.T) {
 	} {
 		if !strings.Contains(output.String(), expected) {
 			t.Fatalf("output = %q, missing %s", output.String(), expected)
+		}
+	}
+}
+
+// A login is refused before it reaches the Keychain when what it says about
+// the upstream cannot be true, so a stored key always names something the
+// broker can actually route to.
+func TestALoginDescribesItsUpstreamOrIsRefusedEarly(t *testing.T) {
+	models := filepath.Join(t.TempDir(), "models.json")
+	if err := os.WriteFile(models, []byte(`[{"id":"local-a"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, args := range map[string][]string{
+		"known provider given an endpoint": {"anthropic", "--url", "https://x.example"},
+		"custom provider given nothing":    {"local"},
+		"custom provider without models":   {"local", "--url", "https://x.example", "--api", "openai-responses"},
+		"custom provider over plain http": {
+			"local", "--url", "http://x.example", "--api", "openai-responses",
+			"--models", models,
+		},
+		"custom provider with an unknown wire format": {
+			"local", "--url", "https://x.example", "--api", "grpc", "--models", models,
+		},
+		"custom provider with no such model list": {
+			"local", "--url", "https://x.example", "--api", "openai-responses",
+			"--models", filepath.Join(t.TempDir(), "absent.json"),
+		},
+		"unknown option": {"local", "--endpoint", "https://x.example"},
+		"option without a value": {
+			"local", "--url", "https://x.example", "--api", "openai-responses", "--models",
+		},
+	} {
+		if _, err := parseKeyedLogin(args[0], args[1:], io.Discard); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+
+	known, err := parseKeyedLogin("openai", nil, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if known.Custom() || known.URL != "" || len(known.Models) != 0 {
+		t.Fatalf("record = %#v", known)
+	}
+	custom, err := parseKeyedLogin(
+		"local",
+		[]string{"--url", "http://127.0.0.1:1234", "--api", "openai-completions", "--models", models},
+		io.Discard,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !custom.Custom() || custom.Describe() != "http://127.0.0.1:1234" ||
+		len(custom.Models) != 1 {
+		t.Fatalf("record = %#v", custom)
+	}
+}
+
+// The key is read from stdin because an argument is visible to every process
+// on the Mac and stays in the shell's history.
+func TestAKeyIsReadFromStdinAndMustNotBeBlank(t *testing.T) {
+	for name, input := range map[string]string{
+		"blank":          "   \n",
+		"nothing at all": "",
+		"only a newline": "\n",
+	} {
+		if _, err := readKey("openai", strings.NewReader(input), io.Discard); err == nil {
+			t.Errorf("%s was accepted as a key", name)
+		}
+	}
+	for name, input := range map[string]string{
+		"with a newline":     " sk-test-key \n",
+		"without a newline":  "sk-test-key",
+		"with more after it": "sk-test-key\nnot the key\n",
+	} {
+		key, err := readKey("openai", strings.NewReader(input), io.Discard)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if key != "sk-test-key" {
+			t.Errorf("%s: key = %q", name, key)
 		}
 	}
 }

@@ -10,12 +10,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/broker"
+	"github.com/mpizenberg/pisafe/internal/keychain"
 )
 
 func testAccessToken(accountID string) string {
@@ -243,33 +243,34 @@ func TestSourcePropagatesMissingLogin(t *testing.T) {
 	}
 }
 
-func TestKeychainRoundTripUsesStdinForSecrets(t *testing.T) {
-	saved := map[string]string{}
-	keychain := Keychain{execute: func(
-		_ context.Context,
-		stdin string,
-		args ...string,
-	) (string, error) {
-		if len(args) == 1 && args[0] == "-i" {
-			fields := strings.Fields(stdin)
-			if len(fields) == 0 || fields[0] != "add-generic-password" {
-				return "", fmt.Errorf("unexpected interactive command %q", stdin)
-			}
-			saved["secret"] = fields[len(fields)-1]
-			return "", nil
-		}
-		if args[0] == "find-generic-password" {
-			secret, ok := saved["secret"]
-			if !ok {
-				return "", errors.New("The specified item could not be found in the keychain.")
-			}
-			return secret + "\n", nil
-		}
-		return "", fmt.Errorf("unexpected security invocation %v", args)
-	}}
+// fakeSecrets stands in for the Keychain. What the OAuth credential is stored
+// as belongs to this package; where it is kept does not.
+type fakeSecrets map[string][]byte
+
+func (secrets fakeSecrets) Save(_ context.Context, account string, secret []byte) error {
+	secrets[account] = secret
+	return nil
+}
+
+func (secrets fakeSecrets) Delete(_ context.Context, account string) error {
+	delete(secrets, account)
+	return nil
+}
+
+func (secrets fakeSecrets) Load(_ context.Context, account string) ([]byte, error) {
+	secret, ok := secrets[account]
+	if !ok {
+		return nil, keychain.ErrNotFound
+	}
+	return secret, nil
+}
+
+func TestAStoredLoginIsCompleteOrIsNotALogin(t *testing.T) {
+	secrets := fakeSecrets{}
+	store := Keychain{secrets: secrets}
 
 	ctx := context.Background()
-	if _, err := keychain.Load(ctx); !errors.Is(err, ErrNotLoggedIn) {
+	if _, err := store.Load(ctx); !errors.Is(err, ErrNotLoggedIn) {
 		t.Fatalf("empty keychain err = %v", err)
 	}
 	credential := Credential{
@@ -278,13 +279,10 @@ func TestKeychainRoundTripUsesStdinForSecrets(t *testing.T) {
 		Expires:   time.Now().Add(time.Hour).UTC(),
 		AccountID: "acct-kc",
 	}
-	if err := keychain.Save(ctx, credential); err != nil {
+	if err := store.Save(ctx, credential); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(saved["secret"], "refresh-kc") {
-		t.Fatal("secret was not base64-wrapped")
-	}
-	loaded, err := keychain.Load(ctx)
+	loaded, err := store.Load(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,8 +290,20 @@ func TestKeychainRoundTripUsesStdinForSecrets(t *testing.T) {
 		!loaded.Expires.Equal(credential.Expires) {
 		t.Fatalf("loaded = %#v", loaded)
 	}
-	if err := keychain.Save(ctx, Credential{Access: "only-access"}); err == nil {
+	if err := store.Save(ctx, Credential{Access: "only-access"}); err == nil {
 		t.Fatal("incomplete credential was saved")
+	}
+	// A credential that lost a field in storage cannot be refreshed, so it is
+	// not a login however it got that way.
+	secrets[Name] = []byte(`{"access":"a","refresh":"b"}`)
+	if _, err := store.Load(ctx); err == nil {
+		t.Fatal("incomplete credential was loaded")
+	}
+	if err := store.Forget(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Load(ctx); !errors.Is(err, ErrNotLoggedIn) {
+		t.Fatalf("forgotten login err = %v", err)
 	}
 }
 

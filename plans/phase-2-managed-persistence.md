@@ -285,7 +285,12 @@ the filesystem is allocated:
 ```text
 ~/Library/Application Support/pisafe/<run>.json     the run record
 ~/Library/Application Support/pisafe/projects/<key>.json   the checkout a store belongs to
+~/Library/Application Support/pisafe/providers/<name>.json  an API-key login, minus its key
 ```
+
+The provider record holds no credential. Every key is in the login keychain
+under service `pisafe` and the provider's own name, and the record is what
+names it: a key nothing names could not be removed.
 
 The privileged helper allocates only the two project namespaces (`cache`,
 `sessions`), the three profile namespaces (`extensions`, `tools`, `pins`), and
@@ -397,11 +402,17 @@ thing that mounts anything.
       `TestServerRelaysEachProviderOnItsOwnRoute` — two upstreams answer on
       their own routes with their own credentials, one run capability reaches
       both, and one provider's name with another's API path reaches neither.
-- [ ] **10b. `pisafe login` for API-key providers.** `anthropic` and `openai`
+- [x] **10b. `pisafe login` for API-key providers.** `anthropic` and `openai`
       against their published endpoints, plus a named custom endpoint for
       anything OpenAI-compatible, with the key read off stdin and kept in the
       Keychain beside the ChatGPT tokens. Plus the commands that make several
-      logins manageable: listing them and taking one away.
+      logins manageable: `pisafe login` with no argument lists them, `pisafe
+      logout NAME` takes one away. No live test: a real one would need real
+      provider credentials. Verified instead by an end-to-end exercise against
+      a stub upstream on the Mac's own loopback — a real run's models.json
+      carried both the subscription and the keyed provider on their own routes
+      with one capability, and a request from inside the run reached the stub
+      carrying the upstream key the run never held.
 - [ ] **11. Backup, reset, recovery.** Cheapest useful piece is resetting or
       removing a scope, which is nearly free once scopes exist.
 
@@ -915,6 +926,40 @@ this document is the current truth, not an audit trail. These fold into
   logins and serves the rest. Nothing is weakened: the relay's per-request
   fail-closed path is what actually refuses a request whose credentials cannot
   be produced, and it was already there.
+- **A built-in provider's login records only its name.** Writing the endpoint,
+  wire format, and model list into the record at login time was the obvious
+  alternative and makes the record self-describing. It was not taken because a
+  release that adds a model or moves an endpoint would then never reach a key
+  stored months earlier. The table wins over the record, so a record hand-edited
+  to point a known name elsewhere is ignored rather than obeyed — which also
+  means a stored key cannot be redirected to another host by editing a file.
+- **A custom endpoint declares its models; pisafe does not discover them.**
+  Asking the endpoint's own `/v1/models` was the alternative. It returns
+  identifiers and nothing else — no context window, no cost — and a wrong
+  context window is a real failure rather than a cosmetic one. The declared
+  list has its per-model routing fields stripped rather than refused, because
+  Pi's own provider data is the obvious thing to copy one from and every entry
+  there carries them; a model naming its own `baseUrl` would reach the provider
+  without passing the relay.
+- **Plain HTTP is refused except on loopback.** The key is a credential, and
+  sending it in clear over a LAN is the exposure a broker holding it exists to
+  prevent. Loopback is exempt because it never leaves the Mac — which is also
+  what makes a local model server a first-class upstream. A LAN endpoint needs
+  TLS or a tunnel; reversible if that proves too strict.
+- **An endpoint may not end in the path segment pisafe appends.** Every
+  OpenAI-compatible service documents its base URL ending in `/v1`, and the
+  relay appends the client's own API path, so pasting the documented URL
+  produces `/v1/v1/responses` and nothing but the upstream's 404 would say so.
+  Refusing it, rather than silently rewriting, teaches the shape once. This was
+  found by the end-to-end exercise, not by a test.
+- **A login is removable whether or not it is still usable.** The first cut had
+  `logout` confirm the login existed by loading the whole catalog, which made a
+  record the rules no longer accept impossible to remove through the CLI — found
+  when the rule above was added under an existing record. Removal now asks only
+  whether something is stored under the name.
+- **The Keychain became its own package, and a key is read only when a request
+  is relayed.** Starting a run renders models.json, which contains no upstream
+  credential, so it now touches no secret at all.
 - **Consequence of the route change:** a run that is active across this change
   has a models.json pointing at the old unprefixed path and gets 404s from the
   relay until it is stopped and resumed, which rewrites it. No data is at risk

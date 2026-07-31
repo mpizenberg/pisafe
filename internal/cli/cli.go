@@ -14,7 +14,7 @@ import (
 
 var errUsage = errors.New(
 	"usage: pisafe <run|connect|stop|resume|diff|cp|apply|discard|cache|extension" +
-		"|tool|gc|list|zed|login|broker|doctor|help>",
+		"|tool|gc|list|zed|login|logout|broker|doctor|help>",
 )
 
 func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
@@ -29,10 +29,12 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 	case "connect":
 		return runConnect(args[1:])
 	case "login":
+		return runLogin(ctx, args[1:], in, out)
+	case "logout":
 		if len(args) != 2 {
-			return fmt.Errorf("login requires a provider: pisafe login chatgpt")
+			return errUsage
 		}
-		return runLogin(ctx, args[1], out)
+		return runLogout(ctx, args[1], out)
 	case "broker":
 		if len(args) != 1 {
 			return errUsage
@@ -168,8 +170,22 @@ Usage:
                    work. A run whose work was never imported is only reported;
                    discard it explicitly.
   pisafe zed RUN   Open a configured run in Zed
+  pisafe login     Show which providers are logged in. Runs are offered all of
+                   them at once and pick between them in Pi's model list.
   pisafe login chatgpt
                    Store a ChatGPT subscription login in the macOS Keychain
+  pisafe login anthropic|openai
+                   Store an API key for that provider. The key is read from
+                   stdin, never from the command line.
+  pisafe login NAME --url URL --api API --models FILE
+                   Store a key for any other endpoint speaking a supported
+                   wire format: openai-completions, openai-responses, or
+                   anthropic-messages. FILE is a JSON array of Pi model
+                   definitions, since pisafe cannot know what an endpoint it
+                   has never heard of serves. Plain HTTP is refused except on
+                   localhost, where the key stays on this Mac.
+  pisafe logout NAME
+                   Take one login away
   pisafe broker    Relay brokered inference to active runs (foreground)
   pisafe doctor    Check Phase 1 host prerequisites
   pisafe list      Show durable run records

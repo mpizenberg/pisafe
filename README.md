@@ -40,6 +40,8 @@ explicitly. The run-image Containerfile is compiled into the controller.
 
 ```sh
 pisafe login chatgpt         # once: stores a ChatGPT Plus/Pro login in the Keychain
+pisafe login anthropic       # or an API key, read from stdin and kept there too
+pisafe login                 # what is logged in; runs are offered all of it
 pisafe broker                # foreground; runs have no inference without it
 ```
 

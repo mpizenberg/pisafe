@@ -130,7 +130,8 @@ pisafe discard <run> --confirm <run>
 pisafe gc [--dry-run]
 pisafe doctor
 
-pisafe login chatgpt
+pisafe login [chatgpt|anthropic|openai|<name> --url --api --models]
+pisafe logout <name>
 
 # Phase 2 (persistent profile management):
 pisafe extension install <package>
@@ -302,7 +303,8 @@ future flag).
 
 Provider credentials live on the Mac, in the Keychain, and never enter the VM.
 `pisafe login chatgpt` runs the ChatGPT Plus/Pro OAuth flow and persists the
-refresh token there. Pi normally stores OAuth tokens in `~/.pi/agent/auth.json`;
+refresh token there; `pisafe login <provider>` stores an API key for an upstream
+reached with one. Pi normally stores OAuth tokens in `~/.pi/agent/auth.json`;
 that file must not exist in the run container.
 
 Instead the broker is declared in Pi's `models.json` as a local provider
@@ -312,6 +314,11 @@ run receives only a revocable, run-scoped capability. A standard wire format
 rather than a custom protocol keeps streaming and tool-call fidelity upstream's
 problem, and `models.json` rather than an extension keeps pisafe off a pre-1.0
 API.
+
+Every configured upstream is declared, one `models.json` entry each, so a run
+chooses between them in Pi's own model list rather than through a pisafe
+command. One relay serves them all: the provider's name leads the path, and the
+run capability authorizes the run rather than any one provider.
 
 The broker lives on the Mac, which the firewall denies, so its path into runs is
 explicit and narrow: the controller opens one reverse SSH relay into the VM, the
