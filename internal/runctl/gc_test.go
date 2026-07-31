@@ -2,12 +2,14 @@ package runctl
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/runid"
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
@@ -38,7 +40,7 @@ func TestCollectReclaimsAnImportedRunRecordAndAll(t *testing.T) {
 	}
 
 	before := len(backend.calls)
-	done, err := controller.Collect(ctx, plan)
+	done, err := controller.Collect(ctx, plan, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +90,7 @@ func TestCollectNeverRemovesWorkThatWasNeverImported(t *testing.T) {
 	}
 
 	before := len(backend.calls)
-	if _, err := controller.Collect(ctx, plan); err != nil {
+	if _, err := controller.Collect(ctx, plan, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if len(backend.calls) != before {
@@ -121,6 +123,186 @@ func TestCollectHasNothingLeftToDoAfterDiscard(t *testing.T) {
 	if !plan.Empty() || len(plan.Kept) != 0 {
 		t.Fatalf("plan = %#v", plan)
 	}
+}
+
+// TestASweepReclaimsAStoreOnlyAfterItsCheckoutStaysGone is the whole shape of
+// the project sweep. A project filesystem holds transcripts nothing can
+// reproduce, and the evidence that it is finished with — a path that no longer
+// resolves — is exactly the evidence an unplugged disk produces, so one look is
+// never enough to remove one.
+func TestASweepReclaimsAStoreOnlyAfterItsCheckoutStaysGone(t *testing.T) {
+	ctx := context.Background()
+	store := runstate.NewStore(t.TempDir())
+	backend := &fakeBackend{}
+	controller := New(backend, store, &fakeSSHStore{}, testInference{})
+	kept := registerCheckout(t, store, t.TempDir(), "kept")
+	gone := registerCheckout(t, store, t.TempDir(), "gone")
+	now := time.Now().UTC()
+
+	// While both checkouts are there the sweep has nothing to say about either.
+	plan, err := controller.Plan(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.MissingProjects) != 0 || len(plan.ReclaimedProjects) != 0 {
+		t.Fatalf("plan = %#v", plan)
+	}
+
+	if err := os.RemoveAll(gone.Root); err != nil {
+		t.Fatal(err)
+	}
+	plan, err = controller.Plan(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.MissingProjects) != 1 || plan.MissingProjects[0].Key != gone.Key {
+		t.Fatalf("plan = %#v", plan)
+	}
+	if !plan.Empty() {
+		t.Fatal("a checkout seen missing once was reclaimed")
+	}
+	done, err := controller.Collect(ctx, plan, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls := callsString(backend.calls); strings.Contains(calls, "remove-project-storage") {
+		t.Fatalf("the store was removed on first sight:\n%s", calls)
+	}
+	if len(done.MissingProjects) != 1 || done.MissingProjects[0].MissingSince == nil {
+		t.Fatalf("done = %#v", done)
+	}
+
+	// The window is what the stamp starts, and it outlives the sweep that made
+	// it: a later sweep inside it still leaves the store alone.
+	plan, err = controller.Plan(now.Add(Retention - time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Empty() || len(plan.MissingProjects) != 1 {
+		t.Fatalf("plan inside the window = %#v", plan)
+	}
+
+	plan, err = controller.Plan(now.Add(Retention + time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.ReclaimedProjects) != 1 || plan.ReclaimedProjects[0].Key != gone.Key {
+		t.Fatalf("plan = %#v", plan)
+	}
+	if _, err := controller.Collect(ctx, plan, now.Add(Retention+time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	last := backend.calls[len(backend.calls)-1]
+	if last.kind != "remove-project-storage" || last.args[0] != gone.Key {
+		t.Fatalf("last call = %#v", last)
+	}
+	records, err := store.ListProjects()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].Key != kept.Key {
+		t.Fatalf("records = %#v", records)
+	}
+}
+
+// TestASweepLeavesAStoreWhoseCheckoutCameBack is the case the window exists
+// for. The stamp is old enough to release the store, and the checkout being
+// there again overrules it.
+func TestASweepLeavesAStoreWhoseCheckoutCameBack(t *testing.T) {
+	store := runstate.NewStore(t.TempDir())
+	controller := New(&fakeBackend{}, store, &fakeSSHStore{}, testInference{})
+	project := registerCheckout(t, store, t.TempDir(), "returning")
+	long := time.Now().UTC().Add(-10 * Retention)
+	if err := store.MarkProjectMissing(project.Key, long); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := controller.Plan(time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Empty() || len(plan.MissingProjects) != 0 {
+		t.Fatalf("plan = %#v", plan)
+	}
+}
+
+// TestASweepLeavesAStoreARunStillRefersTo keeps the two sweeps from racing: a
+// run's own storage stacks on the project's, and a run record is the only
+// evidence that anything still needs it.
+func TestASweepLeavesAStoreARunStillRefersTo(t *testing.T) {
+	_, workspace, snapshot := applyFixture(t, "gc-project-held")
+	store := runstate.NewStore(t.TempDir())
+	controller := New(&fakeBackend{applyWorkspace: workspace}, store, &fakeSSHStore{}, testInference{})
+	stoppedRun(t, store, snapshot)
+	checkout := filepath.Join(t.TempDir(), testProject.Directory)
+	if err := os.MkdirAll(checkout, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The run's manifest is filed under testProject.Key, so the record the
+	// sweep reads has to be the one that key belongs to.
+	if err := store.RegisterProject(testProject); err != nil {
+		t.Fatal(err)
+	}
+
+	// testProject's checkout never existed, so the sweep would stamp it at once
+	// were the run not there.
+	plan, err := controller.Plan(time.Now().UTC().Add(10 * Retention))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.MissingProjects) != 0 || len(plan.ReclaimedProjects) != 0 {
+		t.Fatalf("plan = %#v", plan)
+	}
+}
+
+// TestARunNeverLeavesAStoreNothingCanAttribute is why registration comes first:
+// a project filesystem whose checkout was never written down is one no sweep
+// could ever recognise as unused.
+func TestARunNeverLeavesAStoreNothingCanAttribute(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "projects"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	backend := &fakeBackend{}
+	controller := New(backend, runstate.NewStore(root), &fakeSSHStore{}, testInference{})
+
+	_, err := controller.StartPrepared(
+		context.Background(),
+		testPrepared(),
+		testProject,
+		testImage,
+		testIdentity,
+		nil,
+	)
+	if err == nil {
+		t.Fatal("a run started without recording what its project store belongs to")
+	}
+	if calls := callsString(backend.calls); strings.Contains(calls, "ensure-project-storage") {
+		t.Fatalf("the store was created anyway:\n%s", calls)
+	}
+}
+
+// registerCheckout makes a checkout the sweep can find and records the project
+// it keys, which is what one run of that project would have done.
+func registerCheckout(
+	t *testing.T,
+	store runstate.Store,
+	parent string,
+	name string,
+) runid.Project {
+	t.Helper()
+	checkout := filepath.Join(parent, name)
+	if err := os.MkdirAll(checkout, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	project, err := runid.NewProject(checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RegisterProject(project); err != nil {
+		t.Fatal(err)
+	}
+	return project
 }
 
 // importedRun drives the real apply path, so the manifest collection reads is

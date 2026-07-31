@@ -496,11 +496,22 @@ func TestParseInputSelectionSeparatesUnsafeApproval(t *testing.T) {
 }
 
 func TestPrintCollectionSeparatesWhatWasDoneFromWhatWasKept(t *testing.T) {
+	missing := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
 	plan := runctl.GCPlan{
 		Reclaimed: []string{"run-imported"},
 		Kept: []runctl.KeptRun{{
 			RunID:  "run-stopped",
 			Reason: "stopped with work that was never imported",
+		}},
+		MissingProjects: []runstate.ProjectRecord{{
+			Key:          "widget-00000000",
+			Root:         "/Users/dev/widget",
+			MissingSince: &missing,
+		}},
+		ReclaimedProjects: []runstate.ProjectRecord{{
+			Key:          "gadget-11111111",
+			Root:         "/Users/dev/gadget",
+			MissingSince: &missing,
 		}},
 	}
 	var done bytes.Buffer
@@ -509,8 +520,12 @@ func TestPrintCollectionSeparatesWhatWasDoneFromWhatWasKept(t *testing.T) {
 		"Reclaimed:",
 		"run-imported",
 		"pisafe/RUN branches keep the work",
+		`"/Users/dev/gadget" (missing since 2026-07-24)`,
 		"Pruned:",
 		"sha256:abc",
+		"Missing:",
+		`"/Users/dev/widget" (missing since 2026-07-24)`,
+		"move one back to keep its transcripts",
 		"Kept:",
 		"run-stopped (stopped with work that was never imported)",
 	} {

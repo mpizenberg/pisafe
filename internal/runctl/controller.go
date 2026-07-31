@@ -26,6 +26,7 @@ type Backend interface {
 	CreateRunStorage(context.Context, string) error
 	VerifyRunStorage(context.Context, string) error
 	EnsureProjectStorage(context.Context, string) error
+	RemoveProjectStorage(context.Context, string) error
 	EnsureGlobalStorage(context.Context) error
 	ReadProfileRecord(context.Context) (profile.Record, error)
 	SelectCacheSnapshots(
@@ -59,6 +60,10 @@ type StateStore interface {
 	BeginApply(string, gitstage.PlannedApply) (runstate.Manifest, error)
 	CompleteApply(string) (runstate.Manifest, error)
 	RecordError(string, error) (runstate.Manifest, error)
+	RegisterProject(runid.Project) error
+	ListProjects() ([]runstate.ProjectRecord, error)
+	MarkProjectMissing(string, time.Time) error
+	ForgetProject(string) error
 }
 
 type SSHStore interface {
@@ -112,6 +117,12 @@ func (controller Controller) StartPrepared(
 		return runstate.Manifest{}, err
 	}
 
+	// A project key is a one-way digest of the checkout path, so a filesystem
+	// that exists before anything records where it came from could never be
+	// recognised as unused. Registering first is what keeps that impossible.
+	if err := controller.store.RegisterProject(project); err != nil {
+		return runstate.Manifest{}, err
+	}
 	// Neither shared filesystem is rolled back with a failed run. Both outlive
 	// every run that reaches them, so they are ensured before the run has
 	// anything to roll back.

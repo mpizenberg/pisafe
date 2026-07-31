@@ -554,6 +554,14 @@ func (transport Transport) EnsureProjectStorage(ctx context.Context, projectKey 
 	return transport.storage(ctx, "ensure", "project", projectKey)
 }
 
+// RemoveProjectStorage releases a project's whole filesystem: its shared cache,
+// its session store, and the image behind them. Nothing here decides that a
+// project is finished with; a store is unmounted and dropped only once the
+// checkout it is keyed by has been gone for a whole retention window.
+func (transport Transport) RemoveProjectStorage(ctx context.Context, projectKey string) error {
+	return transport.storage(ctx, "remove", "project", projectKey)
+}
+
 // SelectCacheSnapshots names the generation each declared cache starts from.
 // Falling back to the newest generation in a namespace is what keeps a changed
 // lockfile from costing a cold fetch: the tool restores the previous

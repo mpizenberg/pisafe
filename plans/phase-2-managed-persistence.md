@@ -278,6 +278,15 @@ of the Mac-side Git root path, e.g. `api-3f9c2a1b`.
 /var/lib/pisafe/runs/<run>/overlay/<ns>/            the run's private upper and work
 ```
 
+The key is one-way, so nothing on the VM can say which checkout a project
+filesystem came from. What can is a Mac-side record per project, written before
+the filesystem is allocated:
+
+```text
+~/Library/Application Support/pisafe/<run>.json     the run record
+~/Library/Application Support/pisafe/projects/<key>.json   the checkout a store belongs to
+```
+
 The privileged helper allocates only the two project namespaces (`cache`,
 `sessions`), the three profile namespaces (`extensions`, `tools`, `pins`), and
 the run's bare `overlay` directory. Everything below them — snapshot
@@ -366,9 +375,19 @@ thing that mounts anything.
       command resolves and runs inside a run, its dependencies' commands do not
       reach the run's `PATH`, the run cannot add, replace, or delete a link, and
       removing one stops it resolving even in a run that is already live.
-- [ ] **9. `gc` sweep of project stores.** Reclaim whole project filesystems
+- [x] **9. `gc` sweep of project stores.** Reclaim whole project filesystems
       whose repository is gone. Per-namespace eviction lands in slice 4; this
-      is the outer sweep the design already specifies.
+      is the outer sweep the design already specifies. A project key is a
+      one-way digest, so the sweep needs a Mac-side record naming the checkout,
+      written before the filesystem exists. A checkout that is gone starts a
+      retention window rather than releasing the store, because the evidence
+      that a project is finished with is exactly the evidence an unplugged disk
+      produces and the store holds transcripts nothing can reproduce. Live test:
+      `TestLiveAReclaimedProjectStoreTakesEverythingWithIt` — a seeded store is
+      mounted and holds a transcript and a cache generation, reclaiming it
+      leaves neither the mount nor the directory, reclaiming again is not a
+      failure, and the same key then allocates a filesystem with none of the old
+      project in it.
 - [ ] **10. Other providers.** Additional `pisafe login <provider>` commands
       over the existing broker interface.
 - [ ] **11. Backup, reset, recovery.** Cheapest useful piece is resetting or
@@ -821,6 +840,47 @@ this document is the current truth, not an audit trail. These fold into
   one package as both a tool and an extension would collide. The recreation is
   a one-time cost during development and the plan already specified a `tools`
   namespace.
+- **A project store is attributed by a Mac-side record, not by asking the VM.**
+  The key is a one-way digest of the checkout path, so a filesystem cannot say
+  where it came from and no amount of looking at the VM would answer it. The
+  record is written before the filesystem is allocated, which is what makes
+  "every store is attributable" an invariant rather than a hope: the only
+  failure it admits is a record whose store was never created, and removing one
+  of those costs nothing. It also means the sweep never enumerates the VM, which
+  is what keeps this slice off the privileged helper and out of a VM recreation
+  — the helper's `remove project` action already existed and its storage roots
+  are `711` and `700`, so listing them would need a new privileged action.
+  Consequence, and the reason this is worth stating: a project store created
+  before this slice has no record and will never be swept. The VM was recreated
+  during slice 8b, so there are none in practice.
+- **A missing checkout starts a window; it does not release the store.** The
+  alternative was reclaiming on the first sweep that finds the path gone, which
+  is what "the repository is gone" literally means. It was not taken because the
+  evidence is indistinguishable from an unplugged disk or a network mount that
+  had not come up, and a project store is the one thing pisafe keeps that it
+  cannot reproduce — the cache is disposable by design, transcripts are not. The
+  window is the same `Retention` an imported run gets, and the stamp is on the
+  record so it survives the sweep that wrote it. Two consequences worth naming:
+  an orphan needs two sweeps a week apart to go, and a checkout that comes back
+  is protected by presence being rechecked every sweep rather than by the stamp
+  being cleared, which only a later run does.
+- **Presence is the path existing, not the path being a Git repository.**
+  Asking git was the better-looking check — pisafe's own notion of a project is
+  the Git root there — but `RepositoryRoot` cannot distinguish "not a
+  repository" from "git could not run", so a broken git would report every
+  project orphaned at once. Only the filesystem denying the path counts; an
+  unreadable parent or any other error leaves the store alone. A directory that
+  is no longer a repository therefore keeps its store, which is consistent with
+  the key being the path.
+- **A project with any run record is skipped entirely**, including runs the same
+  sweep is reclaiming. Ordering the two sweeps so a project could be released in
+  the same pass was the alternative; not taking it costs one extra week for a
+  project whose last run expires at the same time, and buys a predicate with no
+  ordering in it at all.
+- **`runid.Project` carries the checkout it was made from**, so registration can
+  happen in the controller immediately before the filesystem is ensured rather
+  than in the caller that happens to know the path. Colocating them is what
+  makes the ordering unbreakable by a future caller.
 
 ## Open questions
 
@@ -838,7 +898,16 @@ this document is the current truth, not an audit trail. These fold into
   them one means either a second `updates.json` or a shared one keyed across
   both records, and neither is worth building before someone wants it.
 - **Whether a moved repository can adopt its orphaned store.** A rebind command
-  is possible and does not change the key scheme, so this can stay deferred.
+  is possible and does not change the key scheme, so this can stay deferred. It
+  is now cheaper than it was: the project record names the old checkout, so
+  rebinding is rewriting one record and renaming one filesystem, and the sweep
+  gives the user a week's notice before the store it would adopt is gone.
+- **Whether long-unused project stores should be reported.** The design says
+  `gc` "reports or prunes long-unused per-project caches and session stores".
+  Slice 9 did the orphan half only, because a project you have not touched in a
+  month is still yours and a report with no action attached to it is noise. What
+  would make it worth adding is a command to reset or drop one project's store
+  by name, which is slice 11's territory.
 
 ## Verification
 

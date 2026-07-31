@@ -23,7 +23,17 @@ import (
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
-var testProject = runid.Project{Directory: "project", Key: "project-3f9c2a1b"}
+// testProject is derived rather than written out, because a project record
+// carries the checkout its key was made from and refuses to describe any other.
+var testProject = mustProject("/tmp/pisafe-test/project")
+
+func mustProject(root string) runid.Project {
+	project, err := runid.NewProject(root)
+	if err != nil {
+		panic(err)
+	}
+	return project
+}
 
 const testImage = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
@@ -99,6 +109,17 @@ func (backend *fakeBackend) EnsureProjectStorage(_ context.Context, _ string) er
 	backend.calls = append(backend.calls, backendCall{kind: "ensure-project-storage"})
 	if backend.failAt == "ensure-project-storage" {
 		return errors.New("ensure project storage failed")
+	}
+	return nil
+}
+
+func (backend *fakeBackend) RemoveProjectStorage(_ context.Context, projectKey string) error {
+	backend.calls = append(backend.calls, backendCall{
+		kind: "remove-project-storage",
+		args: []string{projectKey},
+	})
+	if backend.failAt == "remove-project-storage" {
+		return errors.New("remove project storage failed")
 	}
 	return nil
 }
@@ -635,7 +656,7 @@ func TestDiscardCleansActiveAndFailedCreatingRuns(t *testing.T) {
 				manifest, err = store.Create(runstate.Manifest{
 					RunID:              spec.RunID,
 					Project:            "project",
-					ProjectKey:         "project-3f9c2a1b",
+					ProjectKey:         testProject.Key,
 					Snapshot:           prepared.Snapshot,
 					Image:              spec.ImageID,
 					Container:          spec.ContainerName(),
@@ -837,7 +858,7 @@ func activeManifest(
 	if _, err := store.Create(runstate.Manifest{
 		RunID:              spec.RunID,
 		Project:            "project",
-		ProjectKey:         "project-3f9c2a1b",
+		ProjectKey:         testProject.Key,
 		Snapshot:           prepared.Snapshot,
 		Image:              spec.ImageID,
 		Container:          spec.ContainerName(),

@@ -36,11 +36,9 @@ func liveProject(t *testing.T, transport lima.Transport, name string) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		runLive(
-			t,
-			context.Background(),
-			"sudo", "/usr/local/sbin/pisafe-storage", "remove", "project", projectKey,
-		)
+		if err := transport.RemoveProjectStorage(context.Background(), projectKey); err != nil {
+			t.Errorf("remove live project storage: %v", err)
+		}
 	})
 	return projectKey
 }
@@ -459,4 +457,79 @@ func inContainer(
 		t.Fatalf("%s: %v\n%s", strings.Join(command, " "), err, output)
 	}
 	return strings.TrimSpace(string(output))
+}
+
+// TestLiveAReclaimedProjectStoreTakesEverythingWithIt is the end of a project's
+// life and the one reclamation that removes something pisafe cannot rebuild. A
+// checkout that has been gone for a whole window is the only thing that reaches
+// here, and what it releases has to be the whole filesystem: an image left
+// behind unmounted would be a project's transcripts still on disk with nothing
+// left able to name them or free them.
+func TestLiveAReclaimedProjectStoreTakesEverythingWithIt(t *testing.T) {
+	if os.Getenv("PISAFE_LIVE_LIMA") != "1" {
+		t.Skip("set PISAFE_LIVE_LIMA=1 to test the dedicated VM")
+	}
+	imageID := liveImageID(t)
+	ensureLiveVM(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	transport := lima.NewTransport()
+	projectKey := "livereclaim-" + time.Now().UTC().Format("20060102150405")
+	if err := transport.EnsureProjectStorage(ctx, projectKey); err != nil {
+		t.Fatal(err)
+	}
+	// This test reclaims the store itself; the cleanup is for the paths that
+	// fail before reaching that.
+	t.Cleanup(func() {
+		_ = transport.RemoveProjectStorage(context.Background(), projectKey)
+	})
+
+	store := runcontainer.DefaultSpec("reclaim", projectKey, imageID).ProjectPath()
+	sessions := store + "/sessions"
+	generation := store + "/cache/npm/" + liveNewerKey
+	runLive(t, ctx, "podman", "unshare", "sh", "-ec",
+		"printf transcript > "+sessions+"/1_aaaa.jsonl"+
+			" && install -d -m 0700 -o 1000 -g 1000 "+store+"/cache/npm "+generation+
+			" && printf cached > "+generation+"/shared.txt")
+	if listed := liveStoreListing(t, ctx, sessions); listed != "1_aaaa.jsonl" {
+		t.Fatalf("seeded session store = %q", listed)
+	}
+	if mounted := runLive(t, ctx, "sh", "-c",
+		"mountpoint -q "+store+" && echo MOUNTED || echo UNMOUNTED",
+	); mounted != "MOUNTED" {
+		t.Fatalf("the project store is %s before anything reclaimed it", mounted)
+	}
+
+	if err := transport.RemoveProjectStorage(ctx, projectKey); err != nil {
+		t.Fatal(err)
+	}
+	if mounted := runLive(t, ctx, "sh", "-c",
+		"mountpoint -q "+store+" && echo MOUNTED || echo UNMOUNTED",
+	); mounted != "UNMOUNTED" {
+		t.Errorf("the reclaimed store is still mounted")
+	}
+	if left := runLive(t, ctx, "sh", "-c",
+		"test -e "+store+" && echo PRESENT || echo GONE",
+	); left != "GONE" {
+		t.Errorf("the reclaimed store is still %s", left)
+	}
+
+	// A sweep that failed partway repeats the removal, so having nothing left
+	// to do is not a failure.
+	if err := transport.RemoveProjectStorage(ctx, projectKey); err != nil {
+		t.Fatal(err)
+	}
+
+	// The evidence that the image went with the mount: the same key allocates a
+	// filesystem with none of the old project in it.
+	if err := transport.EnsureProjectStorage(ctx, projectKey); err != nil {
+		t.Fatal(err)
+	}
+	if listed := liveStoreListing(t, ctx, sessions); listed != "" {
+		t.Errorf("a reclaimed project's transcripts came back: %q", listed)
+	}
+	if listed := liveStoreListing(t, ctx, store+"/cache"); listed != "" {
+		t.Errorf("a reclaimed project's cache came back: %q", listed)
+	}
 }

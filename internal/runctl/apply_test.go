@@ -237,7 +237,7 @@ func creatingRun(t *testing.T, store runstate.Store, snapshot gitstage.Snapshot)
 	if _, err := store.Create(runstate.Manifest{
 		RunID:              snapshot.RunID,
 		Project:            "project",
-		ProjectKey:         "project-3f9c2a1b",
+		ProjectKey:         testProject.Key,
 		Snapshot:           snapshot,
 		Image:              testImage,
 		Container:          "pisafe-run-" + snapshot.RunID,

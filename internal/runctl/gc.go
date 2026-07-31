@@ -3,14 +3,17 @@ package runctl
 import (
 	"context"
 	"errors"
+	"io/fs"
+	"os"
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
-// Retention is how long an imported run is kept. It starts when the run was
-// imported, not when it was created, so a run resumed for a month is never
-// close to being reclaimed.
+// Retention is how long something pisafe has finished with is kept. For a run
+// it starts when the run was imported, not when it was created, so a run
+// resumed for a month is never close to being reclaimed. For a project store it
+// starts when a sweep first found the checkout gone.
 const Retention = 7 * 24 * time.Hour
 
 // GCPlan is what collection would do, and afterwards what it did.
@@ -24,10 +27,18 @@ type GCPlan struct {
 	// KeepImages are the images runs can still start containers from. Every
 	// other managed image is superseded.
 	KeepImages []string
+	// MissingProjects are project stores whose checkout is gone but whose
+	// window has not run out. Collection stamps them and reports them; it is
+	// the report that gives a user the chance to say the disappearance was not
+	// what it looked like.
+	MissingProjects []runstate.ProjectRecord
+	// ReclaimedProjects are stores whose checkout stayed gone for a whole
+	// window: cache, session store, and filesystem together.
+	ReclaimedProjects []runstate.ProjectRecord
 }
 
 func (plan GCPlan) Empty() bool {
-	return len(plan.Reclaimed) == 0
+	return len(plan.Reclaimed) == 0 && len(plan.ReclaimedProjects) == 0
 }
 
 type KeptRun struct {
@@ -44,7 +55,13 @@ func (controller Controller) Plan(now time.Time) (GCPlan, error) {
 	}
 	now = now.UTC()
 	var plan GCPlan
+	// A project whose runs still have records is in use whatever its checkout
+	// looks like, including the runs this same plan reclaims: a store is worth
+	// removing only once nothing at all refers to it, and the next sweep sees it
+	// as soon as that is true.
+	inUse := make(map[string]struct{}, len(manifests))
 	for _, manifest := range manifests {
+		inUse[manifest.ProjectKey] = struct{}{}
 		switch manifest.State {
 		case runstate.StateImported:
 			// An imported run cannot resume, so it pins no image; the commands
@@ -64,7 +81,32 @@ func (controller Controller) Plan(now time.Time) (GCPlan, error) {
 			}
 		}
 	}
+	projects, err := controller.store.ListProjects()
+	if err != nil {
+		return GCPlan{}, err
+	}
+	for _, project := range projects {
+		if _, busy := inUse[project.Key]; busy || !checkoutIsGone(project.Root) {
+			continue
+		}
+		if project.MissingSince != nil && now.Sub(*project.MissingSince) >= Retention {
+			plan.ReclaimedProjects = append(plan.ReclaimedProjects, project)
+			continue
+		}
+		plan.MissingProjects = append(plan.MissingProjects, project)
+	}
 	return plan, nil
+}
+
+// checkoutIsGone reports whether the checkout a project is keyed by is
+// definitely no longer there. Only the filesystem denying its existence counts:
+// an unreadable parent or an answer that never came leaves the store alone,
+// and whether the path is still a Git repository is deliberately not asked,
+// because git failing to run cannot be told apart from git saying no and would
+// orphan every project at once.
+func checkoutIsGone(root string) bool {
+	_, err := os.Stat(root)
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 func keptReason(state runstate.State) string {
@@ -77,9 +119,14 @@ func keptReason(state runstate.State) string {
 	return "stopped with work that was never imported"
 }
 
-// Collect carries out a plan. Runs are independent, so one that cannot be
-// reclaimed does not stop the rest; the returned plan holds what was done.
-func (controller Controller) Collect(ctx context.Context, plan GCPlan) (GCPlan, error) {
+// Collect carries out a plan. Runs and projects are independent, so one that
+// cannot be reclaimed does not stop the rest; the returned plan holds what was
+// done.
+func (controller Controller) Collect(
+	ctx context.Context,
+	plan GCPlan,
+	now time.Time,
+) (GCPlan, error) {
 	done := GCPlan{Kept: plan.Kept, KeepImages: plan.KeepImages}
 	var failures []error
 	for _, runID := range plan.Reclaimed {
@@ -93,6 +140,31 @@ func (controller Controller) Collect(ctx context.Context, plan GCPlan) (GCPlan, 
 			continue
 		}
 		done.Reclaimed = append(done.Reclaimed, runID)
+	}
+	for _, project := range plan.ReclaimedProjects {
+		// The record is what makes the filesystem attributable, so it outlives
+		// it: a sweep interrupted between the two finds the project again and
+		// removes a filesystem that is already gone, which costs nothing.
+		if err := controller.backend.RemoveProjectStorage(ctx, project.Key); err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		if err := controller.store.ForgetProject(project.Key); err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		done.ReclaimedProjects = append(done.ReclaimedProjects, project)
+	}
+	for _, project := range plan.MissingProjects {
+		if project.MissingSince == nil {
+			if err := controller.store.MarkProjectMissing(project.Key, now); err != nil {
+				failures = append(failures, err)
+				continue
+			}
+			stamped := now.UTC()
+			project.MissingSince = &stamped
+		}
+		done.MissingProjects = append(done.MissingProjects, project)
 	}
 	return done, errors.Join(failures...)
 }

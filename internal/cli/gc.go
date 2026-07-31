@@ -10,6 +10,7 @@ import (
 	"github.com/mpizenberg/pisafe/internal/lima"
 	"github.com/mpizenberg/pisafe/internal/runctl"
 	"github.com/mpizenberg/pisafe/internal/runimage"
+	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
 var errGCUsage = errors.New("usage: pisafe gc [--dry-run]")
@@ -36,7 +37,8 @@ func runGC(ctx context.Context, args []string, out io.Writer) error {
 
 	// Nothing is pruned without a complete set of images runs still need, so
 	// a plan that could not be built stops collection entirely.
-	plan, err := controller.Plan(time.Now())
+	now := time.Now()
+	plan, err := controller.Plan(now)
 	if err != nil {
 		return err
 	}
@@ -48,14 +50,15 @@ func runGC(ctx context.Context, args []string, out io.Writer) error {
 		printCollection(out, plan, images, true)
 		return nil
 	}
-	done, collectErr := controller.Collect(ctx, plan)
+	done, collectErr := controller.Collect(ctx, plan, now)
 	images, pruneErr := installer.Prune(ctx, recipe, plan.KeepImages)
 	printCollection(out, done, images, false)
 	return errors.Join(collectErr, pruneErr)
 }
 
 func printCollection(out io.Writer, plan runctl.GCPlan, images []string, dryRun bool) {
-	if plan.Empty() && len(images) == 0 && len(plan.Kept) == 0 {
+	if plan.Empty() && len(images) == 0 &&
+		len(plan.Kept) == 0 && len(plan.MissingProjects) == 0 {
 		fmt.Fprintln(out, "Nothing to collect.")
 		return
 	}
@@ -74,9 +77,27 @@ func printCollection(out io.Writer, plan runctl.GCPlan, images []string, dryRun 
 	)
 	printCollected(
 		out,
+		reclaimed,
+		fmt.Sprintf(
+			"%d project store(s) whose checkout has been gone for over seven days",
+			len(plan.ReclaimedProjects),
+		),
+		projectLabels(plan.ReclaimedProjects),
+	)
+	printCollected(
+		out,
 		pruned,
 		fmt.Sprintf("%d superseded run image(s)", len(images)),
 		images,
+	)
+	printCollected(
+		out,
+		"Missing:",
+		fmt.Sprintf(
+			"%d project store(s) whose checkout is gone; move one back to keep its transcripts",
+			len(plan.MissingProjects),
+		),
+		projectLabels(plan.MissingProjects),
 	)
 	if len(plan.Kept) == 0 {
 		return
@@ -90,6 +111,21 @@ func printCollection(out io.Writer, plan runctl.GCPlan, images []string, dryRun 
 	for _, kept := range plan.Kept {
 		fmt.Fprintf(out, "               %s (%s)\n", kept.RunID, kept.Reason)
 	}
+}
+
+// projectLabels names each store by the checkout it is keyed by, which is the
+// only part of it a user recognises: the key itself is a digest, and the
+// directory it was made from is gone by the time the store is reported.
+func projectLabels(projects []runstate.ProjectRecord) []string {
+	labels := make([]string, 0, len(projects))
+	for _, project := range projects {
+		since := "first seen missing"
+		if project.MissingSince != nil {
+			since = "missing since " + project.MissingSince.Format(time.DateOnly)
+		}
+		labels = append(labels, fmt.Sprintf("%q (%s)", project.Root, since))
+	}
+	return labels
 }
 
 func printCollected(out io.Writer, label, summary string, names []string) {

@@ -24,11 +24,14 @@ func Validate(id string) error {
 	return nil
 }
 
-// Project names one checkout twice: Directory is what a run calls it, and Key
-// is what its persistent state is filed under. Two checkouts of one repository
-// share a Directory and must never share a Key, so the key carries a digest of
-// the checkout path.
+// Project names one checkout three ways: Root is where it is, Directory is what
+// a run calls it, and Key is what its persistent state is filed under. Two
+// checkouts of one repository share a Directory and must never share a Key, so
+// the key carries a digest of the checkout path. That digest is one-way, which
+// is why Root travels with it: nothing else can say which checkout a stored key
+// belongs to.
 type Project struct {
+	Root      string
 	Directory string
 	Key       string
 }
@@ -37,9 +40,11 @@ func NewProject(repositoryRoot string) (Project, error) {
 	if !filepath.IsAbs(repositoryRoot) {
 		return Project{}, fmt.Errorf("repository root %q is not absolute", repositoryRoot)
 	}
-	directory := projectSlug(filepath.Base(repositoryRoot))
-	digest := sha256.Sum256([]byte(filepath.Clean(repositoryRoot)))
+	root := filepath.Clean(repositoryRoot)
+	directory := projectSlug(filepath.Base(root))
+	digest := sha256.Sum256([]byte(root))
 	project := Project{
+		Root:      root,
 		Directory: directory,
 		Key:       directory + "-" + hex.EncodeToString(digest[:4]),
 	}

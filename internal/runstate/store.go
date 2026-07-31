@@ -297,7 +297,7 @@ func (store Store) Forget(runID string) error {
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("remove run manifest: %w", err)
 	}
-	return store.syncRoot()
+	return syncDirectory(store.root)
 }
 
 // BeginApply records a verified import plan before any user-visible ref moves.
@@ -483,22 +483,7 @@ func (store Store) replace(manifest Manifest) (Manifest, error) {
 }
 
 func (store Store) ensureRoot() error {
-	if err := os.MkdirAll(store.root, 0o700); err != nil {
-		return fmt.Errorf("create run-state directory: %w", err)
-	}
-	info, err := os.Lstat(store.root)
-	if err != nil {
-		return fmt.Errorf("inspect run-state directory: %w", err)
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("run-state path is not a directory")
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		if err := os.Chmod(store.root, 0o700); err != nil {
-			return fmt.Errorf("restrict run-state directory: %w", err)
-		}
-	}
-	return nil
+	return ensureDirectory(store.root)
 }
 
 func (store Store) manifestPath(runID string) (string, error) {
@@ -513,10 +498,35 @@ func (store Store) writeAtomic(path string, manifest Manifest, replace bool) err
 	if err != nil {
 		return fmt.Errorf("encode run manifest: %w", err)
 	}
-	content = append(content, '\n')
-	temporary, err := os.CreateTemp(store.root, ".manifest-*.tmp")
+	return writeRecord(store.root, path, append(content, '\n'), replace)
+}
+
+func ensureDirectory(path string) error {
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return fmt.Errorf("create state directory: %w", err)
+	}
+	info, err := os.Lstat(path)
 	if err != nil {
-		return fmt.Errorf("create temporary run manifest: %w", err)
+		return fmt.Errorf("inspect state directory: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("state path %q is not a directory", path)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		if err := os.Chmod(path, 0o700); err != nil {
+			return fmt.Errorf("restrict state directory: %w", err)
+		}
+	}
+	return nil
+}
+
+// writeRecord installs one durable record in directory, replacing what is there
+// only when asked to. Nothing partial is ever visible under the record's own
+// name, and the write is durable once it returns.
+func writeRecord(directory, path string, content []byte, replace bool) error {
+	temporary, err := os.CreateTemp(directory, ".record-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary record: %w", err)
 	}
 	temporaryPath := temporary.Name()
 	complete := false
@@ -527,20 +537,20 @@ func (store Store) writeAtomic(path string, manifest Manifest, replace bool) err
 		}
 	}()
 	if err := temporary.Chmod(0o600); err != nil {
-		return fmt.Errorf("restrict temporary run manifest: %w", err)
+		return fmt.Errorf("restrict temporary record: %w", err)
 	}
 	if _, err := temporary.Write(content); err != nil {
-		return fmt.Errorf("write run manifest: %w", err)
+		return fmt.Errorf("write record: %w", err)
 	}
 	if err := temporary.Sync(); err != nil {
-		return fmt.Errorf("sync run manifest: %w", err)
+		return fmt.Errorf("sync record: %w", err)
 	}
 	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close run manifest: %w", err)
+		return fmt.Errorf("close record: %w", err)
 	}
 	if replace {
 		if err := os.Rename(temporaryPath, path); err != nil {
-			return fmt.Errorf("replace run manifest: %w", err)
+			return fmt.Errorf("replace record: %w", err)
 		}
 	} else {
 		// A hard link provides portable no-replace semantics; unlike a
@@ -548,26 +558,26 @@ func (store Store) writeAtomic(path string, manifest Manifest, replace bool) err
 		// overwrite one another.
 		if err := os.Link(temporaryPath, path); err != nil {
 			if errors.Is(err, fs.ErrExist) {
-				return fmt.Errorf("run manifest already exists")
+				return fmt.Errorf("record %q already exists", filepath.Base(path))
 			}
-			return fmt.Errorf("install run manifest: %w", err)
+			return fmt.Errorf("install record: %w", err)
 		}
 		if err := os.Remove(temporaryPath); err != nil {
-			return fmt.Errorf("remove temporary run manifest link: %w", err)
+			return fmt.Errorf("remove temporary record link: %w", err)
 		}
 	}
 	complete = true
-	return store.syncRoot()
+	return syncDirectory(directory)
 }
 
-func (store Store) syncRoot() error {
-	directory, err := os.Open(store.root)
+func syncDirectory(path string) error {
+	directory, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("open run-state directory: %w", err)
+		return fmt.Errorf("open state directory: %w", err)
 	}
 	defer directory.Close()
 	if err := directory.Sync(); err != nil {
-		return fmt.Errorf("sync run-state directory: %w", err)
+		return fmt.Errorf("sync state directory: %w", err)
 	}
 	return nil
 }
