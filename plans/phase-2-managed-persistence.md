@@ -1,6 +1,6 @@
 # Phase 2 — managed persistence
 
-Working document. Last updated: 2026-07-30.
+Working document. Last updated: 2026-07-31.
 
 This is the plan and progress log for Phase 2, and it is **temporary by
 design**: when Phase 2 lands, its invariants and mechanisms fold back into
@@ -346,8 +346,18 @@ thing that mounts anything.
       with it; a second check answering the same thing leaves nothing to say;
       and applying goes through the same fetch-and-verify path an install
       takes.
-- [ ] **8. Global tools.** See the open question below — the mechanism is not
-      yet decided.
+- [x] **8a. The toolchain a run can reach.** Put the binaries an agent needs
+      into the run image, pinned, and name `PATH` so a run's own home is
+      reachable without deciding what a system binary means. Live test:
+      `TestLiveTheToolchainIsReachableAndNeverShadowed` — every tool pisafe
+      installs on purpose resolves inside a run, an executable the run drops in
+      its home is invocable by name, and one named `git` still loses to the
+      image's.
+- [ ] **8b. `pisafe tool install`.** A `tools` namespace in the profile, one
+      module root per tool as extensions already get, and a `bin` directory of
+      relative symlinks so `PATH` gains one entry rather than one per tool. The
+      installer question is settled in the Decisions below; what remains is
+      collision reporting between two tools claiming one binary name.
 - [ ] **9. `gc` sweep of project stores.** Reclaim whole project filesystems
       whose repository is gone. Per-namespace eviction lands in slice 4; this
       is the outer sweep the design already specifies.
@@ -731,6 +741,42 @@ this document is the current truth, not an audit trail. These fold into
   startup, but one started later in that same run gets the new release. Pinning
   still means no update happens without the user asking for it, which is what
   invariant 2 requires.
+- **A run's toolchain is the image's, because nothing else can supply it.**
+  *Verified rather than reasoned about.* A run holds `node`, `npm`, `git`,
+  `openssl`, `ssh` and nothing else — no `curl`, `jq`, `rg`, `fd`, `python3`,
+  `unzip`, `pnpm` — and it cannot obtain any of them: the rootfs is read-only,
+  the agent is unprivileged so no package manager will run, and `npm install
+  --global` writes to `/usr/local`. So "global tools" is not a convenience layer
+  over something that works; without it there is no way to get a non-npm binary
+  into a run at all. The image now carries that set, adding 132 MB (503 → 635).
+  Leaving it to `pisafe tool install` was not taken: the useful binaries are not
+  npm packages, so the command would not have reached them.
+- **pnpm and uv are pinned to a digest recorded in the recipe; Debian packages
+  are not.** A build whose pnpm tarball or uv release changed fails rather than
+  installing something else. The apt packages ride the suite, as the existing
+  build already does for `git` and `openssl` — pinning them would mean carrying
+  a version set that Debian security updates then invalidate. uv also introduces
+  `github.com` as a build-time origin beyond the npm registry and the Debian
+  mirrors, because uv publishes no npm package (the npm name `uv` is unrelated).
+- **pisafe keeps npm as its installer.** pnpm was considered and measured
+  against it rather than adopted: `npm install` already writes a lockfile
+  covering every transitive dependency with an integrity hash — 86 of 86 for
+  `eslint@9.39.0`, none missing — and that lockfile is already inside the tree
+  pisafe streams into the profile, so npm and pnpm pin identically. pnpm's
+  non-hoisted layout buys nothing here either, because each extension already
+  gets its own module root. Adopting it would have meant pinning pnpm into the
+  image before any of it could work, then rewriting a verified install path for
+  parity. Pi does not constrain this in either direction: `resolveLocalExtension
+  Source` stats a path and follows symlinks, so a pnpm tree would have loaded.
+  Cheap to revisit — the choice lives in two scripts in `runcontainer`.
+- **`PATH` is a predictability default, not a boundary.** Anything in a run can
+  prepend to its own `PATH` or call a binary by absolute path, so the order
+  pisafe sets controls nothing an attacker cares about; what holds is that the
+  profile mounts read-only and its contents are pinned, at any position. The
+  image comes first so an installed tool never decides what `git` or `node`
+  means, and the run's own `~/.local/bin` comes last so `uv tool install` yields
+  something invocable. Restating the image's search path is a copy of something
+  the base image owns, which is why a live test fails if a base bump moves it.
 
 ## Open questions
 
@@ -741,11 +787,11 @@ this document is the current truth, not an audit trail. These fold into
   breaks — but a compromised run would then read what an earlier one left. This
   stays open because the answer is a documentation question as much as a code
   one: nothing tells a repository which variables are a bad idea.
-- **How global tools are installed.** The design lists `pisafe tool install`
-  separately from `pisafe extension install`, and the state table has "Global
-  tools" as its own row. Whether those are npm globals in the profile, a second
-  read-only mount, or something built into the image is undecided. This is why
-  slice 8 has no shape yet.
+- **Whether two tools may claim one binary name.** A package's `bin` entries
+  are its own choice, not the user's, so installing a second tool can collide
+  with the first. Refusing the install, letting the newer win, and reporting
+  the shadowing are all defensible; nothing decides between them until there is
+  a real collision to look at.
 - **Whether a moved repository can adopt its orphaned store.** A rebind command
   is possible and does not change the key scheme, so this can stay deferred.
 

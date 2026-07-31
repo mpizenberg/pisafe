@@ -43,6 +43,37 @@ RUN set -eu; \
     rm -f /etc/ssh/ssh_host_*; \
     rm -rf /root/.npm /root/.cache
 
+# The toolchain a run can reach. Nothing inside a run can install any of this
+# for itself: the container is read-only, the agent is unprivileged, and the
+# profile mounts read-only, so a binary that is not here does not exist. Debian
+# supplies what it carries; pnpm and uv are pinned to a digest recorded here, so
+# a build whose artifact changed fails rather than installing something else.
+RUN set -eu; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        curl \
+        fd-find \
+        jq \
+        python3 \
+        ripgrep \
+        unzip; \
+    rm -rf /var/lib/apt/lists/*; \
+    ln -s "$(command -v fdfind)" /usr/local/bin/fd; \
+    cd /tmp; \
+    tarball="$(npm pack "pnpm@11.18.0" --ignore-scripts --silent)"; \
+    test "sha512-$(openssl dgst -sha512 -binary "${tarball}" | openssl base64 -A)" \
+       = "sha512-M9g8d9qC9J+6g2klxvG4QRgewxMrZwY5vQEvcHX1x89jTF+HAUfBmq50ePrAHfCdiJLogEVIlu3SPumzN1dWPA=="; \
+    npm install --global --ignore-scripts "./${tarball}"; \
+    rm -f "${tarball}"; \
+    npm cache clean --force; \
+    curl -fsSL -o uv.tar.gz \
+        "https://github.com/astral-sh/uv/releases/download/0.12.0/uv-aarch64-unknown-linux-gnu.tar.gz"; \
+    echo "2c5d6e3092cc5223b10ff403880cc75121bf64e84644e7a0c69f643b0d89ac95  uv.tar.gz" \
+        | sha256sum -c -; \
+    tar -xzf uv.tar.gz --strip-components=1 -C /usr/local/bin; \
+    rm -f uv.tar.gz; \
+    rm -rf /root/.npm /root/.cache
+
 COPY --chmod=0755 pisafe-guest /usr/local/bin/pisafe-guest
 
 LABEL io.pisafe.base.digest="sha256:af01d58b748ec92b1d6e8e11429aad424fd1e68c848185399dca0596a1ab8f5c" \

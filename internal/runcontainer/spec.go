@@ -44,6 +44,10 @@ const (
 	containerUser     = "1000:1000"
 	containerWorkRoot = "/work"
 	containerHome     = "/home/node"
+	// imagePath is the run image's own search path. pisafe restates it because
+	// naming PATH at all replaces what the image set, and dropping any of it
+	// would take node and git with it.
+	imagePath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 	// containerCacheRoot is a layout pisafe owns rather than a tool's own
 	// default location. Nothing is shared unless a cache-specific environment
 	// variable points it here, so the layer cannot accumulate arbitrary state.
@@ -327,6 +331,10 @@ func (spec Spec) cacheOverlay(cache CacheMount) ProjectOverlay {
 // repository may not rebind through a declared cache.
 var runEnvironment = [][2]string{
 	{"HOME", containerHome},
+	// The image's own binaries come first, so an installed tool never decides
+	// what git or node means. What a run puts in its home directory is reachable
+	// but last, which is where uv and pip leave an executable.
+	{"PATH", imagePath + ":" + containerHome + "/.local/bin"},
 	{"GIT_TERMINAL_PROMPT", "0"},
 	{"PI_CODING_AGENT_DIR", containerHome + "/.pi/agent"},
 	{"PI_CODING_AGENT_SESSION_DIR", containerSessionRoot},
