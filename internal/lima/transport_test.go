@@ -468,6 +468,26 @@ func TestPromoteSessionsRefusesWhatItCannotAddress(t *testing.T) {
 	}
 }
 
+// TestAdoptSessionsRefusesWhatItCannotAddress is the same guard, for the case
+// where both halves name a project store. A source that could climb would read
+// some other project's transcripts into this one, which is the one way the
+// isolation between projects could be undone by a command meant to preserve it.
+func TestAdoptSessionsRefusesWhatItCannotAddress(t *testing.T) {
+	transport := Transport{instance: InstanceName, runner: &fakeRunner{}}
+	for name, arguments := range map[string][2]string{
+		"climbing destination": {"../../projects/other", "project-3f9c2a1b"},
+		"climbing source":      {"project-3f9c2a1b", "../../projects/other"},
+		"empty destination":    {"", "project-3f9c2a1b"},
+		"empty source":         {"project-3f9c2a1b", ""},
+	} {
+		if err := transport.AdoptSessions(
+			context.Background(), arguments[0], arguments[1],
+		); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+}
+
 // TestResolveExtensionRefusesWhatItCannotPin is where a pin is decided. The
 // report comes from a container with the network open, so a name that is not a
 // package, a version that is not exact, and a hash that is not one all have to

@@ -323,24 +323,24 @@ find "$cache" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 ' pisafe-reset "$@"
 `
 
-	// promoteSessionsScript adds the transcripts one run wrote to the project
-	// session store. A transcript's name carries a UUID, so two runs never choose
-	// the same one and promotion needs no merge or key. Promotion only ever adds:
-	// the store is a lower that other runs have mounted, and a name it already
-	// holds is a transcript an earlier run promoted and this one rewrote when it
-	// was migrated on load. Each file arrives by rename from the same
+	// promoteSessionsScript adds transcripts to a project's session store. A
+	// transcript's name carries a UUID, so two writers never choose the same one
+	// and promotion needs no merge or key. Promotion only ever adds: the store is
+	// a lower that other runs have mounted, and a name it already holds is a
+	// transcript that was promoted once and has since been rewritten in place
+	// when Pi migrated it on load. Each file arrives by rename from the same
 	// filesystem, so no reader ever sees a partial transcript.
 	promoteSessionsScript = `set -eu
 exec podman unshare sh -ceu '
 set -eu
 store=/var/lib/pisafe/projects/$1/sessions
-upper=/var/lib/pisafe/runs/$2/overlay/sessions/upper
-staging=$store/.promote-$2
+source=$2
+staging=$store/.promote-$3
 test -d "$store"
-test -d "$upper" || exit 0
+test -d "$source" || exit 0
 trap "rm -f -- \"$staging\"" EXIT
-for path in "$upper"/*.jsonl; do
-	# Only a regular file is a transcript. A transcript the run deleted is a
+for path in "$source"/*.jsonl; do
+	# Only a regular file is a transcript. A transcript a run deleted is a
 	# whiteout device under the same name, and a deletion is not something an
 	# additive promotion carries; anything else so named is a run trying to make
 	# promotion fail on it.
@@ -353,6 +353,22 @@ for path in "$upper"/*.jsonl; do
 	mv -T "$staging" "$store/$name"
 done
 ' pisafe-promote "$@"
+`
+
+	// resetProfileScript empties what the profile holds without touching the
+	// namespace roots the privileged helper owns. It removes every entry rather
+	// than the ones a record names, so a tree left behind by an install that
+	// failed after fetching goes with the rest; the records are written empty
+	// first, so none of this is something a run starting now would load or find
+	// on its PATH.
+	resetProfileScript = `set -eu
+exec podman unshare sh -ceu '
+set -eu
+for directory in "$@"; do
+	test -d "$directory" || continue
+	find "$directory" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+done
+' pisafe-reset-profile "$@"
 `
 )
 
@@ -761,16 +777,62 @@ func (transport Transport) PromoteSessions(
 	projectKey string,
 	runID string,
 ) error {
-	if err := runid.Validate(projectKey); err != nil {
-		return err
-	}
 	if err := runid.Validate(runID); err != nil {
 		return err
 	}
-	if _, err := transport.shellScript(
-		ctx, nil, promoteSessionsScript, projectKey, runID,
+	if err := transport.promoteSessions(
+		ctx, projectKey, runcontainer.RunSessionUpperPath(runID), runID,
 	); err != nil {
 		return fmt.Errorf("promote run sessions: %w", err)
+	}
+	return nil
+}
+
+// AdoptSessions gives one project store the transcripts of another. It is how a
+// checkout that moved keeps its history: a project key is a digest of the
+// checkout path, so a move needs the transcripts under a different key, and
+// promotion is already additive and needs no merge.
+func (transport Transport) AdoptSessions(
+	ctx context.Context,
+	projectKey string,
+	fromKey string,
+) error {
+	if err := runid.Validate(fromKey); err != nil {
+		return err
+	}
+	if err := transport.promoteSessions(
+		ctx, projectKey, runcontainer.ProjectSessionsPath(fromKey), fromKey,
+	); err != nil {
+		return fmt.Errorf("adopt sessions of project %q: %w", fromKey, err)
+	}
+	return nil
+}
+
+func (transport Transport) promoteSessions(
+	ctx context.Context,
+	projectKey string,
+	source string,
+	tag string,
+) error {
+	if err := runid.Validate(projectKey); err != nil {
+		return err
+	}
+	_, err := transport.shellScript(ctx, nil, promoteSessionsScript, projectKey, source, tag)
+	return err
+}
+
+// ResetProfile takes everything back out of the profile. What it removes is
+// refetchable from npm; what a user loses is the record of what they had, which
+// is why nothing calls this without being asked to.
+func (transport Transport) ResetProfile(ctx context.Context) error {
+	if _, err := transport.shellScript(
+		ctx,
+		nil,
+		resetProfileScript,
+		runcontainer.ProfileMount().Source,
+		runcontainer.ToolsMount().Source,
+	); err != nil {
+		return fmt.Errorf("reset profile: %w", err)
 	}
 	return nil
 }

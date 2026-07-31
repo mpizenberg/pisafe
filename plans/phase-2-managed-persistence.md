@@ -413,8 +413,21 @@ thing that mounts anything.
       carried both the subscription and the keyed provider on their own routes
       with one capability, and a request from inside the run reached the stub
       carrying the upstream key the run never held.
-- [ ] **11. Backup, reset, recovery.** Cheapest useful piece is resetting or
-      removing a scope, which is nearly free once scopes exist.
+- [x] **11a. Naming a scope.** Every durable scope becomes something a user can
+      point at and empty or remove: `pisafe project list|reset|drop|rebind` and
+      `pisafe profile reset`. This retires `pisafe cache reset`, whose only way
+      to name a project was the working directory — which the store that most
+      needs naming, one whose checkout has moved or gone, does not have. Live
+      test: `TestLiveARebindCarriesTheHistoryAndNotTheCaches` — a store's
+      transcripts arrive under the key another checkout path hashes to, a name
+      the destination already holds is left as it is rather than replaced, the
+      caches are not carried, and reading the source leaves it unchanged.
+- [ ] **11b. Backup and recovery.** Export what nothing can refetch — a
+      project's transcripts, and the pins naming what the profile holds — to a
+      directory on the Mac, and restore it into a VM that has just been
+      recreated. Caches are excluded by design and credentials deliberately: a
+      key copied out of the Keychain into a directory would be the boundary
+      regression the broker exists to prevent.
 
 ## Decisions
 
@@ -965,6 +978,59 @@ this document is the current truth, not an audit trail. These fold into
   relay until it is stopped and resumed, which rewrites it. No data is at risk
   and no run needs recreating.
 
+- **A project store is named by its checkout path, never by its key.** The key
+  is what the store is filed under, and `project list` could print it, but it is
+  a digest nobody recognises and the path is the only handle a user has for a
+  store whose directory is gone. A path that no longer resolves is taken as it
+  stands rather than refused, which is what lets a store be dropped after its
+  checkout has been deleted. The consequence worth naming: a path reached
+  through a symlink that git would have resolved differently hashes to a
+  different key, so `project list` prints the resolved form to copy from.
+- **`pisafe cache reset` became `pisafe project reset [PATH]`.** The old command
+  could only mean the working directory's project, which is exactly what the
+  stores that most need attention do not have. What it does is unchanged, and
+  the session store is still left alone.
+- **A rebind copies the transcripts into a fresh store instead of renaming the
+  filesystem.** Renaming is what the operation actually is, and it would be a
+  `rename` action on the privileged helper — moving the ext4 image and its
+  mountpoint together. Not taken: the helper is hashed into the VM's security
+  profile, so a new action forces a VM recreate, and recreating the VM destroys
+  every project store, which is the loss rebind exists to prevent. Copying needs
+  no new privilege at all, because everything below a namespace root is owned by
+  the mapped UID. Reversible: if a helper change is being made for another
+  reason, a rename would replace the copy without changing the command.
+- **A rebind carries the transcripts and leaves the caches.** Carrying the
+  caches too would be correct — a generation is still valid after a move — and
+  was not taken because a generation is a full copy on a fixed-capacity image,
+  so it could exhaust space partway through an operation whose whole purpose is
+  losing nothing. A cache costs time and never correctness, which is the
+  assumption every other decision about them already rests on.
+- **A rebind refuses a destination that already has a store.** An interrupted
+  rebind and two genuine checkouts are indistinguishable from the records, and
+  silently merging two projects' histories is the worse of the two mistakes.
+  The way out is `pisafe project drop`, and at that point the source store is
+  still intact, so nothing has been lost by refusing.
+- **Dropping or rebinding a store refuses while any run record names the
+  project.** This is the predicate the sweep already uses, and the reason is the
+  one eviction and cache reset obey: overlayfs leaves behaviour undefined when a
+  mounted lower goes away, and a stopped run remounts its own when it resumes.
+- **`project list` reads records only and starts nothing.** Reporting each
+  store's size would help most in deciding what to drop, and was not taken: the
+  storage roots are `711` and `700`, so enumerating them needs a new privileged
+  action and therefore a VM recreate. This is also what settles whether unused
+  stores should be reported — the report now exists and has a command attached
+  to it, which is what it was missing.
+- **`profile reset` empties the directories rather than what the record names.**
+  A tree left behind by an install that failed after fetching is named by
+  nothing, so removing the record's entries would leave it there for ever.
+  Verified by seeding an unrecorded tree and a stale link and watching both go.
+- **`profile reset` has no live test.** *Flagged as a coverage gap.* There is
+  one profile and nothing scopes a test to a profile of its own, so a live test
+  would empty whatever the user has installed. It is covered instead by the
+  transport's argument test and by a manual exercise against a seeded tree. The
+  thing that would close this is a second profile name, which the layout already
+  allows and nothing yet reads.
+
 ## Open questions
 
 - **Whether the declarable environment variables need an allowlist.** Slice 3
@@ -980,17 +1046,6 @@ this document is the current truth, not an audit trail. These fold into
   lack is the offer: nothing tells the user that a newer release exists. Giving
   them one means either a second `updates.json` or a shared one keyed across
   both records, and neither is worth building before someone wants it.
-- **Whether a moved repository can adopt its orphaned store.** A rebind command
-  is possible and does not change the key scheme, so this can stay deferred. It
-  is now cheaper than it was: the project record names the old checkout, so
-  rebinding is rewriting one record and renaming one filesystem, and the sweep
-  gives the user a week's notice before the store it would adopt is gone.
-- **Whether long-unused project stores should be reported.** The design says
-  `gc` "reports or prunes long-unused per-project caches and session stores".
-  Slice 9 did the orphan half only, because a project you have not touched in a
-  month is still yours and a report with no action attached to it is noise. What
-  would make it worth adding is a command to reset or drop one project's store
-  by name, which is slice 11's territory.
 
 ## Verification
 

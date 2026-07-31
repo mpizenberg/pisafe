@@ -308,6 +308,18 @@ func (spec Spec) ProjectPath() string {
 	return guestProjectRoot + "/" + spec.ProjectKey
 }
 
+// ProjectSessionsPath is one project's session store, and RunSessionUpperPath
+// is where one run's own transcripts land until they are promoted into it.
+// Both are named without a Spec because transcripts move between projects and
+// out of finished runs, neither of which is something a run is configured for.
+func ProjectSessionsPath(projectKey string) string {
+	return guestProjectRoot + "/" + projectKey + "/" + sessionsNamespace
+}
+
+func RunSessionUpperPath(runID string) string {
+	return guestStorageRoot + "/" + runID + "/overlay/" + sessionsNamespace + "/upper"
+}
+
 // CacheNamespacePath is where every published generation of one declared cache
 // lives. The directory is the restore prefix: falling back means taking the
 // newest entry in it.
@@ -342,12 +354,11 @@ func (spec Spec) ProjectOverlays() []ProjectOverlay {
 }
 
 func (spec Spec) sessionsOverlay() ProjectOverlay {
-	private := spec.overlayRoot(sessionsNamespace)
 	return ProjectOverlay{
 		Destination: containerSessionRoot,
-		Lower:       spec.ProjectPath() + "/" + sessionsNamespace,
-		Upper:       private + "/upper",
-		Work:        private + "/work",
+		Lower:       ProjectSessionsPath(spec.ProjectKey),
+		Upper:       RunSessionUpperPath(spec.RunID),
+		Work:        spec.overlayRoot(sessionsNamespace) + "/work",
 	}
 }
 

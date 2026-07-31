@@ -390,6 +390,10 @@ creating → active → stopped → imported → reclaimed
 - `discard` reclaims at any point, after exact run confirmation.
 - `pisafe gc` reclaims imported runs older than seven days, and reports or
   prunes long-unused per-project caches and session stores.
+- Every shared scope is also nameable and disposable on demand: a project store
+  can be emptied of its caches or dropped whole, and the profile emptied of
+  everything installed in it. A project is keyed by its checkout path, so a
+  moved repository claims its own history back rather than starting over.
 - Never reclaim a run with unimported commits merely because it is old. Warn and
   require explicit discard.
 

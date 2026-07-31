@@ -13,7 +13,6 @@ import (
 	"github.com/mpizenberg/pisafe/internal/lima"
 	"github.com/mpizenberg/pisafe/internal/providers"
 	"github.com/mpizenberg/pisafe/internal/runctl"
-	"github.com/mpizenberg/pisafe/internal/runid"
 	"github.com/mpizenberg/pisafe/internal/runimage"
 	"github.com/mpizenberg/pisafe/internal/runssh"
 	"github.com/mpizenberg/pisafe/internal/runstate"
@@ -45,30 +44,6 @@ func runStop(ctx context.Context, runID string, out io.Writer) error {
 	// The stopped run's own image is enough to ask npm a question, which keeps
 	// the check off the path that installs and verifies the current one.
 	notifyExtensionUpdates(ctx, lima.NewTransport(), manifest.Image, out)
-	return nil
-}
-
-func runCacheReset(ctx context.Context, out io.Writer) error {
-	root, err := gitstage.RepositoryRoot(ctx, ".")
-	if err != nil {
-		return err
-	}
-	project, err := runid.NewProject(root)
-	if err != nil {
-		return err
-	}
-	controller, err := prepareLifecycle(ctx)
-	if err != nil {
-		return err
-	}
-	if err := controller.ResetProjectCache(ctx, project); err != nil {
-		return err
-	}
-	fmt.Fprintf(
-		out,
-		"Emptied the shared cache of %s; its next run fetches from scratch.\n",
-		project.Directory,
-	)
 	return nil
 }
 

@@ -142,14 +142,7 @@ func (controller Controller) Collect(
 		done.Reclaimed = append(done.Reclaimed, runID)
 	}
 	for _, project := range plan.ReclaimedProjects {
-		// The record is what makes the filesystem attributable, so it outlives
-		// it: a sweep interrupted between the two finds the project again and
-		// removes a filesystem that is already gone, which costs nothing.
-		if err := controller.backend.RemoveProjectStorage(ctx, project.Key); err != nil {
-			failures = append(failures, err)
-			continue
-		}
-		if err := controller.store.ForgetProject(project.Key); err != nil {
+		if err := controller.releaseProject(ctx, project.Key); err != nil {
 			failures = append(failures, err)
 			continue
 		}

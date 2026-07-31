@@ -533,3 +533,57 @@ func TestLiveAReclaimedProjectStoreTakesEverythingWithIt(t *testing.T) {
 		t.Errorf("a reclaimed project's cache came back: %q", listed)
 	}
 }
+
+// TestLiveARebindCarriesTheHistoryAndNotTheCaches is what a moved or renamed
+// repository gets back. A project store is keyed by a digest of the checkout
+// path, so a move leaves the transcripts under a key nothing reaches any more.
+// Adoption is the same additive promotion a finished run's transcripts take, so
+// a name the destination already holds is left as it is rather than replaced,
+// and the caches — the one part of a store that costs time and never
+// correctness — are deliberately left behind.
+func TestLiveARebindCarriesTheHistoryAndNotTheCaches(t *testing.T) {
+	if os.Getenv("PISAFE_LIVE_LIMA") != "1" {
+		t.Skip("set PISAFE_LIVE_LIMA=1 to test the dedicated VM")
+	}
+	ensureLiveVM(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	transport := lima.NewTransport()
+	fromKey := liveProject(t, transport, "liverebindfrom")
+	toKey := liveProject(t, transport, "liverebindto")
+	from := runcontainer.ProjectSessionsPath(fromKey)
+	to := runcontainer.ProjectSessionsPath(toKey)
+
+	// The transcript both stores name is what Pi leaves behind when it migrates
+	// one on load: the same session, rewritten. The destination's copy is the
+	// one that stays.
+	runLive(t, ctx, "podman", "unshare", "sh", "-ec",
+		"printf superseded > "+from+"/1_aaaa.jsonl"+
+			" && printf carried > "+from+"/2_bbbb.jsonl"+
+			" && printf ignored > "+from+"/notes.txt"+
+			" && printf kept > "+to+"/1_aaaa.jsonl"+
+			" && chown 1000:1000 "+from+"/*.jsonl "+to+"/*.jsonl")
+	seedSnapshot(t, ctx, path.Dir(from)+"/cache/npm", liveNewerKey, "cached", "2026-01-01")
+
+	if err := transport.AdoptSessions(ctx, toKey, fromKey); err != nil {
+		t.Fatal(err)
+	}
+
+	if listed := liveStoreListing(t, ctx, to); listed != "1_aaaa.jsonl 2_bbbb.jsonl" {
+		t.Fatalf("the adopting store holds %q", listed)
+	}
+	for name, want := range map[string]string{"1_aaaa.jsonl": "kept", "2_bbbb.jsonl": "carried"} {
+		if got := runLive(t, ctx, "podman", "unshare", "cat", to+"/"+name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if listed := liveStoreListing(t, ctx, path.Dir(to)+"/cache"); listed != "" {
+		t.Errorf("a cache was carried across the rebind: %q", listed)
+	}
+	// The source is released separately and only once this succeeded, so until
+	// then its history is still reachable under the old key.
+	if listed := liveStoreListing(t, ctx, from); listed != "1_aaaa.jsonl 2_bbbb.jsonl notes.txt" {
+		t.Errorf("the source store was changed by being read: %q", listed)
+	}
+}

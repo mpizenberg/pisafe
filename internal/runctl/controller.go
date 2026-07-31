@@ -39,6 +39,7 @@ type Backend interface {
 	EvictCacheSnapshots(context.Context, string, string, int, []string) error
 	ResetProjectCache(context.Context, string) error
 	PromoteSessions(context.Context, string, string) error
+	AdoptSessions(context.Context, string, string) error
 	ImportStage(context.Context, string) error
 	Execute(context.Context, io.Reader, ...string) ([]byte, error)
 	StreamExecute(context.Context, io.Writer, ...string) error
@@ -61,6 +62,7 @@ type StateStore interface {
 	CompleteApply(string) (runstate.Manifest, error)
 	RecordError(string, error) (runstate.Manifest, error)
 	RegisterProject(runid.Project) error
+	HasProject(string) (bool, error)
 	ListProjects() ([]runstate.ProjectRecord, error)
 	MarkProjectMissing(string, time.Time) error
 	ForgetProject(string) error

@@ -13,8 +13,8 @@ import (
 )
 
 var errUsage = errors.New(
-	"usage: pisafe <run|connect|stop|resume|diff|cp|apply|discard|cache|extension" +
-		"|tool|gc|list|zed|login|logout|broker|doctor|help>",
+	"usage: pisafe <run|connect|stop|resume|diff|cp|apply|discard|project|profile" +
+		"|extension|tool|gc|list|zed|login|logout|broker|doctor|help>",
 )
 
 func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
@@ -84,11 +84,10 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 			return fmt.Errorf("discard confirmation does not exactly match run %q", args[1])
 		}
 		return runDiscard(ctx, args[1], out)
-	case "cache":
-		if len(args) != 2 || args[1] != "reset" {
-			return errors.New("usage: pisafe cache reset")
-		}
-		return runCacheReset(ctx, out)
+	case "project":
+		return runProject(ctx, args[1:], out)
+	case "profile":
+		return runProfile(ctx, args[1:], out)
 	case "extension":
 		return runExtension(ctx, args[1:], out)
 	case "tool":
@@ -134,11 +133,27 @@ Usage:
                    own commits without it.
   pisafe discard RUN --confirm RUN
                    Permanently delete one exact run workspace
-  pisafe cache reset
-                   Throw away every dependency cache this repository's runs
-                   share. Nothing needs it to be correct, so the only cost is
+  pisafe project list
+                   Show every project store pisafe holds: where its checkout
+                   is, how many runs still belong to it, and whether the
+                   checkout is still there.
+  pisafe project reset [PATH]
+                   Throw away every dependency cache a project's runs share,
+                   naming it by its checkout or defaulting to this one.
+                   Nothing needs a cache to be correct, so the only cost is
                    that the next run fetches from scratch. Session transcripts
                    are not touched.
+  pisafe project drop PATH --confirm PATH
+                   Take a whole project store away now, caches and session
+                   transcripts together, rather than waiting for gc to find
+                   the checkout gone. Nothing reproduces a transcript.
+  pisafe project rebind OLD-PATH
+                   Give this checkout the session history of the one it was
+                   moved or renamed from. Caches are left behind.
+  pisafe profile reset --confirm
+                   Take every extension and tool back out of the profile.
+                   Each is refetchable from npm, but the record of what was
+                   installed is not.
   pisafe extension install PACKAGE[@VERSION]
                    Install a Pi extension into the profile every run mounts
                    read-only, pinned to an exact version and integrity hash.

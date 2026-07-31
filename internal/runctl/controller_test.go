@@ -216,6 +216,21 @@ func (backend *fakeBackend) PromoteSessions(
 	return nil
 }
 
+func (backend *fakeBackend) AdoptSessions(
+	_ context.Context,
+	projectKey string,
+	fromKey string,
+) error {
+	backend.calls = append(backend.calls, backendCall{
+		kind: "adopt-sessions",
+		args: []string{projectKey, fromKey},
+	})
+	if backend.failAt == "adopt-sessions" {
+		return errors.New("adopt sessions failed")
+	}
+	return nil
+}
+
 func (backend *fakeBackend) ResetProjectCache(_ context.Context, projectKey string) error {
 	backend.calls = append(backend.calls, backendCall{
 		kind: "reset-project-cache",

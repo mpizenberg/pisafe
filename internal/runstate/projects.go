@@ -101,6 +101,25 @@ func (store Store) ListProjects() ([]ProjectRecord, error) {
 	return records, nil
 }
 
+// HasProject reports whether a store is recorded under this key, without asking
+// whether the record still describes something usable. A record corrupted by
+// hand or by a rule that has since tightened must still be removable, or the
+// only way out is deleting files by hand.
+func (store Store) HasProject(key string) (bool, error) {
+	path, err := store.projectPath(key)
+	if err != nil {
+		return false, err
+	}
+	_, err = os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read project record: %w", err)
+	}
+	return true, nil
+}
+
 // MarkProjectMissing starts one project's window. Recording the observation is
 // what makes the window survive the process that made it, so a store is never
 // removed on the strength of a single look at the filesystem.

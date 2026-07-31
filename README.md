@@ -85,6 +85,21 @@ nothing is imported, the run is left exactly as it was, and you can keep the
 baseline instead or resolve it in the run and apply again. `--keep-baseline` and
 `--drop-baseline` answer in advance.
 
+```sh
+pisafe project list                       # what pisafe holds, per checkout
+pisafe project reset [PATH]               # throw away a project's caches
+pisafe project drop PATH --confirm PATH   # and its session transcripts with them
+pisafe project rebind OLD-PATH            # a moved checkout keeps its history
+pisafe profile reset --confirm            # every extension and tool back out
+```
+
+Runs of one repository share a dependency cache and the transcripts of the runs
+before them. `project reset` throws the caches away, which costs the next run a
+fetch and nothing else; `project drop` takes the transcripts too, which nothing
+reproduces. A project is keyed by the path of its checkout, so moving or
+renaming a repository leaves its history behind — `project rebind` run from the
+new location claims it, naming the old path.
+
 `discard` reclaims a run at any time; `gc` reclaims imported runs seven days
 after they were applied and prunes superseded run images. Both delete the run's
 record along with what it owned — the `pisafe/RUN` branch is what keeps the

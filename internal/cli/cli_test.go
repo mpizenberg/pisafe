@@ -15,6 +15,7 @@ import (
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/runcopy"
 	"github.com/mpizenberg/pisafe/internal/runctl"
+	"github.com/mpizenberg/pisafe/internal/runid"
 	"github.com/mpizenberg/pisafe/internal/runstart"
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
@@ -313,15 +314,65 @@ func TestDiscardRequiresExactRepeatedRunID(t *testing.T) {
 	}
 }
 
-// TestCacheTakesOnlyReset keeps a mistyped subcommand from reaching the VM,
-// where the only cache operation is destructive.
-func TestCacheTakesOnlyReset(t *testing.T) {
+// TestAMistypedScopeCommandNeverReachesTheVM covers every verb that removes
+// something a scope holds. One of them removes session transcripts, which
+// nothing reproduces, so none of them may be reached by a typo.
+func TestAMistypedScopeCommandNeverReachesTheVM(t *testing.T) {
 	var output bytes.Buffer
-	for _, args := range [][]string{{"cache"}, {"cache", "clear"}, {"cache", "reset", "npm"}} {
-		err := Run(context.Background(), args, nil, &output)
-		if err == nil || !strings.Contains(err.Error(), "usage: pisafe cache reset") {
-			t.Fatalf("Run(%v) error = %v", args, err)
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"project"}, "usage: pisafe project"},
+		{[]string{"project", "clear"}, "usage: pisafe project"},
+		{[]string{"project", "reset", "one", "two"}, "usage: pisafe project"},
+		{[]string{"project", "rebind"}, "usage: pisafe project"},
+		{[]string{"project", "drop", "/tmp/gone"}, "exact confirmation"},
+		{[]string{"project", "drop", "/tmp/gone", "--confirm", "/tmp/other"}, "does not exactly match"},
+		{[]string{"profile"}, "usage: pisafe profile reset"},
+		{[]string{"profile", "reset"}, "usage: pisafe profile reset"},
+		{[]string{"profile", "clear", "--confirm"}, "usage: pisafe profile reset"},
+	} {
+		err := Run(context.Background(), test.args, nil, &output)
+		if err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("Run(%v) error = %v", test.args, err)
 		}
+	}
+}
+
+// TestAStoreWhoseCheckoutIsGoneCanStillBeNamed is what makes a report of one
+// worth printing: the key is a digest, the directory it was made from is gone,
+// and the recorded checkout path is the only handle left to drop it by.
+func TestAStoreWhoseCheckoutIsGoneCanStillBeNamed(t *testing.T) {
+	t.Setenv("PISAFE_STATE_DIR", t.TempDir())
+	root, err := runstate.DefaultRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := runstate.NewStore(root)
+	project, err := runid.NewProject("/tmp/pisafe-test/departed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RegisterProject(project); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if err := Run(context.Background(), []string{"project", "list"}, nil, &output); err != nil {
+		t.Fatal(err)
+	}
+	listing := output.String()
+	if !strings.Contains(listing, project.Root) {
+		t.Fatalf("listing does not name the checkout:\n%s", listing)
+	}
+	// A store no run refers to is what drop exists for, and saying so is the
+	// difference between a report and a report with something to do about it.
+	if !strings.Contains(listing, "idle") {
+		t.Fatalf("listing does not say the store is unused:\n%s", listing)
+	}
+	if strings.Contains(listing, project.Key) {
+		t.Fatalf("listing offers a digest as a handle:\n%s", listing)
 	}
 }
 
