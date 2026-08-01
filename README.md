@@ -36,6 +36,57 @@ The release layout places `pisafe-guest-linux-arm64` beside `pisafe`; during
 development, `PISAFE_GUEST_HELPER=/absolute/path/to/helper` selects it
 explicitly. The run-image Containerfile is compiled into the controller.
 
+## Getting started
+
+Check the host, then log in once and leave a broker running in its own
+terminal — runs have no inference without it:
+
+```sh
+./pisafe doctor
+pisafe login chatgpt
+pisafe broker
+```
+
+From the repository you want worked on:
+
+```sh
+cd ~/code/my-project
+pisafe run
+```
+
+The first run creates the VM and builds the run image, which takes a few
+minutes; later ones start in seconds. `run` prints a run ID and a one-time
+`ssh -F` line to paste into Zed's Remote Projects dialog, or reach the same
+container from your terminal with `pisafe connect RUN`. Pi is there with the
+repository staged, and can build, fetch, and run tests without touching your
+checkout.
+
+When the run has something you want:
+
+```sh
+pisafe diff RUN     # what changed, without stopping it
+pisafe apply RUN    # stops it, imports its history as branch pisafe/RUN
+```
+
+Review, merge, and push that branch from the Mac as usual — the run itself
+never had GitHub access. `pisafe discard RUN --confirm RUN` throws away one you
+do not want.
+
+Runs of the same repository already share the transcripts of the runs before
+them. They share a dependency cache only if the repository asks, by committing
+`.config/pisafe.json`:
+
+```json
+{"caches": [
+  {"name": "npm", "env": ["npm_config_cache"], "key": ["package-lock.json"]}
+]}
+```
+
+Each entry names a cache, the environment variables that point a tool at it,
+and the repository files whose contents decide which stored generation a run
+starts from. Nothing else changes: the next `pisafe run` restores the snapshot
+an earlier one published.
+
 ## Use
 
 ```sh
