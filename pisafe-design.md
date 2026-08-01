@@ -133,10 +133,21 @@ pisafe doctor
 pisafe login [chatgpt|anthropic|openai|<name> --url --api --models]
 pisafe logout <name>
 
-# Phase 2 (persistent profile management):
-pisafe extension install <package>
-pisafe extension update [package]
-pisafe tool install <package>
+pisafe extension install <package>[@<version>]
+pisafe extension update [package...]
+pisafe extension remove <package>
+pisafe extension list
+pisafe tool install <package>[@<version>]
+pisafe tool remove <package>
+pisafe tool list
+
+pisafe project list
+pisafe project reset [path]
+pisafe project drop <path> --confirm <path>
+pisafe project rebind <old-path>
+pisafe profile reset --confirm
+pisafe backup <directory>
+pisafe restore <directory>
 ```
 
 `connect` resumes Pi or opens a shell. `zed` prints the path and opens Zed.
@@ -146,6 +157,13 @@ build artifacts, logs, or screenshots out of a run; because it writes to the
 Mac from untrusted content, it must treat every archive entry as hostile —
 acceptance test 14 states the requirement. `discard` is destructive, so its
 confirmation argument must repeat the exact run ID before anything is deleted.
+
+The second group manages what outlives a run. `extension` and `tool` are the
+only way anything reaches the profile runs mount, `project` and `profile` name
+a durable scope and empty or remove it, and `backup` and `restore` carry what
+nothing else reproduces off the VM and back. The destructive ones confirm the
+way `discard` does: `project drop` repeats the exact checkout path, and
+`profile reset` is refused without `--confirm`.
 
 ## Staging and Git behavior
 
@@ -236,16 +254,52 @@ Do not restore a single writable `/home/pi` volume. Split state by purpose:
 | Staged repository | run | yes |
 | Temporary downloads | run | yes |
 
-Phase 2 must satisfy three invariants, however it is built. Agent code cannot
-write global settings, extensions, or tools: those change only through a
-management command that pins an exact version and integrity hash, and the
-profile mounts read-only. A pinned extension is still untrusted at runtime —
-pinning prevents a surprise update, the boundary limits its reach, and updates
-are offered rather than applied. And one project's runs cannot read another
-project's sessions or caches, nor concurrent runs one another's live
-transcripts.
+Three invariants hold however this is built. Agent code cannot write global
+settings, extensions, or tools: those change only through a management command
+that pins an exact version and integrity hash, and the profile mounts
+read-only. A pinned extension is still untrusted at runtime — pinning prevents
+a surprise update, the boundary limits its reach, and updates are offered
+rather than applied. And one project's runs cannot read another project's
+sessions or caches, nor concurrent runs one another's live transcripts.
 
-Until Phase 2 exists, runs get private caches and no shared profile.
+A fourth property is not an invariant but is what makes the rest tractable:
+**shared state is disposable, and no run's correctness may depend on it.** A
+cache that is missing, stale, or wrong must cost time and nothing else, which is
+what licenses every approximation below and what obliges every shared scope to
+have a reset. Session transcripts are the exception that proves it — nothing
+reproduces one — so they are never evicted, never overwritten, and are the thing
+a backup exists to carry.
+
+What follows:
+
+- **A run reads shared project state and writes only its own copy.** Each shared
+  directory is mounted copy-on-write with the run's upper layer inside the run's
+  own storage. No package manager's concurrency behaviour is load-bearing, and
+  no run can corrupt what the project holds for the next one.
+- **Caches are keyed immutable snapshots, not merged directories**, selected by
+  exact key and otherwise by recency within the namespace, and published when a
+  run stops. Directory merging is refused outright: the presence or absence of a
+  file carries tool-specific meaning that no generic rule reconstructs.
+- **Nothing is cached unless the repository asks for it**, in
+  `.config/pisafe.json` at its root. That file arrives with the repository and
+  is parsed on the Mac before any sandbox exists, so its schema is inert: it
+  names caches and the environment variables that point at them, and nothing in
+  it selects a path pisafe mounts, a command pisafe runs, or a variable pisafe
+  sets itself. The worst a hostile declaration achieves is a useless cache key
+  or a full project filesystem, and a reset fixes both.
+- **A session store only ever gains entries.** A finished run's transcripts are
+  added to it under names that carry a session UUID; nothing a run does modifies
+  or removes what another run handed over, and a live run's transcripts reach no
+  concurrent run.
+- **The profile is written only from the Mac**, by a command the user runs
+  deliberately, and every run mounts it read-only at Pi's own global package
+  store. So installing globally inside a run fails, while trying an extension
+  for the length of one run still works. A package is installed only at an exact
+  version whose fetched bytes match the recorded integrity hash.
+- **An update is discovered without being applied.** What the registry now
+  resolves an installed name to is checked at most once a day, never on the path
+  that starts a run, and reported when a run stops; moving a pin happens only
+  when the user names the package.
 
 ## Network policy
 
@@ -417,15 +471,16 @@ tokens, or package secrets by default.
 
 ## Implementation order
 
+This was built in two phases, and the split still explains the shape of it.
 Phase 1 — the mountless VM and its firewall, per-run containers and storage, Git
 bundle staging and journaled apply, Zed Remote SSH, the brokered ChatGPT login,
 and the run lifecycle commands — is a complete MVP whose configuration is
 ephemeral per run. The broker belongs to it because Pi cannot function without
 model access and raw credentials must never enter the container, even
-temporarily. Phase 2 is managed persistence, and is quality of life rather than
-safety: the read-only global profile, installer commands with version and
-integrity pinning, update notifications, per-project sessions and caches, other
-providers, and backup/reset/recovery.
+temporarily. Phase 2 is managed persistence, quality of life rather than safety:
+the read-only global profile, installer commands with version and integrity
+pinning, update notifications, per-project sessions and caches, other providers,
+and backup and recovery. None of it may weaken the boundary Phase 1 built.
 
 The two components that carry security weight — the firewall rules and the
 inference broker — deserve real tests: bypass attempts against the packet
@@ -461,6 +516,20 @@ and errors, and fail-closed behavior when the broker or upstream is down.
     refs.
 14. `pisafe cp` refuses traversal paths, escaping symlinks, and special files,
     enforces size and count limits, and never overwrites without confirmation.
+15. Nothing in a run can write the global profile: installing a package
+    globally fails on the read-only store, while trying one for the length of
+    that run still works.
+16. Two runs of one project each read what earlier runs finished and neither
+    sees the other's live transcripts; a run of a different project reaches
+    neither those transcripts nor that project's caches.
+17. An extension or tool installs only at an exact version, refuses bytes that
+    hash to anything but the recorded integrity, and a newer release reaches no
+    run until the user names the package.
+18. A backup writes no provider credential, and restoring it into a freshly
+    recreated VM returns every transcript and reinstalls every pin; taking a
+    backup twice or restoring twice loses and changes nothing.
+19. Emptying a project's caches, or losing them with the VM, changes only how
+    long the next run takes.
 
 ## Residual risks
 

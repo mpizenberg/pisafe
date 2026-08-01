@@ -1,6 +1,6 @@
 # Implementation progress
 
-Last updated: 2026-07-28
+Last updated: 2026-08-01
 
 The durable handoff for continuing `pisafe` from a fresh session: what is
 implemented, what has been verified against a real VM, and what comes next.
@@ -9,17 +9,30 @@ implemented, what has been verified against a real VM, and what comes next.
 
 ## Current milestone
 
-Phase 1 is complete. Every command the design enumerates for it exists:
-`run`, `list`, `connect`, `stop`, `resume`, `diff`, `cp`, `apply`, `discard`,
-`gc`, `zed`, `login`, `broker`, `doctor`. Built in twelve slices: the controller
-and Git isolation core; the Lima VM backend and firewall; SSH transport, run
-records, run image and container contract; per-run SSH credentials; user-facing
-run creation; stop/resume/discard and quota-backed storage; the reverse
-inference relay; ChatGPT subscription login; getting work back out (`diff`,
-`cp`, `gc`); terminal access without an editor (`connect`); the
-keep-or-replay choice about a run's carried-in baseline commit; and freezing the
-run image's transitive npm resolution. A thirteenth closed the last verification
-debt, testing the packet filter against traffic shaped to look permitted.
+Phase 1 and Phase 2 are both complete. Every command the design enumerates
+exists.
+
+Phase 1 — `run`, `list`, `connect`, `stop`, `resume`, `diff`, `cp`, `apply`,
+`discard`, `gc`, `zed`, `login`, `broker`, `doctor` — was built in twelve
+slices: the controller and Git isolation core; the Lima VM backend and firewall;
+SSH transport, run records, run image and container contract; per-run SSH
+credentials; user-facing run creation; stop/resume/discard and quota-backed
+storage; the reverse inference relay; ChatGPT subscription login; getting work
+back out (`diff`, `cp`, `gc`); terminal access without an editor (`connect`);
+the keep-or-replay choice about a run's carried-in baseline commit; and freezing
+the run image's transitive npm resolution. A thirteenth closed the last
+verification debt, testing the packet filter against traffic shaped to look
+permitted.
+
+Phase 2 — managed persistence — added `project`, `profile`, `extension`,
+`tool`, `backup`, and `restore`, and was built in sixteen slices: substrate
+scouting against the live VM; per-project storage and the dependency cache;
+sessions on the same mechanism; declared caches and snapshot restore;
+publishing and eviction; session promotion; the global profile mount;
+`extension install`; `extension update` and the offer made at a run's end; the
+toolchain the run image carries; `tool install`; the `gc` sweep of project
+stores; one relay serving several upstreams; `login` for API-key providers;
+naming, emptying, and moving a durable scope; and backup and recovery.
 
 `pisafe run` uses the tested mountless path and materializes inside private
 quota-backed VM storage. **Do not add a local-workspace fallback.**
@@ -227,7 +240,7 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   relays binary stdio only to container loopback. The client private key never
   enters Lima or the run.
 
-### Inference broker and ChatGPT login
+### Inference broker and provider logins
 
 - `internal/broker` is the Mac-side relay. Runs authenticate with a
   `pisafe-cap-<64 hex>` capability from `crypto/rand`, stored only in the
@@ -271,6 +284,152 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   the real Bearer token and `chatgpt-account-id`; the run only ever sees the
   placeholder account ID `pisafe`. Its model catalog is embedded from the pinned
   Pi AI Codex data with per-model routing fields stripped.
+- Every configured upstream is served at once. `internal/providers` assembles
+  one catalog from the ChatGPT subscription login and every API-key record, and
+  the broker gives each its own route: the provider's name leads the API path
+  the client would have sent, matched exactly. One run capability authorizes all
+  of them, `models.json` carries one entry per provider, and a run chooses
+  between them in Pi's own model list. A login the broker cannot use is named at
+  startup and the others are still served; a request whose credential cannot be
+  produced is refused per request, as before.
+- `pisafe login anthropic|openai` reads the key from stdin, never argv, and
+  stores it in the login keychain under service `pisafe` and the provider's own
+  name. The record under `providers/<name>.json` holds no credential — it names
+  what is stored, and the endpoint, wire format, and model list come from
+  pisafe's own table, so a hand-edited record cannot redirect a stored key.
+  `pisafe login NAME --url URL --api API --models FILE` adds any endpoint
+  speaking `openai-completions`, `openai-responses`, or `anthropic-messages`,
+  with its models declared as a JSON array of Pi model definitions whose
+  per-model routing fields are stripped. Plain HTTP is refused except on
+  loopback, and a URL already ending in the segment the relay appends is
+  refused. `pisafe login` with no argument lists what is configured, and
+  `pisafe logout NAME` removes one whether or not it still works.
+- A key is read only when the broker relays a request. Starting a run renders
+  `models.json`, which carries no upstream credential, so run creation touches
+  no secret at all.
+
+### Per-project storage: caches and sessions
+
+- One root-owned fixed-capacity ext4 filesystem per project, allocated and
+  mounted by the same narrow helper run storage uses, which became
+  `pisafe-storage <action> <scope> <id>` with `run`, `project`, and `global`
+  scopes. It holds two namespaces, `cache/` and `sessions/`. The project key is
+  the checkout's directory slug plus eight hex characters of the SHA-256 of its
+  Git root path; a mode-0600 Mac-side record under `projects/<key>.json` names
+  the checkout and is written before the filesystem is allocated.
+- Shared state reaches a run as an overlay — `-v <lower>:<dst>:O,upperdir=…,
+  workdir=…` — with every upper in the run's own filesystem, under a third
+  subdirectory that is not bind-mounted into the container. The helper allocates
+  only namespace roots; pisafe builds each upper and work pair under
+  `podman unshare` as the mapped UID, so no namespace of a run's own needs a
+  privileged action.
+- `.config/pisafe.json` at the repository root declares cache namespaces, each
+  with the environment variables that should point at it and the files its key
+  is computed from. Unknown fields are refused, a variable pisafe sets itself is
+  refused, key files are opened through an `os.Root` after a lexical check, a
+  missing key file hashes as absent, and the run image ID is mixed into every
+  key. A repository declaring nothing gets no `/cache` mount and no redirection.
+- A run mounts, per namespace, the snapshot whose key matches exactly, else the
+  newest in the namespace. What it resolved to is recorded in its manifest
+  (version 6) and remounted verbatim on resume, so an existing upper is never
+  stacked on a lower its whiteouts were not recorded against.
+- Publishing happens when a run stops, whatever its outcome: a throwaway
+  `--network=none` container mounts the run's own overlay and streams the merged
+  view out as a tar, which the VM-side script extracts under `podman unshare`
+  into a dot-entry staging directory inside the namespace, stamps, and renames
+  into place. A key that already has a generation, or an empty upper, publishes
+  nothing. Eviction keeps the newest generation per namespace and spares any
+  generation a recorded run may still mount.
+- Sessions ride the same overlay mechanism at `/sessions`, named by
+  `PI_CODING_AGENT_SESSION_DIR`, and are written back differently: promotion
+  adds the run's finished transcripts to the project store by rename from a
+  staging dot entry on the same filesystem, skipping any name the store already
+  holds and any whiteout the run left. Nothing is ever evicted and
+  `project reset` leaves the store alone.
+- Publishing and promotion are joined rather than sequenced, and a failure in
+  either is recorded on the run instead of failing a stop that worked:
+  `pisafe stop` prints the warning and `pisafe list` marks the run.
+- `pisafe gc` sweeps project stores as well as runs. A checkout that the
+  filesystem denies starts the same seven-day window an imported run gets, with
+  the stamp on the record; presence is rechecked every sweep, and a project any
+  run record still names is skipped entirely.
+
+### The global profile: extensions and tools
+
+- The helper's `global` scope holds one profile, `default`, with three
+  namespaces: `extensions/`, `tools/`, and `pins/`. Every run mounts the first
+  read-only at Pi's own global package store, `~/.pi/agent/npm`, and the second
+  at `/opt/pisafe/tools`, whose `bin/` directory of relative symlinks is the one
+  `PATH` entry the profile adds — behind the image's own directories, ahead of
+  the run's `~/.local/bin`. `pins/` is pisafe's record and is mounted nowhere.
+  Installing globally inside a run therefore fails while `pi -e <package>` still
+  works, and the run's mountpoint is created before the container starts so
+  Podman cannot leave it root-owned.
+- Each run gets a `settings.json` and `trust.json` written into its home, not
+  mounted: they list each installed package by absolute path — never as an
+  `npm:` source, which would make Pi re-check versions against a read-only store
+  — pin `transport: "sse"`, and trust the run's own workspace. Whatever Pi then
+  writes dies with the run.
+- `pisafe extension install PACKAGE[@VERSION]` is two containers with pisafe
+  holding the pin between them: the first reports what the spec resolves to
+  through `npm pack --dry-run --json`, the second installs that exact version
+  with `--ignore-scripts` into its own npm prefix root, refusing a tarball whose
+  SHA-512 is not the resolved integrity. The tree is streamed into the profile
+  and renamed into place before the old one goes, and the record is written
+  after the tree and before any removal. `extension remove` and `extension list`
+  complete the set.
+- `pisafe extension update` never applies anything unasked. What npm resolves
+  each installed name to now is checked at most once a day, bounded to 45
+  seconds, when a run stops — never at run start, which reaches no registry at
+  all — and kept beside the pins in an advisory `updates.json` that is discarded
+  wholesale if it is absent, oversized, malformed, or shaped wrong. What is
+  pending is derived by comparing that file with the record, so applying or
+  removing a package silences an offer without clearing anything, and a stop
+  prints only when the day's check moved what is pending. Naming a package runs
+  the same resolve-and-verify install path a first install takes.
+- `pisafe tool install PACKAGE[@VERSION]` uses that install path and then reads
+  back what the tree claims: npm's own `node_modules/.bin` links, filtered to
+  those pointing into the named package. A name another tool already provides
+  refuses the install, and the `bin` directory is rebuilt whole from the record
+  rather than edited, so nothing a failed install left behind outlives the
+  record naming it. `tool remove` and `tool list` complete the set; there is no
+  `tool update`, because installing again is one.
+- The run image carries the toolchain a run cannot install for itself: `curl`,
+  `jq`, `ripgrep`, `fd`, `python3`, and `unzip` from Debian, plus `pnpm` and
+  `uv` pinned to a recorded digest, alongside the `node`, `npm`, `git`,
+  `openssl`, and `ssh` it already had.
+
+### Naming, emptying, and exporting durable state
+
+- `pisafe project list` reports every store pisafe holds by the checkout path
+  its record names — resolved, so the printed form is the one that hashes to the
+  key — with how many run records still belong to it and whether the checkout is
+  still there. It reads records only and starts nothing.
+- `pisafe project reset [PATH]` empties every cache namespace of one project and
+  leaves the session store alone; `pisafe project drop PATH --confirm PATH`
+  takes the whole store, transcripts included; `pisafe project rebind OLD-PATH`
+  gives the current checkout the session history of the one it was moved from,
+  by copying the transcripts into a fresh store — additively, skipping any name
+  the destination holds — and leaving the caches behind. A rebind refuses a
+  destination that already has a store, and both drop and rebind refuse while
+  any run record names the project.
+- `pisafe profile reset --confirm` empties the extension, tool, and pin
+  directories rather than removing what the record names, so a tree left by an
+  install that failed after fetching goes with everything else.
+- `pisafe backup DIRECTORY` writes a manifest plus one directory per project of
+  the transcripts that project's store holds, and the two profile records
+  verbatim. No cache and no credential is written at all. A transcript name the
+  Mac will not write is refused and counted rather than failing the backup, and
+  a name the backup already holds is kept, so backing up again into the same
+  directory adds and never removes.
+- `pisafe restore DIRECTORY` reads and validates the backup before the VM is
+  touched, then for each project registers the record, ensures the store, and
+  puts back every transcript the store does not already hold, by rename and
+  owned by the run user. Each extension and tool is reinstalled from the pin the
+  backup recorded, so the fetched bytes are checked against the integrity that
+  was installed rather than against what npm resolves the name to now; a package
+  already installed is left alone. A transcript failure stops the restore;
+  package failures are collected and reported at the end.
 
 ### Run records and controller
 
@@ -321,15 +480,23 @@ git diff --check
 Package coverage at this milestone:
 
 ```text
-pisafe        0.0%    runcontainer  73.4%
-pisafe-guest  64.8%   runcopy       80.3%
-broker        96.2%   runctl        70.3%
-chatgpt       70.1%   runid         92.3%
-cli           43.3%   runimage      76.8%
-gitstage      79.1%   runssh        68.0%
-hostnet       50.0%   runstart      80.9%
-lima          67.0%   runstate      75.5%
+pisafe         0.0%   profile       93.6%
+pisafe-guest  67.1%   projectconfig 90.7%
+apikey        82.2%   providers      0.0%
+backup        80.7%   runcontainer  84.9%
+broker        94.2%   runcopy       80.0%
+chatgpt       76.4%   runctl        73.4%
+cli           30.8%   runid         90.5%
+gitstage      79.1%   runimage      76.8%
+hostnet       50.0%   runssh        68.0%
+keychain      60.0%   runstart      80.0%
+lima          57.9%   runstate      73.7%
 ```
+
+`lima` and `cli` fell as Phase 2 added VM-side scripts and command surface that
+only the gated live suite and the end-to-end exercises execute. `providers` has
+no test file of its own; it is covered through the CLI and broker suites and by
+the stub-upstream exercise below.
 
 What the unit and integration suites cover, mostly against real repositories
 with a fake VM boundary:
@@ -407,17 +574,61 @@ with a fake VM boundary:
   pin, to carry no floating tag, to assert Pi still ships a shrinkwrap, and to
   repin each shrinkwrap gap at exactly `PiVersion` with a SHA-512 digest — so a
   Pi bump that forgets the three sibling packages fails before any image builds.
+- **Declared caches**: a repository with no config declaring nothing; a hostile
+  declaration refused field by field and an oversized one refused outright; a
+  key that follows both the declared inputs and the run image; a key file that
+  tries to leave the checkout refused lexically; and an absent key file hashing
+  as a state rather than failing.
+- **Publishing, promotion, and reset**: a stop publishing and trimming every
+  declared namespace; a run declaring no cache publishing nothing; transcripts
+  promoted by a run that shares no cache; a failed publish still promoting; and
+  either failure recorded on the run instead of failing the stop. Reset empties
+  a cache no run is holding and refuses while a run could still mount a
+  generation.
+- **Project stores**: a store whose checkout is gone still nameable; dropping
+  refused while a run belongs to it and refused for a store nothing records;
+  dropping taking the filesystem before the record; rebinding carrying the
+  transcripts and leaving the caches, refusing a destination that already has a
+  store and refusing while either end has a run; and both rebind and restore
+  registering the checkout before allocating its store.
+- **The profile**: an empty profile valid rather than missing; an unreadable
+  record naming itself; a pin the record cannot vouch for refused; only an
+  exactly pinned npm package installable; a reinstall replacing rather than
+  accumulating; two tools refusing to answer to one name; the links a run
+  searches derived from the record; installed extensions becoming the packages a
+  run loads; a writable profile refused as a run's profile; and an offer that
+  survives storage, differs only from what is installed, degrades to silence
+  when it is corrupt, and is made once per change.
+- **Backup and restore**: a manifest recording what a restore needs and nothing
+  more, checked field by field so a credential has nowhere to travel; a manifest
+  a restore cannot trust refused; an unfinished backup not readable as one; only
+  a transcript crossing into the backup; a name the backup already holds kept;
+  and a restore sending back only what an export would have written.
+- **Providers**: a built-in login recording nothing that could go stale; a
+  custom endpoint carrying its own upstream and never redirecting a known one;
+  declared models that cannot route around the broker; plaintext endpoints
+  refused unless they stay on this Mac; an endpoint that would be requested
+  twice over refused; a key read from stdin and never blank; a login removable
+  because a record names its key; and a key read only when a request is relayed.
+- **CLI**: every mistyped scope command refused before anything reaches the VM,
+  an extension refusing what it cannot pin before reaching the VM, and a restore
+  reading its backup before it starts anything.
 - The generated Lima YAML is checked by the installed Lima validator in the
   normal suite.
 
 ### Live verification
 
 ```sh
-PISAFE_LIVE_LIMA=1 go test -v ./internal/lima
+PISAFE_LIVE_LIMA=1 go test -v ./internal/lima -run TestLiveCreateAndStart
 PISAFE_LIVE_LIMA=1 go test -v ./internal/runimage
-PISAFE_LIVE_LIMA=1 PISAFE_LIVE_RUN_IMAGE=sha256:ae321357e51ae824bd020941565fb28ffca4bf9856ae3eb450b023a162b55970 \
-  go test -v -run TestLiveSSHStageAndContainerMaterialize ./internal/lima
+limactl shell pisafe -- podman images --no-trunc --format '{{.Id}} {{.Repository}}'
+PISAFE_LIVE_LIMA=1 PISAFE_LIVE_RUN_IMAGE=sha256:<image-id> go test -v ./...
 ```
+
+Everything that mounts a run needs the immutable ID of a locally built run
+image, which is why the image list comes before the last command. Any change to
+the VM definition moves the security profile digest, so the VM must be deleted
+and recreated before these pass.
 
 Verified against a real ARM64 VM:
 
@@ -562,17 +773,182 @@ Verified against a real ARM64 VM:
   credential in the run** — `auth.json` is `{}`, no OpenAI/ChatGPT environment
   variable exists, and the real token and account ID appear only on the broker's
   upstream request.
+- **Shared project layers**, iterating every overlay the run spec declares
+  (`TestLiveProjectLayersAreSharedToReadAndPrivateToWrite`): two concurrent runs
+  both read the seeded project state and neither sees the other's writes.
+- **Cache selection and publishing**
+  (`TestLiveCacheSnapshotsAreSelectedByKeyThenRecency`,
+  `TestLivePublishedGenerationsAreImmutableAndDisposable`): an empty namespace
+  selects nothing, either seeded generation is found at its exact key, and an
+  unknown key falls back to the newest. A run's fetches and its deletions are
+  both in the generation it publishes, the generation it restored is
+  byte-unchanged, the next run falls back to what was just published, eviction
+  spares a generation a run may still mount, and reset empties the cache while
+  leaving the session store alone.
+- **Session promotion**
+  (`TestLiveFinishedTranscriptsPromoteWhileLiveOnesStayPrivate`): a later run
+  reads a finished run's transcript, a live run's transcript reaches no
+  concurrent run, and neither a rewrite nor a deletion inside a run follows a
+  transcript another run already promoted.
+- **The profile mount** (`TestLiveTheProfileLoadsAndStaysReadOnlyToTheRun`): a
+  package seeded into the profile registers a flag that `pi --help` then prints,
+  so its code ran; the repository's own extension loads without a trust prompt;
+  `pi -e` still works; and the run can neither write the store nor `pi install`
+  into it.
+- **Pinned installs** (`TestLiveAnInstalledExtensionIsPinnedToWhatWasFetched`):
+  the recorded pin is the registry's own answer, bytes that hash to anything
+  else never reach the profile, the installed tree is that exact release,
+  reinstalling replaces rather than accumulates, and the next run resolves the
+  package.
+- **Offers** (`TestLiveAnAvailableUpdateIsOfferedAndNeverApplied`): a check
+  leaves the pin, the tree, and the mounted directory exactly as they were; what
+  it found survives storage and is pending only while the record disagrees with
+  it; a second check answering the same thing leaves nothing to say; and
+  applying goes through the same fetch-and-verify path an install takes.
+- **The toolchain** (`TestLiveTheToolchainIsReachableAndNeverShadowed`,
+  `TestLiveAnInstalledToolIsOnEveryRunsPathAndNeverWritable`): every tool the
+  image carries on purpose resolves inside a run, an executable the run drops in
+  its own home is invocable by name, and one named `git` still loses to the
+  image's. An installed command resolves and runs, its dependencies' commands do
+  not reach the run's `PATH`, the run cannot add, replace, or delete a link, and
+  removing one stops it resolving even in a run that is already live.
+- **Project stores** (`TestLiveAReclaimedProjectStoreTakesEverythingWithIt`,
+  `TestLiveARebindCarriesTheHistoryAndNotTheCaches`): a seeded store is mounted
+  and holds a transcript and a cache generation, reclaiming it leaves neither
+  the mount nor the directory, reclaiming again is not a failure, and the same
+  key then allocates a filesystem with none of the old project in it. A rebind's
+  transcripts arrive under the key another checkout path hashes to, a name the
+  destination already holds is left as it is, the caches are not carried, and
+  reading the source leaves it unchanged.
+- **Backup and restore** (`TestLiveABackupCarriesTheTranscriptsOutAndBackIn`): a
+  store's transcripts reach a directory on the Mac and go back into a different
+  store, a name the destination already holds is left as it is, the restored
+  transcripts belong to the run user, no cache travels, no staging survives, and
+  reading a store leaves it unchanged.
+- **Several upstreams at once**, verified end to end against a stub upstream on
+  the Mac's own loopback rather than by a live test, since a real one would need
+  real provider credentials: a real run's `models.json` carried both the
+  subscription and a keyed provider on their own routes with one capability, and
+  a request from inside the run reached the stub carrying the upstream key the
+  run never held.
+- **Backup end to end**, with the real binary in an isolated state directory: a
+  run wrote a transcript, stopping promoted it, and `pisafe backup` carried it
+  out while refusing and counting a planted name it would not write. Discarding
+  the run, dropping the store, and resetting the profile left nothing;
+  `pisafe restore` brought back the record, the store, the transcript — owned
+  `1000:1000`, mode 0600, byte-identical — and both pinned packages; restoring
+  again reported them already installed; and a new run of that checkout opened
+  with the transcript in `/sessions`, ran the restored tool, and loaded the
+  restored extension. A second backup into the same directory added the new
+  transcript and kept its own copy of one the store had rewritten in place.
+- **`pisafe profile reset` has no live test**, deliberately: there is one
+  profile and nothing scopes a test to a profile of its own, so a live test
+  would empty whatever the user has installed. It is covered by the transport's
+  argument test and by a manual exercise against a seeded tree, in which an
+  unrecorded tree and a stale link both went.
+
+### Substrate for shared state
+
+Established against the live VM and the pinned image before any of Phase 2 was
+built, and worth re-checking after a Podman or Pi bump:
+
+- **Podman mounts shared state rootlessly** as
+  `-v <lower>:<dst>:O,upperdir=<upper>,workdir=<work>`, and is particular about
+  the rest: `:O` is refused alongside any other mount option, so a shared mount
+  cannot carry `nodev,nosuid`; `--mount type=overlay` does not exist; and both
+  `upperdir` and `workdir` must already exist. The overlay may span two
+  filesystems, with the lower on the project's image and the upper on the run's.
+- **A mounted lower must not change underneath a live run.** overlayfs leaves
+  behaviour undefined if the underlying filesystem is modified while part of a
+  mounted overlay. This is a kernel constraint, not a merge-semantics one, and
+  it is why shared state is written by creating new directories rather than by
+  editing existing ones.
+- **The lower's contents must be owned by the container's mapped UID**
+  (`subuid_start + 999`) or the overlay is read-only in practice. The
+  consequence worth remembering: everything the privileged helper creates is
+  writable by the pisafe user under `podman unshare`, so pisafe can build
+  structure *inside* a helper-created directory with no new privilege.
+- **npm's cache is only half content-addressed.** `_cacache/content-v2` is keyed
+  by the hash of the bytes, but `index-v5` is keyed by the hash of the *request
+  URL*, so two runs fetching one package write one path with different contents.
+  Do not build on directory merging. `npm_config_cache` moves the whole cache,
+  and `npm_config_logs_dir` keeps per-run logs out of it.
+- **Pi writes its transcript where the environment says.**
+  `PI_CODING_AGENT_SESSION_DIR` is read by Pi — the literal never appears in
+  `dist` because the name is assembled from `APP_NAME` at build time — and
+  `--session-dir` overrides it. A relocated session directory is flat, with no
+  per-cwd level, and listing one filters by each transcript's own recorded cwd,
+  which is one value for every run of a project.
+- **A transcript's name cannot collide, and Pi deliberately never locks one.**
+  The file is `<ISO timestamp>_<randomUUID>.jsonl`, appended a line at a time.
+  Pi does use `proper-lockfile` for `settings.json`, `trust.json`, and its auth
+  store — the files it genuinely shares — and for no session file. The only case
+  where it rewrites an existing transcript is migrating it to the current
+  session version when it loads it.
+- **Pi installs global packages under `$PI_CODING_AGENT_DIR/npm`**, and
+  `PI_PACKAGE_DIR` does not relocate them: it locates Pi's own installation for
+  Nix and Guix store paths. A package on a genuinely read-only mount loads and
+  its code runs. A package named by absolute path is inert; one named `npm:` is
+  not, because Pi compares the installed version against the configured one at
+  every startup and installs when they disagree.
+- **A bind mount is unreadable to a container without the container SELinux
+  label**, and the failure is `EACCES` rather than a mount error. A mountpoint
+  Podman creates inside the run home is root-owned, which would leave Pi unable
+  to write its own settings. Podman also reports a read-only bind as
+  `RW: false` rather than as an `ro` option, so a manifest check that only reads
+  mount options cannot tell a read-only profile from a writable one.
+- **`npm pack --dry-run --json` reports the version and integrity of what a spec
+  resolves to**, scoped packages included, which is the pin without fetching
+  anything into the profile.
+
+```sh
+# Overlay isolation: conflicting writes over one shared lower.
+limactl shell pisafe podman run --rm --user 1000:1000 --network=none \
+  -v <lower>:/cache:O,upperdir=<upper>,workdir=<work> \
+  docker.io/library/alpine:3.22 sh -ec '...'
+
+# npm cache shape, to confirm it is still not safe to merge.
+ls ~/.npm/_cacache            # content-v2 (by content), index-v5 (by request URL)
+
+# Where Pi installs a global package, and whether a package it loads by path
+# stays inert. The profile mounts at the first, and the second is what keeps a
+# read-only store from turning a version disagreement into a broken run start.
+limactl shell pisafe -- podman run --rm --pull=never --network=none \
+  --entrypoint sh <run-image> -c '
+root=/usr/local/lib/node_modules/@earendil-works/pi-coding-agent
+grep -n "getNpmInstallPath(source, scope)" -A 12 "$root/dist/core/package-manager.js"
+grep -n "resolveLocalExtensionSource(parsed" -B 4 "$root/dist/core/package-manager.js"'
+
+# Session layout, naming, and what Pi locks. A relocated session directory must
+# still be flat, transcript names must still carry a UUID, and no session file
+# may acquire a lock, or promotion needs a merge it cannot perform.
+limactl shell pisafe -- podman run --rm --pull=never --network=none \
+  --entrypoint sh <run-image> -c '
+root=/usr/local/lib/node_modules/@earendil-works/pi-coding-agent
+sed -n "1,12p" "$root/docs/session-format.md"
+grep -n "sessionFile = join\|getDefaultSessionDirPath\|listSessionsFromDir" \
+  "$root/dist/core/session-manager.js"
+grep -rln "proper-lockfile" "$root/dist"'
+```
+
+Probe directories are owned by mapped UIDs, so clean them up with
+`podman unshare rm -rf`.
 
 ## Live VM state
 
 A persistent Lima instance named `pisafe` was left running with security profile
-`sha256:35c2cd370359201ce6861c91bc7fb25d8ada1497cf1db2d29c0017eea7e1f459`,
+`sha256:906c5bd13b53594ed1513187e804705e301873b3f0969758eac460d8345fb20c`,
 holding cached base/test images plus the current managed run image:
 
 ```text
-recipe digest: sha256:26643d0cbfdca35379ef38e7e05f8381a26812ab946f113f8525c3c328a6e7af
-image ID:      sha256:ae321357e51ae824bd020941565fb28ffca4bf9856ae3eb450b023a162b55970
+recipe digest: sha256:66c257a546ba5a3d50e6810903296bb883be4b0800deb1e271d6d6d05f93b59c
+image ID:      sha256:fe44e5112513ba064fcead963ae0f4b550d6bbf1f7e6e53b542752151f297083
 ```
+
+The instance was recreated during Phase 2: the storage helper gained the project
+and profile scopes and their namespaces, which are hashed into the security
+profile. Every helper change costs one recreation and destroys every project
+store with it, which is why they were batched and why `backup` exists.
 
 Each time the recipe moves, the next run rebuilds and every later run reuses it,
 which live-checks content-addressed reuse. When a recorded digest and a rebuild
@@ -628,6 +1004,21 @@ These explain why parts of the code look the way they do:
 15. Broker connections timing out because sshd's SYN-ACK replies carry the
     client's ephemeral port and matched no accept rule in the then-stateless
     output chain; all chains now accept established/related.
+16. Podman refusing `:O` alongside any other mount option, so shared mounts
+    cannot carry `nodev,nosuid` and are the only mounts in a run without them.
+17. An overlay whose lower is not owned by the container's mapped UID being
+    read-only in practice, with nothing failing at mount time to say so.
+18. A bind mount without the container SELinux label failing as `EACCES` inside
+    the container rather than as a mount error, which is why the profile is
+    allocated by the privileged helper rather than created by pisafe.
+19. Podman creating the profile's mountpoint inside the run home as root,
+    leaving Pi unable to write its own `settings.json`; pisafe now creates the
+    path before the run starts.
+20. `runcopy.ExtractInto` stopping at the tar end-of-archive marker while system
+    `tar` pads its output to its blocking factor, so the VM-side sender stayed
+    blocked writing into a pipe the Mac had already closed. Invisible for as
+    long as every sender was Go's `archive/tar`, which writes exactly the two
+    zero blocks the reader consumes; the extractor now drains what it is given.
 
 ## Known gaps
 
@@ -644,10 +1035,6 @@ These explain why parts of the code look the way they do:
 - Runs created before activation recorded submodule baselines have none in their
   manifest, so `diff` measures their submodules from the staged head and the
   drop would be offered where it should not be. No such run exists on this host.
-- `gc` reclaims runs and images, but not the per-project filesystems the design
-  also asks it to sweep. One is allocated the first time a project is run, now
-  holds both its dependency cache and its session store, and is never
-  reclaimed.
 - Collection never reclaims an unimported run, even one a check could prove
   holds no commits, because `diff` sees the repository but not the run's home
   directory. Their 10 GiB filesystems are reclaimed on the user's schedule, by
@@ -691,29 +1078,62 @@ These explain why parts of the code look the way they do:
 - The three sibling digests are pinned by hand and must be refreshed whenever
   `PiVersion` moves. A unit test refuses a mismatch, so the failure is loud, but
   regenerating them means packing each tarball and recording its SHA-512.
+- A session store grows without bound. Nothing evicts a transcript, `project
+  reset` leaves them, and the only thing that reclaims one is dropping the whole
+  project store — so a long-lived project is bounded by its 10 GiB filesystem
+  and nothing else warns before that.
+- Declarable cache environment variables have no allowlist. A project may
+  declare `CARGO_HOME`, which moves installed binaries and credentials as well
+  as the registry cache. No boundary breaks, because it is shared across that
+  repository's own runs only, but a compromised run would then read what an
+  earlier one left, and nothing tells a repository which variables are a bad
+  idea.
+- Cache key inputs are a literal list of relative paths, so a monorepo cannot
+  name `**/package-lock.json`. Globs were deferred rather than refused.
+- A run that executed hostile code can publish a cache generation a later run
+  restores. *Flagged as uncertain.* The containment is that the later run is
+  itself sandboxed, that lockfile integrity checks reject a tampered tarball,
+  and that the cache is disposable; publishing only on `apply` is the fallback.
+- A package needing an install script cannot be installed into the profile,
+  because both install containers run with `--ignore-scripts`.
+- Tools have no update offer. Installing one again is the update, but nothing
+  reports that a newer release exists, which extensions do get. pisafe also
+  never claims one version is newer than another — it reports only that the
+  registry's answer differs from the pin — and a declined offer is not raised
+  again until the registry moves.
+- Two installs running at once can lose an entry from the profile record. The
+  loser's tree stays in the profile unrecorded and re-running the command fixes
+  it; no lock was taken for a single-user command.
+- A restore reinstalls each package from npm, so a backup does not carry the
+  packages themselves and a release unpublished since the backup cannot be put
+  back. What the backup does hold is enough to say exactly what was lost.
+- There is no way to author a global `settings.json`. The mechanism exists —
+  settings are written into the run rather than mounted — but nothing yet edits
+  the file, so a run's settings are what pisafe renders.
+- `pisafe profile reset` has no live test, because there is one profile and a
+  live test would empty whatever the user has installed. A second profile name,
+  which the layout already allows and nothing reads, is what would close this.
+- `internal/providers` has no test file of its own. It is exercised through the
+  CLI and broker suites and by the stub-upstream end-to-end run.
 
-## Next implementation slice
+## What comes next
 
-Phase 1 is complete: every command the design enumerates is implemented and
-live-verified, and both components the design singles out as carrying security
-weight — the packet filter and the inference broker — now have the bypass and
-contract tests it asks for.
+Nothing is planned. Every command the design enumerates is implemented and
+live-verified, both components it singles out as carrying security weight — the
+packet filter and the inference broker — have the bypass and contract tests it
+asks for, and the three Phase 2 invariants each have a live test that fails if
+they stop holding.
 
-What remains is Phase 2, managed persistence: the read-only global profile,
-`extension`/`tool` installers pinning an exact version and integrity hash,
-update notifications, per-project sessions and caches, other providers, and
-backup/reset/recovery. Its three invariants are the ones to build against —
-agent code cannot write global settings, extensions, or tools; a pinned
-extension is still untrusted at runtime; and one project's runs cannot read
-another project's sessions or caches, nor concurrent runs one another's live
-transcripts. Making per-project caches and session stores exist is also what
-gives `gc` the sweep targets it is already specified to collect.
+What is left is the Known gaps list above. Two of them are open questions
+rather than missing work, and both wait for a real repository to answer them:
+whether the environment variables a project may declare need an allowlist, and
+whether tools should get the update offer extensions have. The rest are either
+deliberate refusals with the reasoning recorded in
+[`DECISIONS.md`](DECISIONS.md), or small things nobody has needed yet.
 
-Phase 2 is planned and tracked in
-[`plans/phase-2-managed-persistence.md`](plans/phase-2-managed-persistence.md),
-which holds its slice order, its decisions, and the substrate already
-established against the live VM. That document folds back into the design,
-`DECISIONS.md`, and this file when Phase 2 lands, and is deleted then.
+The one piece of upkeep that is not optional: the OAuth flow, the embedded
+model catalog, and the three sibling digests all mirror the pinned Pi release,
+and every one of them must be re-checked when `PiVersion` moves.
 
 Do not weaken the boundary for any of it.
 

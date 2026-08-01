@@ -111,11 +111,14 @@ history holds them. New entries are appended in full.
   the CLI has no stdin channel.
 - Manifests are versioned rather than migrated. Version 2 made activation
   atomically require the SSH connection record, version 3 made active-budget
-  accounting and deadlines durable, and version 4 bound the inference
-  capability to the active state. Each time, no released records existed, and a
-  compatibility path would have weakened the invariant being added or inferred
-  untrustworthy history. Any future change after real users exist needs an
-  explicit migration.
+  accounting and deadlines durable, version 4 bound the inference capability to
+  the active state, version 5 required the project key a run's shared storage is
+  reached through, and version 6 recorded the cache generation the run resolved
+  to. Each time, no released records existed, and a compatibility path would
+  have weakened the invariant being added or inferred untrustworthy history —
+  and for versions 5 and 6 the VM recreation that per-project storage forced
+  had destroyed the old runs' storage regardless. Any future change after real
+  users exist needs an explicit migration.
 - A run's record lives exactly as long as the run owns something: `discard` and
   `gc` remove the record with the resources, and discard is reachable from
   every state that still owns them, including `imported`. An earlier increment
@@ -139,6 +142,454 @@ history holds them. New entries are appended in full.
   pinned by a run that can still start a container are retained; an imported
   run pins none, because every command that still reads its workspace runs the
   controller's current image.
+
+## Shared project state
+
+- A project is keyed by its directory slug plus eight hex characters of the
+  SHA-256 of the Mac-side Git root path. Keying on the repository's root-commit
+  ID was not taken: it survives moves, but two clones of one upstream would then
+  share a cache and a session store, an empty repository has no key at all, and
+  a multi-root history needs a tiebreak rule. The path hash is always available
+  and always distinguishes two checkouts. Moving a repository therefore orphans
+  its store rather than migrating it, which `pisafe project rebind` claims back.
+- The key is one-way, so a filesystem cannot say which checkout it came from and
+  no amount of looking at the VM would answer it. A Mac-side record per project
+  is what attributes one, written before the filesystem is allocated: the only
+  failure that ordering admits is a record whose store was never created, and
+  removing one of those costs nothing. `runid.Project` carries the checkout it
+  was made from so that registration sits beside allocation in the controller
+  and no future caller can separate them. It also keeps attribution off the
+  privileged helper — the storage roots are `711` and `700`, so enumerating the
+  VM's stores would need a new privileged action and therefore a VM recreation.
+- Runs share project state through an overlay, not a shared read-write mount.
+  Sharing read-write would make every package manager's concurrency correctness
+  a property of the boundary: unverifiable by us, and fatal to a whole project's
+  cache when one tool gets it wrong. A full copy per run was not taken either,
+  because run filesystems are ext4 with no reflink, so the copy would be real.
+- Caches are keyed immutable snapshots rather than directories merged back into
+  the project store, which is what an earlier plan called for. Merging was
+  abandoned because the presence or absence of a file carries tool-specific
+  meaning — index files, stamp files, manifests — that no generic rule
+  reconstructs. Every CI cache system converged on wholesale keyed snapshots for
+  this reason; adopting their model costs a full copy per generation and buys
+  three things: whiteouts are resolved by the kernel instead of interpreted by
+  us, no mounted lower ever changes so concurrent runs need no coordination, and
+  eviction has an obvious unit.
+- The shared layer is disposable, not correct. An earlier claim that everything
+  under a cache was content-addressed and therefore safe to merge
+  last-writer-wins was checked and is false: npm's `_cacache` holds `content-v2`
+  keyed by content but `index-v5` keyed by the hash of the *request URL*, so two
+  runs fetching one package write one path with different bytes. It degrades
+  into a re-fetch rather than corruption only because each index line carries
+  its own checksum, which is npm being forgiving and generalizes to no other
+  tool. The property that does hold for any toolchain is that a wrong or missing
+  cache costs time and never correctness — which is what obliges every shared
+  scope to ship a reset rather than defer one.
+- The namespace directory is the restore prefix: all of a cache's snapshots live
+  under `cache/<namespace>/`, so falling back means taking the newest entry
+  there. Also writing each snapshot under a short shared key, as some CI
+  configurations do, was not taken — that overwrites an entry a concurrent run
+  may have mounted as its lower, reintroducing the one overlayfs hazard
+  immutability otherwise eliminates.
+- Cache namespaces are declared by the project, in `.config/pisafe.json` at the
+  repository root. Hardcoding a per-tool table in pisafe was not taken: the
+  knowledge belongs to whoever knows the project, and a fixed table makes every
+  new toolchain a pisafe release. The file is JSON parsed with the standard
+  library; TOML would be the friendlier authoring format and the first
+  third-party package in a tool whose entire argument is boundary control, and
+  that trade was declined. Reversibility: changing the format later means
+  migrating every repository that adopted it, so this is the expensive decision
+  in this section.
+- The config schema is inert, because the file arrives from the repository and
+  is parsed on the Mac before any sandbox exists. Key inputs are literal
+  relative paths whose contents pisafe hashes; there is no command execution, no
+  shell, and no caller-chosen mount path. Globs were deferred rather than
+  refused — a monorepo will want `**/package-lock.json`, but resolving one
+  raises symlink-escape questions a literal list does not, so it waits for the
+  repository that needs it.
+- A declared cache may not bind a variable pisafe sets itself, and the refused
+  set is derived from the run's own environment rather than listed twice so the
+  two cannot drift. An allowlist of known-good cache variables was not taken,
+  and neither was a denylist of process-semantics variables like `PATH`: what a
+  cache carries into a later run of the *same* repository is that repository's
+  business, and is already true of any cache holding executable content. What is
+  pisafe's business is that the session directory, the home, and npm's log path
+  stay where pisafe put them, which is exactly the set refused.
+- The declared key files are opened through an `os.Root`, because the paths come
+  from the repository and are read on the Mac, so a symlink out of the checkout
+  would let a declaration hash arbitrary host files. They are rejected lexically
+  first, so a failure names the declaration rather than the filesystem. A
+  missing key file hashes as absent rather than failing: a repository with no
+  lockfile yet has no dependencies yet, which is a state and not an error. The
+  key also includes the run image ID, for the same reason CI keys start with the
+  runner OS, and the config does not control that part.
+- The snapshot each run resolved to is recorded in its manifest, and resume
+  reuses it rather than selecting again. A resumed run stacks its existing
+  upper, with the whiteouts it recorded against one lower, so re-selecting could
+  stack it on a newer generation that never held the files those whiteouts
+  delete. Selection is therefore a project-store read separate from the
+  run-store write that prepares the mount, which is what lets it happen before
+  the run is recorded at all.
+- Publishing happens when a run stops, regardless of its outcome, not on
+  `apply`. Under immutability a publish cannot damage anything that exists, so
+  gating it behind a deliberate act buys less than it costs in cache misses;
+  stopping is also the one point every ending passes through and the last point
+  at which the overlay can still be mounted. Publishing at reclamation was not
+  taken: an applied run is reclaimed a week later, far too late to help. Two
+  consequences. A stopped run that resumes and keeps working publishes nothing
+  further under the same key, so its work is not lost but is not shared until
+  the inputs move. And *flagged as uncertain*: a run that executed hostile code
+  can leave a snapshot a later run restores. The containment is that the later
+  run is itself sandboxed, that lockfile integrity checks reject a tampered
+  tarball, and that the cache is disposable; if that proves wrong, publishing
+  only on `apply` is a one-line change.
+- A publish or promotion that fails is recorded on the run rather than returned
+  as a stop failure, and the two are joined rather than sequenced so neither
+  short-circuits the other. The run did stop and its workspace is intact;
+  failing the command would misreport that, and `apply` and `discard` both stop
+  a run on the way to something else and may not be aborted by a cache. `pisafe
+  stop` prints the recorded warning and `pisafe list` marks the run.
+- The merged view is read by a throwaway container and written only by pisafe:
+  the container mounts the run's own overlay and streams a tar to standard
+  output, which the VM-side script extracts under `podman unshare`. Bind
+  mounting a staging directory into that container and copying inside it is one
+  command shorter and was not taken, because no container ever gets a writable
+  handle on a project store.
+- One generation is kept per namespace, and reset empties a whole project's
+  cache. Keeping three was the first choice, on the CI convention, and it was
+  wrong for a fixed 10 GiB project filesystem shared by every namespace and the
+  session store: publishing writes a full copy before eviction runs, so three
+  kept generations peak at four copies and a 2.5 GiB npm tree fills the image on
+  its own. One costs a peak of two and loses little, because the fallback only
+  ever reads the newest — what three buys is an *exact* hit when a project
+  alternates between a few input states, and the miss it becomes still restores
+  a warm base. Reversible: it is one constant. Reset takes the whole cache
+  rather than one namespace or generation, because the reason to reach for it is
+  never "this one generation is wrong".
+- Eviction and reset both spare a generation a recorded run may still mount.
+  overlayfs leaves behaviour undefined when a mounted lower goes away, and the
+  run manifests already record which generation each run resolved to, so the
+  protected set is read from them rather than tracked separately. An active run
+  has one mounted now and a stopped run remounts its own on resume; an imported
+  run cannot resume, so it protects nothing.
+- A generation is stamped when it is published, not when the run last touched
+  it, because tar restores the merged view's own timestamp and recency is how a
+  namespace is searched. A half-written one stages as a dot entry inside its own
+  namespace, so neither selection nor eviction can see it and the rename into
+  place stays within one directory on one filesystem; a separate staging tree
+  would need its own cleanup path, while a leaked dot entry is swept by the
+  reset that empties the namespace.
+- pisafe creates the run-side upper and work directories, not the privileged
+  helper, because the set of namespaces comes from the project config and cannot
+  be known when the run filesystem is allocated. Everything the helper creates
+  is owned by the mapped UID, so pisafe builds them under `podman unshare` with
+  no new privilege. This retired the helper's static layer list. They live in a
+  third run-filesystem subdirectory that is not bind-mounted into the container:
+  putting them under the run home needs no helper change but exposes the raw
+  upper, whiteouts and all, to the code whose writes it records.
+- One privileged helper serves every scope. `pisafe-run-storage` became
+  `pisafe-storage <action> <scope> <id>` with `run`, `project`, and `global`
+  scopes rather than near-identical siblings; they differ only in root path,
+  size policy, and subdirectory set. The helper and its namespace list are
+  hashed into the VM's security profile, and its `verify` asserts each namespace
+  exists rather than creating one, so every helper change forces a VM
+  recreation — which destroys every project store, and is why such changes are
+  batched and why nothing in a later slice added a privileged action.
+- A project filesystem is ensured, never created, and never rolled back. Many
+  runs of one project reach it and none may assume it is the first; a run that
+  fails after ensuring it leaves it behind, because it is shared state that
+  outlives every run. It is also ensured ahead of the manifest record, since it
+  is the one allocation deliberately never undone and selection needs it.
+- Shared mounts carry neither `nodev` nor `nosuid`, because Podman refuses any
+  other option alongside `:O`. They are the only mounts in a run without them
+  and it costs nothing: creating a device needs `CAP_MKNOD` and the run drops
+  every capability, while `no-new-privileges` already neutralizes a setuid bit.
+- Sessions keep the plain overlay for isolation but do not use the cache
+  mechanism, because promotion is additive and unkeyed: transcripts have no key
+  and no invalidation, filenames are session IDs, and nothing is implied by a
+  file's presence. An earlier increment recorded sessions as riding the cache's
+  mechanism, which was right about the mount and wrong about the write-back.
+- Promotion writes into the mounted lower rather than avoiding it. This is the
+  one place pisafe adds entries to a directory live runs have mounted, and
+  overlayfs calls a lower changing underneath a mount undefined. Two shapes that
+  never touch a mounted lower were weighed and not taken: immutable session
+  generations reusing the cache's publish path, which would copy a project's
+  whole transcript history forward on every run and could drop a concurrent
+  run's transcripts under keep-newest eviction; and a run-private directory
+  seeded by copying the history in at start, which costs that copy every run.
+  What makes the chosen shape defensible is that the undefined part is bounded
+  to one observable — nothing existing is ever written, so the only question is
+  whether a live run's listing shows the new names, and the isolation invariant
+  requires that it not show them. Reversibility: the seeded-directory shape
+  stays available and would replace the overlay rather than extend it, so
+  changing course is a rewrite of the sessions mount, not a data migration.
+- A name the session store already holds is skipped rather than replaced, which
+  is what keeps promotion additive in the one case where names repeat: Pi
+  rewrites a transcript in place to migrate it to the current session version
+  when it loads one. Promoting that rewrite would modify a file concurrent runs
+  have mounted, to no benefit, since each run migrates its own copy on load
+  anyway. The consequence worth stating: a migration never reaches the store,
+  and a transcript deleted from Pi's own picker inside a run stays in the store.
+- Sessions are never evicted and `reset` leaves them alone: a transcript is not
+  reproducible, so the store grows with the project's history. Bounding it
+  belongs to the sweep that reclaims whole project filesystems, not to a
+  per-namespace rule modelled on the cache.
+- The shared cache is a directory pisafe owns, and tools are redirected into it
+  by cache-specific environment variables. Overlaying each tool's own location
+  instead — `~/.npm`, `~/.cargo/registry`, `~/go/pkg/mod` — was not taken: it
+  needs one upper and work pair per path and makes the run filesystem's shape
+  depend on the list of toolchains. The rule this buys is that nothing is shared
+  unless a variable puts it there. npm's logs and update-notifier timestamp are
+  pushed back out to the run home under the same rule, being per-run, unbounded,
+  and useful to nobody else.
+- A store whose checkout is missing starts a retention window rather than being
+  released. Reclaiming on the first sweep that finds the path gone is what "the
+  repository is gone" literally means, and was not taken because the evidence is
+  indistinguishable from an unplugged disk or a network mount that had not come
+  up, while a project store is the one thing pisafe keeps that it cannot
+  reproduce. Presence is the path existing, not the path being a Git repository:
+  `RepositoryRoot` cannot distinguish "not a repository" from "git could not
+  run", so a broken git would report every project orphaned at once. And a
+  project with any run record is skipped entirely, including runs the same sweep
+  is reclaiming, which costs an orphan one extra week and buys a predicate with
+  no ordering in it.
+- One live test covers every shared layer, rather than one per layer per slice.
+  The property under test is identical across layers, so the test iterates the
+  run spec's overlays and a layer added later is covered by construction.
+
+## The global profile
+
+- `settings.json` and `trust.json` are copied into the run, not mounted, because
+  Pi writes both — `/settings`, `pi install`, and `/trust` all do — and a
+  read-only mount would turn ordinary Pi use into an I/O error. The copy dies
+  with the run, so agent code still cannot change what any later run sees.
+- The profile mounts at Pi's own global package store, `~/.pi/agent/npm`, rather
+  than at a neutral path of pisafe's choosing. A neutral mount needs a second,
+  purely negative one — an empty read-only filesystem over the package store —
+  to keep `pi install` from silently succeeding into a run home and vanishing at
+  stop. One mount states the property directly: the global package store is
+  read-only, so installing globally fails while `pi -e <package>` still works,
+  because that path installs to a temporary directory for one run. Trying an
+  extension stays ephemeral and keeping one goes through a pisafe command,
+  without pisafe having to enforce the split itself.
+- A run reaches a profile package by absolute path, not as an `npm:` source.
+  Both spellings load, but an `npm:` source makes Pi re-check the installed
+  version at every startup and install when it disagrees, so a read-only store
+  would turn any disagreement into a broken run start. A local path is only
+  stat'ed and read. It also keeps profile packages out of `pi update
+  --extensions`, which is what "offered, never applied" requires.
+- Each installed extension or tool gets its own npm prefix root. One shared
+  `node_modules` would mean merging dependency trees across installs, which is
+  the problem the cache design already refuses to solve, and Pi documents that
+  packages load with separate module roots anyway. The cost is duplicated
+  dependencies, which is disk on a bounded filesystem.
+- The profile is a scope of the privileged helper, not a directory pisafe
+  creates: a bind mount is unreadable to a container without the container
+  SELinux label, and the helper is what applies it, along with the root-owned
+  fixed-capacity image and mapped-UID ownership every other shared filesystem
+  has. There is one profile, named `default`; the path keeps the name level so a
+  second can exist later, but nothing reads a profile name from a run, since a
+  per-run profile would have to be recorded in the manifest and there is no use
+  for one yet.
+- A run's own workspace is trusted without asking. *Flagged as a judgement
+  call.* Pi's project trust gates whether it loads `.pi/settings.json`,
+  `.pi/extensions`, project skills, and system-prompt files from the working
+  directory, and defaults to asking. Inside pisafe that guard protects nothing
+  the container does not already contain — repository content is exactly what
+  the sandbox exists to hold — while leaving it unanswered costs a prompt on
+  every run and silently drops a team's project settings in non-interactive
+  mode. The consequence worth stating: a hostile repository's
+  `.pi/settings.json` loads and can pull its own packages from npm inside the
+  run. `pi --no-approve` overrides it for one run, and reverting means deleting
+  one line from the trust file pisafe writes.
+- A user-authored global `settings.json` is deferred. The mechanism that makes
+  one possible — settings written into the run rather than mounted — exists, but
+  nothing yet lets a user author the file: it lives in the VM, only pisafe
+  writes it, and copying the Mac's own would carry host paths and host tool
+  configuration across the boundary.
+- An install is two containers, and pisafe holds the pin between them. The first
+  asks npm what a spec resolves to and reports the exact version and the
+  integrity of that release; the second fetches that version and refuses to
+  install bytes that hash to anything else. One container reporting both the pin
+  and the tree was not taken: the pin would then be a claim by the same process
+  that produced what it describes. This does not make the fetch trustworthy — it
+  happens inside a container by necessity — but it makes the recorded pin
+  something the install was checked against rather than a description of
+  whatever arrived.
+- Only npm sources are installable, and only at an exact version. A git source
+  has no integrity hash to pin, and a local path names something inside a
+  container the user cannot see. A version the user omits is resolved once and
+  recorded, so a spec never means two different profiles. Install scripts do not
+  run, matching how the run image installs Pi itself; the consequence is that a
+  package needing a build step is not installable this way.
+- The record is written after the tree and before a removal. A record can name a
+  package that is missing, which Pi skips silently, but never fail to name one
+  that is there — the reverse would leave a run loading something the user
+  removed. Replacing a package swaps the new tree in before the old one goes, so
+  a run starting mid-install finds one release or the other rather than a path
+  that briefly does not exist. Two installs at once can lose an entry from the
+  record; the loser's tree stays unrecorded and re-running the command fixes it.
+  A lock was not taken for a single-user command.
+- The update offer is made when a run stops, not when one starts. Starting a run
+  is when the user is waiting and when nothing may depend on the registry being
+  reachable; stopping one is when they have finished, when slow best-effort work
+  already happens, and when they might act on it. So no run start reaches npm at
+  all. Checking in the background at start was not taken: it buys a fresher
+  answer at the cost of a network call on the path that matters most.
+- An unsolicited offer is made once per change, not at every stop: a stop prints
+  only when that day's check moved what is pending, while `extension list` and
+  `extension update` repeat a standing offer on request. Printing at every stop
+  was the first design and was dropped, because the end of a run is also where
+  the run's own failure warning prints and a channel that repeats what the
+  reader already declined is one they stop reading. The window is between checks
+  rather than within a run, because knowing what changed *during* a run would
+  need an answer from the registry at run start. The cost is that a declined
+  offer is not raised again until the registry moves; cheaply reversible with an
+  announced-at timestamp and a second interval.
+- The check refreshes at most once a day, is bounded to 45 seconds against the
+  ten minutes an install container is allowed, and one that resolved nothing did
+  not happen — it neither replaces a standing offer nor counts, so an
+  unreachable registry leaves what is known alone and says nothing. The offers
+  file itself is advisory: absent, oversized, malformed, or unknown-shaped all
+  mean the same thing as never having checked, and an entry that is not a name
+  and an exact version is dropped rather than printed, because these strings
+  reach a terminal.
+- An offer carries no integrity hash, and applying one re-resolves through the
+  same fetch-and-verify path a first install takes, so an offer can never be
+  what fetched bytes are checked against and can go stale harmlessly. What is
+  pending is derived rather than stored: an offer shows only while the record
+  disagrees with it, so applying an update or removing a package silences it
+  without anything having to clear the file. This is also why pisafe does not
+  order versions — it reports that the registry's answer differs from the pin
+  rather than claiming one is newer, which would mean implementing semver
+  comparison to say something no decision depends on.
+- An update applied while runs are live reaches them. *Verified rather than
+  reasoned about*: the run mounts the extensions directory itself, so replacing
+  a tree by rename inside it is visible immediately to a container already
+  holding that mount. A Pi process keeps whatever it loaded at startup, but one
+  started later in that same run gets the new release. Pinning still means no
+  update happens without the user asking, which is what the invariant requires.
+- A run's toolchain is the image's, because nothing else can supply it.
+  *Verified rather than reasoned about*: a run holds `node`, `npm`, `git`,
+  `openssl`, and `ssh` and cannot obtain another — the rootfs is read-only, the
+  agent is unprivileged so no package manager will run, and `npm install
+  --global` writes to `/usr/local`. So global tools are not a convenience layer
+  over something that works. The image now carries a wider set at 132 MB;
+  leaving it to `pisafe tool install` was not taken, because the useful binaries
+  are not npm packages, so the command would never have reached them.
+- pnpm and uv are pinned to a digest recorded in the recipe; Debian packages are
+  not. A build whose pnpm tarball or uv release changed fails rather than
+  installing something else, while the apt packages ride the suite as the build
+  already does for `git` and `openssl` — pinning them would mean carrying a
+  version set that Debian security updates then invalidate. uv also introduces
+  `github.com` as a build-time origin beyond the npm registry and the Debian
+  mirrors, because uv publishes no npm package.
+- pisafe keeps npm as its own installer. pnpm was measured against it rather
+  than adopted: `npm install` already writes a lockfile covering every
+  transitive dependency with an integrity hash, and that lockfile is inside the
+  tree pisafe streams into the profile, so npm and pnpm pin identically. pnpm's
+  non-hoisted layout buys nothing here either, because each package already gets
+  its own module root. Adopting it would have meant pinning pnpm into the image
+  before any of it worked, then rewriting a verified install path for parity.
+- `PATH` is a predictability default, not a boundary. Anything in a run can
+  prepend to its own `PATH` or call a binary by absolute path, so the order
+  pisafe sets controls nothing an attacker cares about; what holds is that the
+  profile mounts read-only and its contents are pinned, at any position. The
+  image comes first so an installed tool never decides what `git` or `node`
+  means, and the run's own `~/.local/bin` comes last so `uv tool install` yields
+  something invocable. Restating the image's search path copies something the
+  base image owns, which is why a live test fails if a base bump moves it.
+- A tool claims the names its own tree gives it, read back after the install.
+  npm writes a link in `node_modules/.bin` for every package in the tree,
+  dependencies included, so the alternative was to trust the registry's metadata
+  before installing. The tree is the truth and the metadata is a copy of it, and
+  filtering the links by whether they point into the named package needs no JSON
+  parsing on the VM at all. The cost is ordering: the tree lands in the profile
+  before pisafe knows what it claims, so a package that provides no command is
+  installed and then removed — safe, because a tree nothing links to is inert.
+  The directory of links is rebuilt whole from the record rather than edited, so
+  nothing a failed install left behind outlives the record that named it.
+- A command name another tool already provides refuses the install. Letting the
+  newer win, and merely reporting the shadowing, were both defensible; refusing
+  is the one that never silently changes what an existing command means, and is
+  the easiest to relax later. Tools get no `update` command for the symmetric
+  reason: installing one again resolves the name afresh and replaces it, which
+  is the whole of what an update would do, so a second command would be a second
+  name for one idea. What tools genuinely lack is the offer.
+
+## Naming, emptying, and exporting state
+
+- A project store is named by its checkout path, never by its key. The key is
+  what the store is filed under and `project list` could print it, but it is a
+  digest nobody recognises, while the path is the only handle a user has for a
+  store whose directory is gone. A path that no longer resolves is taken as it
+  stands rather than refused, which is what lets a store be dropped after its
+  checkout has been deleted. The consequence: a path reached through a symlink
+  that git would have resolved differently hashes to a different key, so
+  `project list` prints the resolved form to copy from. It reads records only
+  and starts nothing — reporting each store's size would help most in deciding
+  what to drop, and was not taken because enumerating the storage roots needs a
+  new privileged action and therefore a VM recreation.
+- `pisafe cache reset` became `pisafe project reset [PATH]`. The old command
+  could only mean the working directory's project, which is exactly what the
+  stores that most need attention do not have. What it does is unchanged, and
+  the session store is still left alone.
+- A rebind copies the transcripts into a fresh store instead of renaming the
+  filesystem. Renaming is what the operation actually is, and it would be a
+  `rename` action on the privileged helper — not taken, because a new action
+  forces a VM recreation, and recreating the VM destroys every project store,
+  which is the loss rebind exists to prevent. Copying needs no new privilege at
+  all. Reversible: if a helper change is being made for another reason, a rename
+  would replace the copy without changing the command.
+- A rebind carries the transcripts and leaves the caches. Carrying them too
+  would be correct — a generation is still valid after a move — and was not
+  taken because a generation is a full copy on a fixed-capacity image, so it
+  could exhaust space partway through an operation whose whole purpose is losing
+  nothing.
+- A rebind refuses a destination that already has a store, and dropping or
+  rebinding is refused while any run record names the project. An interrupted
+  rebind and two genuine checkouts are indistinguishable from the records, and
+  silently merging two projects' histories is the worse mistake; the way out is
+  `project drop`, at which point the source store is still intact. The
+  run-record predicate is the one eviction and cache reset already obey, for the
+  reason overlayfs gives: a mounted lower may not go away, and a stopped run
+  remounts its own on resume.
+- `profile reset` empties the directories rather than removing what the record
+  names. A tree left behind by an install that failed after fetching is named by
+  nothing, so removing the record's entries would leave it there for ever.
+- A backup is a directory, not an archive. One tar file was not taken: a
+  directory lets a transcript be read out with the tools already on the Mac, and
+  it is what makes repeating a backup into the same place additive rather than a
+  rewrite. The cost is that a backup is not one thing to copy around.
+- A backup only ever adds, in both directions. Mirroring the VM's current state
+  — the rsync semantic — was not taken: it would mean that dropping a project
+  and then backing up destroys the last copy of its transcripts, which is
+  precisely the disaster a backup exists to prevent. So a name either side
+  already holds is left as it is, which is the rule promotion already follows,
+  and a second backup and a second restore are both harmless.
+- A restore installs from the backed-up pin rather than resolving the name
+  again. Resolving `name@version` and comparing the integrity to the backup's
+  was the sketched design and was dropped as redundant: the install script
+  already checks the fetched tarball against the integrity it is handed, so
+  installing from the pin makes the *bytes* the thing verified rather than npm's
+  metadata. A release republished under the same version fails the install. A
+  package already installed is skipped rather than replaced, because the profile
+  may have moved on and putting the backup's older pin over it would be a silent
+  downgrade: a restore puts back what was lost, it does not make a profile
+  identical to a backup.
+- A backup records only projects that contributed a transcript. Recording every
+  registered project was not taken: what a restore would put back for an empty
+  store is the record and the filesystem, and a run of that checkout creates
+  both anyway, so an empty store is genuinely nothing to restore.
+- Transcripts fail a restore, packages do not. A transcript has no second source
+  to come from, so a failure there is the VM's storage and the projects after it
+  would fail the same way — it stops. A package failing is npm being a third
+  party, so the rest are still installed and every failure is reported at the
+  end.
+- A transcript name a run chose is refused rather than fatal. A run can write
+  any `*.jsonl` name into its own session directory and promotion carries it, so
+  a name the Mac will not write costs that one file and is counted in the
+  output, rather than letting one run block the backup of everything else.
 
 ## Staging and apply
 
@@ -310,6 +761,55 @@ history holds them. New entries are appended in full.
 - `pisafe-guest configure-inference` also pins `transport: "sse"` in the run's
   Pi settings, merging rather than replacing what Pi wrote itself: Pi's default
   auto transport dials a WebSocket first, which the HTTP relay cannot speak.
+- A run sees every configured upstream, not one active one. Keeping the broker's
+  single provider and letting the newest login win was a much smaller change:
+  nothing about routing, models.json, or the relay would have moved. It was not
+  taken because what a user wants from a second provider is to choose per task —
+  a subscription for long sessions, a metered key for a one-off — and an
+  active-provider switch makes that choice a command plus a run restart. Pi
+  already namespaces models by provider, so several entries cost a run nothing.
+- The provider's name leads its relay path: `/<name>` prefixes the API path the
+  client would send on its own, matched exactly. Routing on the model ID in the
+  request body was rejected outright, because it would make the relay parse what
+  a run sends, which is the one thing it never does. The name is validated as a
+  lowercase slug because it is simultaneously a URL path segment, a models.json
+  key, and a Keychain account.
+- A dead login no longer stops the broker from starting. With one provider,
+  failing at startup was right: nothing worked anyway, so failing loudly beat
+  failing per request. With several it inverts — one expired refresh token would
+  withhold every other upstream — so the broker names the unusable logins and
+  serves the rest. Nothing is weakened: the relay's per-request fail-closed path
+  is what actually refuses a request whose credentials cannot be produced.
+- A built-in provider's login records only its name. Writing the endpoint, wire
+  format, and model list into the record at login time makes it self-describing
+  and was not taken, because a release that adds a model or moves an endpoint
+  would then never reach a key stored months earlier. The table wins over the
+  record, so a record hand-edited to point a known name elsewhere is ignored
+  rather than obeyed — which also means a stored key cannot be redirected to
+  another host by editing a file.
+- A custom endpoint declares its models; pisafe does not discover them. Asking
+  the endpoint's own `/v1/models` returns identifiers and nothing else — no
+  context window, no cost — and a wrong context window is a real failure rather
+  than a cosmetic one. The declared list has its per-model routing fields
+  stripped rather than refused, because Pi's own provider data is the obvious
+  thing to copy an entry from and every entry there carries them; a model naming
+  its own `baseUrl` would reach the provider without passing the relay.
+- Plain HTTP is refused except on loopback. The key is a credential, and sending
+  it in clear over a LAN is the exposure a broker holding it exists to prevent.
+  Loopback is exempt because it never leaves the Mac, which is also what makes a
+  local model server a first-class upstream. Reversible if it proves too strict.
+- An endpoint may not end in the path segment pisafe appends. Every
+  OpenAI-compatible service documents its base URL ending in `/v1`, and the
+  relay appends the client's own API path, so pasting the documented URL
+  produces `/v1/v1/responses` and nothing but the upstream's 404 would say so.
+  Refusing, rather than silently rewriting, teaches the shape once.
+- A login is removable whether or not it is still usable. The first cut had
+  `logout` confirm the login existed by loading the whole catalog, which made a
+  record the rules no longer accept impossible to remove through the CLI.
+  Removal now asks only whether something is stored under the name.
+- A key is read only when a request is relayed. Starting a run renders
+  models.json, which contains no upstream credential, so run creation touches no
+  secret at all.
 
 ## Documentation
 
@@ -323,8 +823,19 @@ history holds them. New entries are appended in full.
   implementation already documents more precisely. Where the two disagree, the
   design is the authority on what must hold and the progress document is the
   authority on what currently happens.
-- The design's Phase 2 sections were compressed to invariants, dropping the
-  mechanism sketched for unbuilt features (cache overlays with merge-back under
-  a lock, session-ID append semantics). That detail was written before any of
-  Phase 1 existed and would most likely be re-decided when the work starts; the
-  loss is that Phase 2 begins from constraints rather than from a plan.
+- The design's Phase 2 sections were compressed to invariants before the work
+  started, dropping the mechanism sketched for unbuilt features: cache overlays
+  with merge-back under a lock, and session-ID append semantics. Both were in
+  fact re-decided once the substrate was measured — merge-back became keyed
+  immutable snapshots, and the lock turned out to be unnecessary because Pi
+  never locks a session file — so compressing to invariants cost nothing and
+  would have cost a rewrite otherwise.
+- Phase 2 was planned in its own document under `plans/`, temporary by design:
+  it held the slice order, the substrate established against the live VM, and
+  its decisions as they were made, and it folded into these three documents and
+  was deleted when the last slice landed. A phase-shaped section inside this log
+  was not taken, because a plan is a thing being revised in place while a
+  decision log is append-mostly, and mixing them makes it unclear which entries
+  are still proposals. The cost is that the fold-back is a real piece of work
+  that has to happen while the reasoning is still fresh; the reward is that
+  nothing here describes something unbuilt.

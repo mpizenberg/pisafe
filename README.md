@@ -15,8 +15,8 @@ capability.
 The isolation model is specified in [`pisafe-design.md`](pisafe-design.md),
 with the reasoning behind individual choices in
 [`DECISIONS.md`](DECISIONS.md). Implementation status, verification, and known
-gaps are in [`IMPLEMENTATION_PROGRESS.md`](IMPLEMENTATION_PROGRESS.md). Phase 1
-is in progress: every command below exists and works.
+gaps are in [`IMPLEMENTATION_PROGRESS.md`](IMPLEMENTATION_PROGRESS.md). Every
+command below exists and works.
 
 ## Requirements
 
@@ -84,6 +84,24 @@ inside the run; if the run's commits change lines the carried-in work changed,
 nothing is imported, the run is left exactly as it was, and you can keep the
 baseline instead or resolve it in the run and apply again. `--keep-baseline` and
 `--drop-baseline` answer in advance.
+
+```sh
+pisafe extension install PACKAGE[@VERSION]   # into the profile every run mounts
+pisafe extension update [PACKAGE...]         # offered, applied only when named
+pisafe extension remove PACKAGE
+pisafe extension list
+pisafe tool install PACKAGE[@VERSION]        # a command on every run's PATH
+pisafe tool remove PACKAGE
+pisafe tool list
+```
+
+Runs cannot install anything globally: the profile they mount is read-only, and
+only these commands write it. Each pins an exact version and refuses bytes that
+do not hash to the integrity npm reported for it, so a release republished under
+the same version fails rather than installs. Inside a run, `pi -e PACKAGE` still
+tries an extension for that run alone. Nothing updates itself: when a run stops,
+pisafe checks at most once a day what the registry now resolves the installed
+names to and tells you, and a pin moves only when you name the package.
 
 ```sh
 pisafe project list                       # what pisafe holds, per checkout
