@@ -332,11 +332,26 @@ func TestAMistypedScopeCommandNeverReachesTheVM(t *testing.T) {
 		{[]string{"profile"}, "usage: pisafe profile reset"},
 		{[]string{"profile", "reset"}, "usage: pisafe profile reset"},
 		{[]string{"profile", "clear", "--confirm"}, "usage: pisafe profile reset"},
+		{[]string{"backup"}, "usage: pisafe backup"},
+		{[]string{"backup", "one", "two"}, "usage: pisafe backup"},
+		{[]string{"restore"}, "usage: pisafe restore"},
+		{[]string{"restore", "one", "two"}, "usage: pisafe restore"},
 	} {
 		err := Run(context.Background(), test.args, nil, &output)
 		if err == nil || !strings.Contains(err.Error(), test.want) {
 			t.Fatalf("Run(%v) error = %v", test.args, err)
 		}
+	}
+}
+
+// TestARestoreReadsTheBackupBeforeItStartsAnything keeps a mistyped path from
+// costing a VM boot and a run image: what a restore is pointed at is a
+// directory on the Mac, and a directory that is not a backup says so.
+func TestARestoreReadsTheBackupBeforeItStartsAnything(t *testing.T) {
+	var output bytes.Buffer
+	err := Run(context.Background(), []string{"restore", t.TempDir()}, nil, &output)
+	if err == nil || !strings.Contains(err.Error(), "holds no pisafe backup") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

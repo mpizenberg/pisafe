@@ -1,9 +1,11 @@
-// Package runcopy moves one file or directory out of an isolated run.
+// Package runcopy moves files across the boundary as an archive: out of an
+// isolated run or a project store, and back in again.
 //
-// The run produces the archive, so nothing it says is trusted: the Mac
-// re-validates every entry and writes only through a directory handle it
-// opened itself, which is why a destination cannot be swapped for a symlink
-// while the copy is in flight.
+// The far side produces the archive coming out, so nothing it says is trusted:
+// the Mac re-validates every entry and writes only through a directory handle
+// it opened itself, which is why a destination cannot be swapped for a symlink
+// while the copy is in flight. An archive going the other way is held to the
+// same limits, so what leaves the Mac is what the Mac would have accepted.
 package runcopy
 
 import (
@@ -239,13 +241,21 @@ func CopyTo(reader io.Reader, base, destination string, replace bool) ([]Entry, 
 // ExtractInto unpacks an archive under an already-opened directory root. Every
 // write goes through that root, so no entry can escape it however the archive
 // is shaped, and nothing but regular files and directories is written at all.
+// It consumes the whole archive: the sender is a process writing into a stream,
+// and one left blocked on a stream nobody drains never finishes.
 func ExtractInto(reader io.Reader, root *os.Root, base string) ([]Entry, error) {
-	archive := tar.NewReader(io.LimitReader(reader, MaxTotalBytes+headerAllowance))
+	bounded := io.LimitReader(reader, MaxTotalBytes+headerAllowance)
+	archive := tar.NewReader(bounded)
 	entries := []Entry{}
 	total := int64(0)
 	for {
 		header, err := archive.Next()
 		if errors.Is(err, io.EOF) {
+			// A tar writer rounds its output up to its own block size, which the
+			// archive reader stops short of at the end-of-archive marker.
+			if _, err := io.Copy(io.Discard, bounded); err != nil {
+				return nil, fmt.Errorf("read copied archive: %w", err)
+			}
 			return entries, nil
 		}
 		if err != nil {

@@ -2,12 +2,14 @@ package lima_test
 
 import (
 	"context"
+	"io"
 	"os"
 	"path"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/mpizenberg/pisafe/internal/backup"
 	"github.com/mpizenberg/pisafe/internal/lima"
 	"github.com/mpizenberg/pisafe/internal/runcontainer"
 )
@@ -585,5 +587,96 @@ func TestLiveARebindCarriesTheHistoryAndNotTheCaches(t *testing.T) {
 	// then its history is still reachable under the old key.
 	if listed := liveStoreListing(t, ctx, from); listed != "1_aaaa.jsonl 2_bbbb.jsonl notes.txt" {
 		t.Errorf("the source store was changed by being read: %q", listed)
+	}
+}
+
+// TestLiveABackupCarriesTheTranscriptsOutAndBackIn is what a recreated VM gets
+// back. Both halves of a backup meet the same store: what leaves is only the
+// session store, never a cache, and what returns is added rather than written
+// over — a name the store already holds is a transcript rewritten since, and
+// the store's own copy stays. The restored transcripts have to belong to the
+// run user, or Pi could not read the history it was given back.
+func TestLiveABackupCarriesTheTranscriptsOutAndBackIn(t *testing.T) {
+	if os.Getenv("PISAFE_LIVE_LIMA") != "1" {
+		t.Skip("set PISAFE_LIVE_LIMA=1 to test the dedicated VM")
+	}
+	ensureLiveVM(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	transport := lima.NewTransport()
+	fromKey := liveProject(t, transport, "livebackupfrom")
+	toKey := liveProject(t, transport, "livebackupto")
+	from := runcontainer.ProjectSessionsPath(fromKey)
+	to := runcontainer.ProjectSessionsPath(toKey)
+
+	// A run can write whatever it likes into its own session directory and
+	// promotion carries it, so the store holds a file that is not a transcript.
+	runLive(t, ctx, "podman", "unshare", "sh", "-ec",
+		"printf superseded > "+from+"/1_aaaa.jsonl"+
+			" && printf carried > "+from+"/2_bbbb.jsonl"+
+			" && printf ignored > "+from+"/notes.txt"+
+			" && printf kept > "+to+"/1_aaaa.jsonl"+
+			" && chown 1000:1000 "+from+"/* "+to+"/*")
+	seedSnapshot(t, ctx, path.Dir(from)+"/cache/npm", liveNewerKey, "cached", "2026-01-01")
+
+	directory := t.TempDir()
+	reader, writer := io.Pipe()
+	archived := make(chan error, 1)
+	go func() {
+		err := transport.ArchiveSessions(ctx, fromKey, writer)
+		writer.CloseWithError(err)
+		archived <- err
+	}()
+	added, refused, err := backup.AddSessions(reader, directory, fromKey)
+	reader.CloseWithError(err)
+	if streamErr := <-archived; streamErr != nil {
+		t.Fatal(streamErr)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if added != 2 || refused != 1 {
+		t.Fatalf("added = %d, refused = %d", added, refused)
+	}
+
+	reader, writer = io.Pipe()
+	sent := make(chan error, 1)
+	go func() {
+		err := backup.ArchiveSessions(directory, fromKey, writer)
+		writer.CloseWithError(err)
+		sent <- err
+	}()
+	restoreErr := transport.RestoreSessions(ctx, toKey, reader)
+	reader.CloseWithError(restoreErr)
+	if err := <-sent; err != nil {
+		t.Fatal(err)
+	}
+	if restoreErr != nil {
+		t.Fatal(restoreErr)
+	}
+
+	// The listing shows dot entries, so the staging the archive landed in would
+	// show up here had the restore left it behind.
+	if listed := liveStoreListing(t, ctx, to); listed != "1_aaaa.jsonl 2_bbbb.jsonl" {
+		t.Fatalf("the restored store holds %q", listed)
+	}
+	for name, want := range map[string]string{"1_aaaa.jsonl": "kept", "2_bbbb.jsonl": "carried"} {
+		if got := runLive(t, ctx, "podman", "unshare", "cat", to+"/"+name); got != want {
+			t.Errorf("%s = %q, want %q", name, got, want)
+		}
+	}
+	if owner := runLive(
+		t, ctx, "podman", "unshare", "stat", "-c", "%u:%g:%a", to+"/2_bbbb.jsonl",
+	); owner != "1000:1000:600" {
+		t.Errorf("a restored transcript is %s, which is not the run user's", owner)
+	}
+	if listed := liveStoreListing(t, ctx, path.Dir(to)+"/cache"); listed != "" {
+		t.Errorf("a cache travelled through the backup: %q", listed)
+	}
+	// Reading a store leaves it as it was, so a backup can be taken of a project
+	// that is still being worked in.
+	if listed := liveStoreListing(t, ctx, from); listed != "1_aaaa.jsonl 2_bbbb.jsonl notes.txt" {
+		t.Errorf("the backed-up store was changed by being read: %q", listed)
 	}
 }

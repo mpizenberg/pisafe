@@ -94,16 +94,8 @@ func installTool(
 	if err != nil {
 		return err
 	}
-	if err := transport.InstallTool(ctx, imageID, pin); err != nil {
-		return err
-	}
-	tool, err := claimedTool(ctx, transport, installed, pin)
+	tool, err := claimTool(ctx, transport, imageID, installed, pin)
 	if err != nil {
-		// The tree is inert until a link points at it, so a package that turns
-		// out not to be a tool leaves the profile as it was.
-		if removeErr := transport.RemoveTool(ctx, pin); removeErr != nil {
-			return errors.Join(err, removeErr)
-		}
 		return err
 	}
 	updated := installed.With(tool)
@@ -127,6 +119,30 @@ func installTool(
 			"until you install it again.",
 	)
 	return nil
+}
+
+// claimTool installs one pinned package and reports the commands it turns out
+// to claim, leaving the profile as it was when it claims none or claims one
+// another tool already holds. The tree is inert until a link points at it,
+// which is what makes taking it back out enough.
+func claimTool(
+	ctx context.Context,
+	transport lima.Transport,
+	imageID string,
+	installed profile.Tools,
+	pin profile.Pin,
+) (profile.Tool, error) {
+	if err := transport.InstallTool(ctx, imageID, pin); err != nil {
+		return profile.Tool{}, err
+	}
+	tool, err := claimedTool(ctx, transport, installed, pin)
+	if err != nil {
+		if removeErr := transport.RemoveTool(ctx, pin); removeErr != nil {
+			return profile.Tool{}, errors.Join(err, removeErr)
+		}
+		return profile.Tool{}, err
+	}
+	return tool, nil
 }
 
 // claimedTool reads back what the installed tree claims and refuses a package

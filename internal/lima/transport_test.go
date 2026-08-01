@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -484,6 +485,26 @@ func TestAdoptSessionsRefusesWhatItCannotAddress(t *testing.T) {
 			context.Background(), arguments[0], arguments[1],
 		); err == nil {
 			t.Errorf("%s was accepted", name)
+		}
+	}
+}
+
+// TestSessionArchivesRefuseAKeyTheyCannotAddress is the same guard on the two
+// halves of a backup. The key names a store other projects' runs have mounted,
+// so one that could climb would read another project's transcripts into a
+// backup, or write a backup's transcripts into another project's store.
+func TestSessionArchivesRefuseAKeyTheyCannotAddress(t *testing.T) {
+	transport := Transport{instance: InstanceName, runner: &fakeRunner{}}
+	for _, projectKey := range []string{"../../projects/other", "", "project/../other", "."} {
+		if err := transport.ArchiveSessions(
+			context.Background(), projectKey, io.Discard,
+		); err == nil {
+			t.Errorf("archiving %q was accepted", projectKey)
+		}
+		if err := transport.RestoreSessions(
+			context.Background(), projectKey, strings.NewReader(""),
+		); err == nil {
+			t.Errorf("restoring %q was accepted", projectKey)
 		}
 	}
 }

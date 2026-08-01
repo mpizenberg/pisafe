@@ -100,6 +100,21 @@ reproduces. A project is keyed by the path of its checkout, so moving or
 renaming a repository leaves its history behind — `project rebind` run from the
 new location claims it, naming the old path.
 
+```sh
+pisafe backup DIRECTORY    # copy out what nothing can refetch
+pisafe restore DIRECTORY   # put it back into a VM
+```
+
+A backup holds every project's session transcripts and the pins naming what the
+profile has installed. Dependency caches are left out because nothing needs one
+to be correct, and no provider credential is written at all — those stay in the
+macOS Keychain, which is the boundary the broker exists to hold. A restore puts
+the stores back and reinstalls each package from the pin the backup recorded, so
+what arrives is checked against the hash that was installed rather than against
+whatever npm resolves the name to now. Neither direction ever overwrites:
+backing up again into the same directory adds to it, restoring twice is
+harmless, and a package already installed is left at whatever it is pinned to.
+
 `discard` reclaims a run at any time; `gc` reclaims imported runs seven days
 after they were applied and prunes superseded run images. Both delete the run's
 record along with what it owned — the `pisafe/RUN` branch is what keeps the

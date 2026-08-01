@@ -422,12 +422,19 @@ thing that mounts anything.
       transcripts arrive under the key another checkout path hashes to, a name
       the destination already holds is left as it is rather than replaced, the
       caches are not carried, and reading the source leaves it unchanged.
-- [ ] **11b. Backup and recovery.** Export what nothing can refetch — a
-      project's transcripts, and the pins naming what the profile holds — to a
-      directory on the Mac, and restore it into a VM that has just been
-      recreated. Caches are excluded by design and credentials deliberately: a
-      key copied out of the Keychain into a directory would be the boundary
-      regression the broker exists to prevent.
+- [x] **11b. Backup and recovery.** `pisafe backup DIRECTORY` and `pisafe
+      restore DIRECTORY`. Exported: every project's session transcripts and the
+      pins naming what the profile holds. Excluded by design: caches, because
+      losing one costs time only; and credentials deliberately, because a key
+      copied out of the Keychain into a directory would be the boundary
+      regression the broker exists to prevent. Live test:
+      `TestLiveABackupCarriesTheTranscriptsOutAndBackIn` — a store's transcripts
+      reach a directory on the Mac and go back into a different store, a name
+      the destination already holds is left as it is, the restored transcripts
+      belong to the run user, no cache travels, no staging survives, and reading
+      a store leaves it unchanged. Verified end to end besides: a real run's
+      transcript survived dropping its store and resetting the profile, and the
+      restored extension loaded and the restored tool ran inside a later run.
 
 ## Decisions
 
@@ -1030,6 +1037,47 @@ this document is the current truth, not an audit trail. These fold into
   transport's argument test and by a manual exercise against a seeded tree. The
   thing that would close this is a second profile name, which the layout already
   allows and nothing yet reads.
+- **A backup is a directory, not an archive.** One tar file was not taken: a
+  directory lets a transcript be read out with the tools already on the Mac, and
+  it is what makes repeating a backup into the same place additive rather than a
+  rewrite. The cost is that a backup is not one thing to copy around.
+- **A backup only ever adds, in both directions.** Mirroring the VM's current
+  state — the rsync semantic — was not taken: it would mean that dropping a
+  project and then backing up destroys the last copy of its transcripts, which
+  is precisely the disaster a backup exists to prevent. So a name either side
+  already holds is left as it is, which is the rule promotion already follows,
+  and makes a second backup and a second restore both harmless.
+- **A restore installs from the backed-up pin rather than resolving the name
+  again.** Resolving `name@version` and comparing the integrity to the backup's
+  was the sketched design and was dropped as redundant: the install script
+  already checks the fetched tarball against the integrity it is handed, so
+  installing from the pin makes the *bytes* the thing verified rather than
+  npm's metadata. A release republished under the same version fails the
+  install.
+- **A backup records only projects that contributed a transcript.** Recording
+  every registered project was not taken: what a restore would put back for an
+  empty store is the record and the filesystem, and a run of that checkout
+  creates both anyway. So an empty store is genuinely nothing to restore.
+- **A restore skips a package already installed rather than replacing it.** The
+  profile being restored into may have moved on, and putting the backup's older
+  pin over it would be a silent downgrade. A restore puts back what was lost; it
+  does not make a profile identical to a backup.
+- **Transcripts fail a restore, packages do not.** A transcript has no second
+  source to come from, so a failure there is the VM's storage and the projects
+  after it would fail the same way — it stops. A package failing is npm being a
+  third party, so the rest are still installed and every failure is reported at
+  the end.
+- **A transcript name a run chose is refused rather than fatal.** A run can
+  write any `*.jsonl` name into its own session directory and promotion carries
+  it, so a name the Mac will not write costs that file and is counted in the
+  output, rather than blocking the backup of everything else. Names are held to
+  the same shape a binary name is.
+- **Fixed while here: `runcopy.ExtractInto` now consumes the whole archive.**
+  It stopped at the end-of-archive marker, which was invisible while every
+  sender was Go's `archive/tar` — it writes exactly two zero blocks — and hung
+  the first sender that was system `tar`, which rounds up to its block size. The
+  fix is in the extractor's contract rather than a flag on the script, so the
+  next sender cannot reintroduce it.
 
 ## Open questions
 

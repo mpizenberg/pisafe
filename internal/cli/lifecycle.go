@@ -190,15 +190,7 @@ func prepareLifecycle(ctx context.Context) (runctl.Controller, error) {
 	if err != nil {
 		return runctl.Controller{}, err
 	}
-	prefixes, err := hostnet.OnLinkIPv4(ctx)
-	if err != nil {
-		return runctl.Controller{}, fmt.Errorf("discover host networks: %w", err)
-	}
-	prefixStrings := make([]string, 0, len(prefixes))
-	for _, prefix := range prefixes {
-		prefixStrings = append(prefixStrings, prefix.String())
-	}
-	if err := lima.NewManager().Start(ctx, prefixStrings); err != nil {
+	if err := startBoundary(ctx); err != nil {
 		return runctl.Controller{}, err
 	}
 	root, err := runstate.DefaultRoot()
@@ -211,4 +203,19 @@ func prepareLifecycle(ctx context.Context) (runctl.Controller, error) {
 		runssh.NewStore(filepath.Join(root, "ssh")),
 		inferenceConfig(catalog),
 	), nil
+}
+
+// startBoundary brings the VM up for a command that needs to reach it. The
+// networks the firewall is built around are discovered every time, because the
+// Mac may have joined a different one since the VM was last started.
+func startBoundary(ctx context.Context) error {
+	prefixes, err := hostnet.OnLinkIPv4(ctx)
+	if err != nil {
+		return fmt.Errorf("discover host networks: %w", err)
+	}
+	prefixStrings := make([]string, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		prefixStrings = append(prefixStrings, prefix.String())
+	}
+	return lima.NewManager().Start(ctx, prefixStrings)
 }

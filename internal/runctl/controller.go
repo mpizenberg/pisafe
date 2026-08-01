@@ -40,6 +40,7 @@ type Backend interface {
 	ResetProjectCache(context.Context, string) error
 	PromoteSessions(context.Context, string, string) error
 	AdoptSessions(context.Context, string, string) error
+	RestoreSessions(context.Context, string, io.Reader) error
 	ImportStage(context.Context, string) error
 	Execute(context.Context, io.Reader, ...string) ([]byte, error)
 	StreamExecute(context.Context, io.Writer, ...string) error

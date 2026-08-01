@@ -216,6 +216,25 @@ func (backend *fakeBackend) PromoteSessions(
 	return nil
 }
 
+func (backend *fakeBackend) RestoreSessions(
+	_ context.Context,
+	projectKey string,
+	archive io.Reader,
+) error {
+	carried, err := io.ReadAll(archive)
+	if err != nil {
+		return err
+	}
+	backend.calls = append(backend.calls, backendCall{
+		kind: "restore-sessions",
+		args: []string{projectKey, string(carried)},
+	})
+	if backend.failAt == "restore-sessions" {
+		return errors.New("restore sessions failed")
+	}
+	return nil
+}
+
 func (backend *fakeBackend) AdoptSessions(
 	_ context.Context,
 	projectKey string,

@@ -14,7 +14,7 @@ import (
 
 var errUsage = errors.New(
 	"usage: pisafe <run|connect|stop|resume|diff|cp|apply|discard|project|profile" +
-		"|extension|tool|gc|list|zed|login|logout|broker|doctor|help>",
+		"|extension|tool|backup|restore|gc|list|zed|login|logout|broker|doctor|help>",
 )
 
 func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
@@ -88,6 +88,10 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 		return runProject(ctx, args[1:], out)
 	case "profile":
 		return runProfile(ctx, args[1:], out)
+	case "backup":
+		return runBackup(ctx, args[1:], out)
+	case "restore":
+		return runRestore(ctx, args[1:], out)
 	case "extension":
 		return runExtension(ctx, args[1:], out)
 	case "tool":
@@ -154,6 +158,19 @@ Usage:
                    Take every extension and tool back out of the profile.
                    Each is refetchable from npm, but the record of what was
                    installed is not.
+  pisafe backup DIRECTORY
+                   Copy out what nothing can refetch: every project's session
+                   transcripts, and the pins naming what the profile holds.
+                   Dependency caches are left out because nothing needs one to
+                   be correct, and no provider credential is written at all —
+                   those stay in the macOS Keychain. Backing up again into the
+                   same directory adds to it and removes nothing.
+  pisafe restore DIRECTORY
+                   Put a backup back into a VM, which is what a recreated one
+                   needs. Every extension and tool is reinstalled from the pin
+                   the backup recorded rather than from what npm resolves the
+                   name to now. Nothing already installed is replaced and no
+                   transcript is overwritten, so restoring twice is harmless.
   pisafe extension install PACKAGE[@VERSION]
                    Install a Pi extension into the profile every run mounts
                    read-only, pinned to an exact version and integrity hash.

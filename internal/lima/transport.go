@@ -355,6 +355,48 @@ done
 ' pisafe-promote "$@"
 `
 
+	// archiveSessionsScript streams one project's whole session store out of the
+	// VM. It only reads, so a project whose runs are live is not disturbed, and
+	// a project with no store yet sends nothing rather than failing: what such a
+	// project has to hand back is nothing.
+	archiveSessionsScript = `set -eu
+exec podman unshare sh -ceu '
+set -eu
+project=/var/lib/pisafe/projects/$1
+test -d "$project/sessions" || exit 0
+exec tar --numeric-owner --owner=0 --group=0 -C "$project" -cf - sessions
+' pisafe-archive "$@"
+`
+
+	// restoreSessionsScript puts transcripts a backup carried back into a
+	// project's session store. It is promotion's rule applied to an archive the
+	// Mac built rather than to a finished run's own directory: only ever adding,
+	// because the store is a lower other runs mount, and leaving a name the
+	// store already holds as it is. The archive lands on the store's own
+	// filesystem first so that each transcript arrives by rename.
+	restoreSessionsScript = `set -eu
+exec podman unshare sh -ceu '
+set -eu
+store=/var/lib/pisafe/projects/$1/sessions
+test -d "$store"
+staging=$store/.restore-$$
+rm -rf -- "$staging"
+install -d -m 0700 -o 1000 -g 1000 "$staging"
+trap "rm -rf -- \"$staging\"" EXIT
+tar --numeric-owner -C "$staging" -xf -
+for path in "$staging"/sessions/*.jsonl; do
+	test -f "$path" || continue
+	name=${path##*/}
+	if [ -e "$store/$name" ]; then
+		continue
+	fi
+	chown 1000:1000 "$path"
+	chmod 0600 "$path"
+	mv -T "$path" "$store/$name"
+done
+' pisafe-restore "$@"
+`
+
 	// resetProfileScript empties what the profile holds without touching the
 	// namespace roots the privileged helper owns. It removes every entry rather
 	// than the ones a record names, so a tree left behind by an install that
@@ -819,6 +861,41 @@ func (transport Transport) promoteSessions(
 	}
 	_, err := transport.shellScript(ctx, nil, promoteSessionsScript, projectKey, source, tag)
 	return err
+}
+
+// ArchiveSessions streams one project's transcripts out of the VM as a tar,
+// which is the half of a project store nothing can refetch.
+func (transport Transport) ArchiveSessions(
+	ctx context.Context,
+	projectKey string,
+	out io.Writer,
+) error {
+	if err := runid.Validate(projectKey); err != nil {
+		return err
+	}
+	if err := transport.streamScript(ctx, out, archiveSessionsScript, projectKey); err != nil {
+		return fmt.Errorf("archive sessions of project %q: %w", projectKey, err)
+	}
+	return nil
+}
+
+// RestoreSessions puts a backup's transcripts back into a project's session
+// store. Like promotion it only adds, so restoring twice, or into a store that
+// has been used since, costs nothing and overwrites nothing.
+func (transport Transport) RestoreSessions(
+	ctx context.Context,
+	projectKey string,
+	archive io.Reader,
+) error {
+	if err := runid.Validate(projectKey); err != nil {
+		return err
+	}
+	if _, err := transport.shellScript(
+		ctx, archive, restoreSessionsScript, projectKey,
+	); err != nil {
+		return fmt.Errorf("restore sessions of project %q: %w", projectKey, err)
+	}
+	return nil
 }
 
 // ResetProfile takes everything back out of the profile. What it removes is

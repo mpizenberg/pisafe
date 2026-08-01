@@ -394,6 +394,13 @@ creating → active → stopped → imported → reclaimed
   can be emptied of its caches or dropped whole, and the profile emptied of
   everything installed in it. A project is keyed by its checkout path, so a
   moved repository claims its own history back rather than starting over.
+- What no scope can refetch — every project's session transcripts, and the pins
+  naming what the profile holds — exports to a directory on the Mac and restores
+  into a VM that has just been recreated. Caches are excluded because losing one
+  costs time only; credentials are excluded because a key copied out of the
+  Keychain into a directory is the boundary the broker exists to prevent. Both
+  directions only ever add, so a backup taken twice loses nothing and a restore
+  run twice changes nothing.
 - Never reclaim a run with unimported commits merely because it is old. Warn and
   require explicit discard.
 
