@@ -76,7 +76,13 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
 
 ### Commands over the boundary
 
-- `pisafe apply RUN [--keep-baseline|--drop-baseline]` stops an active run,
+- Every command that takes a run accepts none, and then resolves to the one run
+  of the current checkout that is not `imported`, matched on the project key the
+  record already carries. No live run says so and points at `pisafe run`; more
+  than one lists them with their states and stops. `discard` is deliberately
+  outside this: its confirmation argument is the command. Nothing inside a run
+  takes part in the choice.
+- `pisafe apply [RUN] [--keep-baseline|--drop-baseline]` stops an active run,
   captures it with `pisafe-guest prepare-apply` in a throwaway `--network=none`
   container mounted only on the workspace, streams each bundle back bounded and
   SHA-256 verified,
@@ -98,7 +104,7 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   arrived rather than trusting the run. The drop is refused when a submodule
   carried uncommitted work of its own, because every superproject commit records
   where its submodules stood.
-- `pisafe diff RUN` reports commits, per-path line counts, and untracked
+- `pisafe diff [RUN]` reports commits, per-path line counts, and untracked
   leftovers for the superproject and each submodule, measured from the baseline
   commit so carried-in dirty state is not attributed to the agent. Every list is
   capped and paired with its exact total. It runs in a throwaway
@@ -106,15 +112,16 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   optional index locks disabled, so it works on an active, stopped, or imported
   run without disturbing it, and it reports names and counts, never content —
   the controller quotes every run-authored name and subject.
-- `pisafe cp RUN:PATH [DEST] [--force]` streams a tar from the same read-only
+- `pisafe cp [RUN:]PATH [DEST] [--force]` streams a tar from the same read-only
   container. The run refuses absolute, climbing, or whole-workspace requests and
   archives only regular files and directories, naming any symlink or special
   file that stops the copy. The Mac re-validates every entry, refuses anything
   outside the requested path, and writes through an `os.Root` handle, bounded at
   4096 entries, 1 GiB total, 256 MiB per file. Everything lands in a staging
-  directory beside the destination and moves into place only once complete; an
-  existing destination is refused before the run is asked for anything, and
-  `--force` removes it rather than writing through it.
+  directory beside the destination and moves into place only once complete. A
+  DEST that is already a directory receives the copy under the copied path's own
+  name; any other existing destination is refused before the run is asked for
+  anything, and `--force` removes it rather than writing through it.
 - `pisafe gc [--dry-run]` applies the seven-day window, measured from
   `imported_at`. An imported run past it is reclaimed — container, storage, VM
   stage, Mac-side SSH key, and record — through the same idempotent path discard

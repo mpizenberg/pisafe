@@ -18,7 +18,7 @@ type applyRequest struct {
 	baseline gitstage.BaselineChoice
 }
 
-var errApplyUsage = fmt.Errorf("usage: pisafe apply RUN [--keep-baseline|--drop-baseline]")
+var errApplyUsage = fmt.Errorf("usage: pisafe apply [RUN] [--keep-baseline|--drop-baseline]")
 
 func parseApplyRequest(args []string) (applyRequest, error) {
 	request := applyRequest{}
@@ -40,10 +40,12 @@ func parseApplyRequest(args []string) (applyRequest, error) {
 			positional = append(positional, argument)
 		}
 	}
-	if len(positional) != 1 {
+	if len(positional) > 1 {
 		return applyRequest{}, errApplyUsage
 	}
-	request.runID = positional[0]
+	if len(positional) == 1 {
+		request.runID = positional[0]
+	}
 	return request, nil
 }
 
@@ -137,7 +139,11 @@ func runApply(ctx context.Context, args []string, in io.Reader, out io.Writer) e
 	if err != nil {
 		return err
 	}
-	record, err := runRecord(request.runID)
+	runID, err := resolveRunID(ctx, request.runID)
+	if err != nil {
+		return err
+	}
+	record, err := runRecord(runID)
 	if err != nil {
 		return err
 	}
@@ -149,18 +155,18 @@ func runApply(ctx context.Context, args []string, in io.Reader, out io.Writer) e
 	if err != nil {
 		return err
 	}
-	manifest, result, err := controller.Apply(ctx, request.runID, imageID, baseline)
+	manifest, result, err := controller.Apply(ctx, runID, imageID, baseline)
 	if err != nil {
 		conflict := &gitstage.BaselineReplayConflict{}
 		if errors.As(err, &conflict) {
-			printReplayConflict(out, request.runID, conflict)
+			printReplayConflict(out, runID, conflict)
 			return errors.New("the baseline commit cannot be left out of this run's history")
 		}
 		if errors.Is(err, gitstage.ErrApplyNeedsReconciliation) {
 			return fmt.Errorf(
 				"%w\nThe recorded plan is kept: rerun pisafe apply %s once the ref is resolved",
 				err,
-				request.runID,
+				runID,
 			)
 		}
 		return err

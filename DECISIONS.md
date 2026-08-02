@@ -707,6 +707,22 @@ history holds them. New entries are appended in full.
   copy out is a leaf operation with no later step that would catch a wrong
   target. This is stricter than it needs to be, so naming a narrower path is
   the way around it.
+- A `cp` destination that is already a directory takes the copy inside it,
+  under the copied path's own name. Refusing it as an existing destination was
+  what the code did, and it made the common case — naming a directory to copy
+  into — look like a request to replace that directory, answerable only with
+  `--force`, which would have deleted it. The rule now matches `cp`, and
+  `--force` again means only what it says.
+- A run's name may be left out, and is then the one run of the current checkout
+  that has not been imported yet. Runs are matched by the project key their
+  record already carries, so nothing new is stored and nothing inside a run
+  influences which run a command reaches. Imported runs are excluded because
+  they accumulate for a week under `gc`, and counting them would have made the
+  shorthand stop working exactly for the people using it most. Two live runs
+  are reported with their states rather than resolved by recency: recency would
+  be right most of the time, which is the wrong property for `stop` and
+  `apply`. `discard` keeps requiring the name twice — its confirmation is the
+  point of the command.
 
 ## Inference broker
 

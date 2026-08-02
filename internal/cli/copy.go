@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -20,11 +21,12 @@ type copyRequest struct {
 	force       bool
 }
 
-var errCopyUsage = fmt.Errorf("usage: pisafe cp RUN:PATH [DEST] [--force]")
+var errCopyUsage = fmt.Errorf("usage: pisafe cp [RUN:]PATH [DEST] [--force]")
 
 // parseCopyRequest reads the copy arguments. The destination defaults to the
-// copied path's own name in the current directory, which is where a copy is
-// least surprising.
+// copied path's own name in the current directory, and an existing directory
+// means inside it, both of which is what cp does. A source naming no run comes
+// from the checkout's own run; a path that carries a colon has to name one.
 func parseCopyRequest(args []string) (copyRequest, error) {
 	request := copyRequest{}
 	positional := []string{}
@@ -41,29 +43,45 @@ func parseCopyRequest(args []string) (copyRequest, error) {
 	if len(positional) == 0 || len(positional) > 2 {
 		return copyRequest{}, errCopyUsage
 	}
-	runID, sourcePath, found := strings.Cut(positional[0], ":")
-	if !found || runID == "" {
-		return copyRequest{}, fmt.Errorf(
-			"%q does not name a run and a path\n%w",
-			positional[0],
-			errCopyUsage,
-		)
+	sourcePath := positional[0]
+	if runID, rest, found := strings.Cut(sourcePath, ":"); found {
+		if runID == "" {
+			return copyRequest{}, fmt.Errorf(
+				"%q does not name a run and a path\n%w",
+				positional[0],
+				errCopyUsage,
+			)
+		}
+		request.runID, sourcePath = runID, rest
 	}
 	cleaned, err := runcopy.SafePath(sourcePath)
 	if err != nil {
 		return copyRequest{}, err
 	}
-	request.runID = runID
 	request.path = cleaned
 	request.destination = path.Base(cleaned)
 	if len(positional) == 2 {
-		request.destination = positional[1]
+		request.destination = destinationFor(positional[1], cleaned)
 	}
 	return request, nil
 }
 
+// destinationFor resolves where a copy lands. A destination that is already a
+// directory takes the copied path inside it under its own name, so replacing
+// the directory is something only an explicit name asks for.
+func destinationFor(destination, sourcePath string) string {
+	if info, err := os.Stat(destination); err == nil && info.IsDir() {
+		return filepath.Join(destination, path.Base(sourcePath))
+	}
+	return destination
+}
+
 func runCopy(ctx context.Context, args []string, out io.Writer) error {
 	request, err := parseCopyRequest(args)
+	if err != nil {
+		return err
+	}
+	request.runID, err = resolveRunID(ctx, request.runID)
 	if err != nil {
 		return err
 	}

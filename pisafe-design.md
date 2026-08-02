@@ -121,11 +121,11 @@ files, tools, dependency cache, Git commits, and network policy.
 
 ```text
 pisafe list
-pisafe connect <run>
-pisafe zed <run>
-pisafe diff <run>
-pisafe cp <run>:<path> [dest]
-pisafe apply <run>
+pisafe connect [run]
+pisafe zed [run]
+pisafe diff [run]
+pisafe cp [<run>:]<path> [dest]
+pisafe apply [run]
 pisafe discard <run> --confirm <run>
 pisafe gc [--dry-run]
 pisafe doctor
@@ -157,6 +157,12 @@ build artifacts, logs, or screenshots out of a run; because it writes to the
 Mac from untrusted content, it must treat every archive entry as hostile —
 acceptance test 14 states the requirement. `discard` is destructive, so its
 confirmation argument must repeat the exact run ID before anything is deleted.
+
+A run may be named or left out. Left out, it is the one run of the checkout the
+user is standing in that has not been imported yet; several are a question
+pisafe asks rather than answers, and `discard` names its run twice however few
+there are. Nothing about which run a command reaches may depend on anything
+inside a run.
 
 The second group manages what outlives a run. `extension` and `tool` are the
 only way anything reaches the profile runs mount, `project` and `profile` name

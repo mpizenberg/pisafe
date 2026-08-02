@@ -141,13 +141,62 @@ func TestPrintApplyResultShowsTheImportedBranchAndWhatStayedBehind(t *testing.T)
 	}
 }
 
-func TestApplyRequiresExactlyOneRun(t *testing.T) {
+func TestApplyRefusesTwoRuns(t *testing.T) {
 	var output bytes.Buffer
-	for _, args := range [][]string{{"apply"}, {"apply", "run-123", "run-124"}} {
-		if err := Run(context.Background(), args, nil, &output); err == nil ||
-			!strings.Contains(err.Error(), "usage") {
-			t.Fatalf("Run(%v) error = %v", args, err)
+	args := []string{"apply", "run-123", "run-124"}
+	if err := Run(context.Background(), args, nil, &output); err == nil ||
+		!strings.Contains(err.Error(), "usage") {
+		t.Fatalf("Run(%v) error = %v", args, err)
+	}
+}
+
+// A command that takes a run is usually about the checkout the user is standing
+// in, and that checkout usually has one run. Guessing is only ever safe while it
+// stays unambiguous: an imported run is finished with, so it is not a candidate,
+// and two live ones are a question rather than a default.
+func TestChooseProjectRunPicksTheCheckoutsOnlyLiveRun(t *testing.T) {
+	project := runid.Project{Directory: "tessera", Key: "tessera-aabbccdd"}
+	run := func(runID, key string, state runstate.State) runstate.Manifest {
+		return runstate.Manifest{RunID: runID, ProjectKey: key, State: state}
+	}
+	elsewhere := run("elsewhere-run", "elsewhere-11223344", runstate.StateActive)
+	imported := run("imported-run", project.Key, runstate.StateImported)
+	stopped := run("stopped-run", project.Key, runstate.StateStopped)
+	active := run("active-run", project.Key, runstate.StateActive)
+
+	for name, runs := range map[string][]runstate.Manifest{
+		"nothing at all":        {},
+		"another project's run": {elsewhere},
+		"only an imported run":  {elsewhere, imported},
+	} {
+		if _, err := chooseProjectRun(runs, project); err == nil ||
+			!strings.Contains(err.Error(), "tessera has no live run") {
+			t.Errorf("%s error = %v", name, err)
 		}
+	}
+
+	runID, err := chooseProjectRun([]runstate.Manifest{elsewhere, imported, stopped}, project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runID != "stopped-run" {
+		t.Fatalf("runID = %q", runID)
+	}
+
+	_, err = chooseProjectRun([]runstate.Manifest{imported, stopped, active}, project)
+	if err == nil || !strings.Contains(err.Error(), "tessera has 2 live runs") ||
+		!strings.Contains(err.Error(), "active-run") ||
+		!strings.Contains(err.Error(), "stopped-run") {
+		t.Fatalf("two live runs error = %v", err)
+	}
+}
+
+// A named run is never second-guessed: whatever the checkout holds, and whether
+// or not there is one.
+func TestResolveRunIDLeavesANamedRunAlone(t *testing.T) {
+	runID, err := resolveRunID(context.Background(), "named-run")
+	if err != nil || runID != "named-run" {
+		t.Fatalf("resolveRunID(named-run) = %q, %v", runID, err)
 	}
 }
 
@@ -262,9 +311,17 @@ func TestParseConnectRequest(t *testing.T) {
 		t.Fatalf("request = %#v", shell)
 	}
 
+	// A request naming no run is one the checkout has to answer, so parsing
+	// leaves the name empty rather than refusing it.
+	inferred, err := parseConnectRequest([]string{"--shell"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inferred.runID != "" || !inferred.shell {
+		t.Fatalf("request = %#v", inferred)
+	}
+
 	for name, args := range map[string][]string{
-		"no run":         {},
-		"only an option": {"--shell"},
 		"two runs":       {"run-123", "run-124"},
 		"unknown option": {"run-123", "--root"},
 	} {
@@ -498,8 +555,17 @@ func TestParseCopyRequestSeparatesRunPathAndDestination(t *testing.T) {
 		t.Fatalf("request = %#v", forced)
 	}
 
+	// A source carrying no run leaves the name for the checkout to answer.
+	inferred, err := parseCopyRequest([]string{"dist/index.html"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inferred.runID != "" || inferred.path != "dist/index.html" ||
+		inferred.destination != "index.html" {
+		t.Fatalf("request = %#v", inferred)
+	}
+
 	for name, args := range map[string][]string{
-		"no path":        {"run-123"},
 		"absolute path":  {"run-123:/etc/passwd"},
 		"climbing path":  {"run-123:../../secrets"},
 		"whole run":      {"run-123:."},
@@ -510,6 +576,39 @@ func TestParseCopyRequestSeparatesRunPathAndDestination(t *testing.T) {
 	} {
 		if _, err := parseCopyRequest(args); err == nil {
 			t.Errorf("%s was accepted", name)
+		}
+	}
+}
+
+// A destination that is already a directory means inside it, which is what cp
+// does and what a --force prompt should never be the answer to.
+func TestParseCopyRequestPutsACopyInsideAnExistingDirectory(t *testing.T) {
+	root := t.TempDir()
+	directory := filepath.Join(root, "plans")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	request, err := parseCopyRequest([]string{"run-123:plans/note.md", directory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.destination != filepath.Join(directory, "note.md") {
+		t.Fatalf("destination = %q", request.destination)
+	}
+
+	// A name that is not a directory is still taken literally, whether or not
+	// something is already there.
+	file := filepath.Join(root, "note.md")
+	if err := os.WriteFile(file, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, destination := range []string{file, filepath.Join(root, "absent.md")} {
+		request, err := parseCopyRequest([]string{"run-123:plans/note.md", destination})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if request.destination != destination {
+			t.Fatalf("destination = %q, want %q", request.destination, destination)
 		}
 	}
 }
@@ -648,7 +747,14 @@ func TestParseApplyRequest(t *testing.T) {
 			t.Fatalf("parseApplyRequest(%v) = %#v", testCase.args, request)
 		}
 	}
-	for _, args := range [][]string{{}, {"a", "b"}, {"run-123", "--replay"}} {
+	inferred, err := parseApplyRequest([]string{"--drop-baseline"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inferred.runID != "" || inferred.baseline != gitstage.DropBaseline {
+		t.Fatalf("parseApplyRequest([--drop-baseline]) = %#v", inferred)
+	}
+	for _, args := range [][]string{{"a", "b"}, {"run-123", "--replay"}} {
 		if _, err := parseApplyRequest(args); err == nil {
 			t.Fatalf("parseApplyRequest(%v) was accepted", args)
 		}

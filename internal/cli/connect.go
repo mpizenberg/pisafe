@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -16,7 +17,7 @@ type connectRequest struct {
 	shell bool
 }
 
-var errConnectUsage = fmt.Errorf("usage: pisafe connect RUN [--shell]")
+var errConnectUsage = fmt.Errorf("usage: pisafe connect [RUN] [--shell]")
 
 func parseConnectRequest(args []string) (connectRequest, error) {
 	request := connectRequest{}
@@ -35,19 +36,25 @@ func parseConnectRequest(args []string) (connectRequest, error) {
 		}
 		positional = append(positional, argument)
 	}
-	if len(positional) != 1 {
+	if len(positional) > 1 {
 		return connectRequest{}, errConnectUsage
 	}
-	request.runID = positional[0]
+	if len(positional) == 1 {
+		request.runID = positional[0]
+	}
 	return request, nil
 }
 
-func runConnect(args []string) error {
+func runConnect(ctx context.Context, args []string) error {
 	request, err := parseConnectRequest(args)
 	if err != nil {
 		return err
 	}
-	manifest, err := activeRun(request.runID)
+	runID, err := resolveRunID(ctx, request.runID)
+	if err != nil {
+		return err
+	}
+	manifest, err := activeRun(runID)
 	if err != nil {
 		return err
 	}

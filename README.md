@@ -64,9 +64,12 @@ checkout.
 When the run has something you want:
 
 ```sh
-pisafe diff RUN     # what changed, without stopping it
-pisafe apply RUN    # stops it, imports its history as branch pisafe/RUN
+pisafe diff     # what changed, without stopping it
+pisafe apply    # stops it, imports its history as branch pisafe/RUN
 ```
+
+A command that takes a run finds it without being told, as long as the checkout
+you are in has exactly one run left to import.
 
 Review, merge, and push that branch from the Mac as usual — the run itself
 never had GitHub access. `pisafe discard RUN --confirm RUN` throws away one you
@@ -99,17 +102,22 @@ pisafe broker                # foreground; runs have no inference without it
 ```sh
 pisafe run [--include PATH]... [--include-unsafe PATH]...
 pisafe list
-pisafe connect RUN [--shell]
-pisafe zed RUN
-pisafe stop RUN
-pisafe resume RUN
-pisafe diff RUN
-pisafe cp RUN:PATH [DEST] [--force]
-pisafe apply RUN [--keep-baseline|--drop-baseline]
+pisafe connect [RUN] [--shell]
+pisafe zed [RUN]
+pisafe stop [RUN]
+pisafe resume [RUN]
+pisafe diff [RUN]
+pisafe cp [RUN:]PATH [DEST] [--force]
+pisafe apply [RUN] [--keep-baseline|--drop-baseline]
 pisafe discard RUN --confirm RUN
 pisafe gc [--dry-run]
 pisafe doctor
 ```
+
+Every command that takes a `RUN` can be given none, and then means the one run
+of the checkout you are standing in that has not been imported yet. Two live
+runs of one repository is a question pisafe asks rather than answers, and
+`discard` always names its run twice.
 
 `run` stages the current repository's tracked state, including uncommitted
 changes, as a baseline commit. Untracked and ignored files stay behind unless
@@ -124,9 +132,10 @@ container, files, and network policy the Zed terminal does.
 
 `diff` reports a run's commits, changed paths with line counts, and untracked
 leftovers, without stopping it and without printing file content. `cp` takes a
-single file or directory back out. `apply` stops the run and imports its
-history as `pisafe/RUN`, in the superproject and in each changed submodule,
-leaving your checkout, index, and current branch untouched.
+single file or directory back out, into a directory you name if that directory
+already exists and under the name you give it otherwise. `apply` stops the run
+and imports its history as `pisafe/RUN`, in the superproject and in each changed
+submodule, leaving your checkout, index, and current branch untouched.
 
 If the run started from an uncommitted working tree, pisafe committed that state
 for it, and `apply` asks once whether to import that commit too or to replay

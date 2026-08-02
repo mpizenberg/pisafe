@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 	"text/tabwriter"
 	"time"
 
+	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/runid"
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
@@ -27,7 +30,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 	case "run":
 		return runCreate(ctx, args[1:], out)
 	case "connect":
-		return runConnect(args[1:])
+		return runConnect(ctx, args[1:])
 	case "login":
 		return runLogin(ctx, args[1:], in, out)
 	case "logout":
@@ -51,25 +54,29 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 		}
 		return runList(out)
 	case "zed":
-		if len(args) != 2 {
-			return errUsage
+		runID, err := runIDArgument(ctx, args[1:])
+		if err != nil {
+			return err
 		}
-		return runZed(ctx, args[1])
+		return runZed(ctx, runID)
 	case "stop":
-		if len(args) != 2 {
-			return errUsage
+		runID, err := runIDArgument(ctx, args[1:])
+		if err != nil {
+			return err
 		}
-		return runStop(ctx, args[1], out)
+		return runStop(ctx, runID, out)
 	case "resume":
-		if len(args) != 2 {
-			return errUsage
+		runID, err := runIDArgument(ctx, args[1:])
+		if err != nil {
+			return err
 		}
-		return runResume(ctx, args[1], out)
+		return runResume(ctx, runID, out)
 	case "diff":
-		if len(args) != 2 {
-			return errUsage
+		runID, err := runIDArgument(ctx, args[1:])
+		if err != nil {
+			return err
 		}
-		return runDiff(ctx, args[1], out)
+		return runDiff(ctx, runID, out)
 	case "cp":
 		return runCopy(ctx, args[1:], out)
 	case "apply":
@@ -115,20 +122,23 @@ Usage:
                    Untracked and ignored files stay out unless --include names
                    them; a credential-shaped path needs --include-unsafe,
                    which voids the run's credential isolation.
-  pisafe connect RUN [--shell]
+  pisafe connect [RUN] [--shell]
                    Attach this terminal to a run and start Pi, or with
                    --shell open a shell in the same container.
-  pisafe stop RUN  Stop a run while preserving its workspace
-  pisafe resume RUN
+  pisafe stop [RUN]
+                   Stop a run while preserving its workspace
+  pisafe resume [RUN]
                    Resume a stopped run
-  pisafe diff RUN  Report what a run changed since it started, without
+  pisafe diff [RUN]
+                   Report what a run changed since it started, without
                    stopping it. Commit subjects and file names come from the
                    run, so they are shown quoted, never as file content.
-  pisafe cp RUN:PATH [DEST] [--force]
+  pisafe cp [RUN:]PATH [DEST] [--force]
                    Copy one file or directory out of a run. Only regular
-                   files and directories are copied; an existing DEST is
-                   replaced only with --force.
-  pisafe apply RUN [--keep-baseline|--drop-baseline]
+                   files and directories are copied. A DEST that is already a
+                   directory takes the copy inside it; any other existing DEST
+                   is replaced only with --force.
+  pisafe apply [RUN] [--keep-baseline|--drop-baseline]
                    Import a run's commits as the local branch pisafe/RUN.
                    The run is stopped first and cannot be resumed afterwards;
                    your checkout, index, and current branch are not touched.
@@ -201,7 +211,7 @@ Usage:
                    superseded run images. Their pisafe/RUN branches keep the
                    work. A run whose work was never imported is only reported;
                    discard it explicitly.
-  pisafe zed RUN   Open a configured run in Zed
+  pisafe zed [RUN] Open a configured run in Zed
   pisafe login     Show which providers are logged in. Runs are offered all of
                    them at once and pick between them in Pi's model list.
   pisafe login chatgpt
@@ -222,6 +232,10 @@ Usage:
   pisafe doctor    Check Phase 1 host prerequisites
   pisafe list      Show durable run records
   pisafe help      Show this help
+
+A command that takes RUN finds it without being told when the checkout you are
+standing in has exactly one run left to import. Discarding always names its run
+twice, whatever the checkout holds.
 
 Runs never receive provider credentials; pisafe login keeps them in the
 macOS Keychain and pisafe broker relays inference to a revocable per-run
@@ -274,6 +288,80 @@ func runRecord(runID string) (runstate.Manifest, error) {
 		return runstate.Manifest{}, err
 	}
 	return runstate.NewStore(root).Get(runID)
+}
+
+// resolveRunID names the run a command was given, or the one live run of the
+// checkout the user is standing in when it was given none. A run whose work
+// has already been imported is not a candidate, so runs waiting to be collected
+// never make the shorthand ambiguous, and a checkout with several live runs is
+// told to choose rather than guessed at.
+func resolveRunID(ctx context.Context, runID string) (string, error) {
+	if runID != "" {
+		return runID, nil
+	}
+	root, err := gitstage.RepositoryRoot(ctx, ".")
+	if err != nil {
+		return "", fmt.Errorf("%w; name the run instead", err)
+	}
+	project, err := runid.NewProject(root)
+	if err != nil {
+		return "", err
+	}
+	stateRoot, err := runstate.DefaultRoot()
+	if err != nil {
+		return "", err
+	}
+	runs, err := runstate.NewStore(stateRoot).List()
+	if err != nil {
+		return "", err
+	}
+	return chooseProjectRun(runs, project)
+}
+
+// chooseProjectRun picks the one run a checkout still has to import. A run
+// whose work is already on a branch is finished with and never a candidate, so
+// runs waiting to be collected cannot make the choice ambiguous; two that are
+// not is a question rather than something to guess at.
+func chooseProjectRun(runs []runstate.Manifest, project runid.Project) (string, error) {
+	live := []runstate.Manifest{}
+	for _, run := range runs {
+		if run.ProjectKey == project.Key && run.State != runstate.StateImported {
+			live = append(live, run)
+		}
+	}
+	switch len(live) {
+	case 1:
+		return live[0].RunID, nil
+	case 0:
+		return "", fmt.Errorf(
+			"%s has no live run; start one with pisafe run",
+			project.Directory,
+		)
+	default:
+		names := make([]string, 0, len(live))
+		for _, run := range live {
+			names = append(names, "  "+run.RunID+"  "+string(run.State))
+		}
+		return "", fmt.Errorf(
+			"%s has %d live runs; name the one you mean:\n%s",
+			project.Directory,
+			len(live),
+			strings.Join(names, "\n"),
+		)
+	}
+}
+
+// runIDArgument reads the optional run name of a command that takes nothing
+// else.
+func runIDArgument(ctx context.Context, args []string) (string, error) {
+	switch len(args) {
+	case 0:
+		return resolveRunID(ctx, "")
+	case 1:
+		return args[0], nil
+	default:
+		return "", errUsage
+	}
 }
 
 // activeRun returns a run an editor or terminal can reach right now. Every
