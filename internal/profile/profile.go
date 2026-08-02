@@ -344,6 +344,64 @@ func (record Record) Configure(packageRoot, workspace string) Configuration {
 	return Configuration{Packages: packages, Workspace: workspace}
 }
 
+// SelfInstalled is one package a run installed for itself, as its own settings
+// name it. Source is what the run wrote and is quoted wherever it is shown;
+// Name is set only when the source is an npm package, which is the only kind
+// pisafe can put in the profile.
+type SelfInstalled struct {
+	Source string
+	Name   string
+}
+
+// ReadSelfInstalled reports what a run added to its own settings beyond the
+// profile's entries. The file is written inside the run, so nothing in it is
+// trusted: it is parsed permissively because half of it is Pi's own business,
+// and every entry that is not a plain string outside the profile is dropped.
+func ReadSelfInstalled(settings []byte, profileRoot string) []SelfInstalled {
+	var document struct {
+		Packages []any `json:"packages"`
+	}
+	if json.Unmarshal(settings, &document) != nil {
+		return nil
+	}
+	installed := []SelfInstalled{}
+	seen := map[string]bool{}
+	for _, entry := range document.Packages {
+		source, ok := entry.(string)
+		if !ok || source == "" || seen[source] ||
+			strings.HasPrefix(source, profileRoot+"/") {
+			continue
+		}
+		seen[source] = true
+		installed = append(
+			installed,
+			SelfInstalled{Source: source, Name: npmPackageName(source)},
+		)
+	}
+	return installed
+}
+
+// npmSource is how Pi spells a package it resolves through the registry, which
+// is the only source pisafe can turn into a pinned install.
+const npmSource = "npm:"
+
+// npmPackageName is the name in one source spec, or empty when the spec is not
+// a package pisafe could install. A scoped name opens with the separator a
+// version would be introduced by, so only a later one ends the name.
+func npmPackageName(source string) string {
+	if !strings.HasPrefix(source, npmSource) {
+		return ""
+	}
+	name := strings.TrimPrefix(source, npmSource)
+	if separator := strings.LastIndex(name, "@"); separator > 0 {
+		name = name[:separator]
+	}
+	if ValidatePackageName(name) != nil {
+		return ""
+	}
+	return name
+}
+
 // Tool is one installed command. It is pinned exactly as an extension is; what
 // differs is the effect, which is the binary names it claims in the one
 // directory a run has on its PATH. A package that claims none is not a tool,

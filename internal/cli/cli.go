@@ -184,8 +184,8 @@ Usage:
   pisafe extension install PACKAGE[@VERSION]
                    Install a Pi extension into the profile every run mounts
                    read-only, pinned to an exact version and integrity hash.
-                   Runs cannot install one themselves; inside a run, pi -e
-                   still tries a package for that run alone.
+                   A run installing one for itself reaches its own home and
+                   never the profile; stopping reports what it installed.
   pisafe extension update [PACKAGE...]
                    Named, move those pins to what npm resolves them to now.
                    Named none, report what is available and change nothing:

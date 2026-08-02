@@ -155,13 +155,15 @@ pisafe tool remove PACKAGE
 pisafe tool list
 ```
 
-Runs cannot install anything globally: the profile they mount is read-only, and
-only these commands write it. Each pins an exact version and refuses bytes that
-do not hash to the integrity npm reported for it, so a release republished under
-the same version fails rather than installs. Inside a run, `pi -e PACKAGE` still
-tries an extension for that run alone. Nothing updates itself: when a run stops,
-pisafe checks at most once a day what the registry now resolves the installed
-names to and tells you, and a pin moves only when you name the package.
+These commands are the only thing that writes the profile every run mounts, and
+each pins an exact version and refuses bytes that do not hash to the integrity
+npm reported for it, so a release republished under the same version fails
+rather than installs. Inside a run, `pi install` and `pi -e` still work — the
+package lands in that run's own home, serves it, and dies with it, and stopping
+the run tells you what it installed so keeping one is a command away. Nothing
+updates itself: when a run stops, pisafe checks at most once a day what the
+registry now resolves the installed names to and tells you, and a pin moves only
+when you name the package.
 
 ```sh
 pisafe project list                       # what pisafe holds, per checkout

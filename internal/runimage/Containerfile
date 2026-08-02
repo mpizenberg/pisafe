@@ -50,9 +50,9 @@ RUN set -eu; \
 # a build whose artifact changed fails rather than installing something else.
 # Python comes from uv rather than Debian, which means one interpreter reachable
 # as python as well as python3, and an exact build whose checksum the pinned uv
-# release carries. The last directory is where the commands the user installed
-# are mounted, and it belongs to the image so that a run always finds it whether
-# or not any were.
+# release carries. The last two directories are where the commands and packages
+# the user installed are mounted, and they belong to the image so that a run
+# always finds them whether or not anything was installed.
 RUN set -eu; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -81,7 +81,7 @@ RUN set -eu; \
     test "$(python -V)" = "Python 3.13.14"; \
     test "$(python3 -V)" = "Python 3.13.14"; \
     rm -rf /root/.npm /root/.cache; \
-    install -d -m 0755 /opt/pisafe/tools
+    install -d -m 0755 /opt/pisafe/tools /opt/pisafe/profile
 
 COPY --chmod=0755 pisafe-guest /usr/local/bin/pisafe-guest
 

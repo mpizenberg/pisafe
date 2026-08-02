@@ -365,18 +365,21 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
 
 - The helper's `global` scope holds one profile, `default`, with three
   namespaces: `extensions/`, `tools/`, and `pins/`. Every run mounts the first
-  read-only at Pi's own global package store, `~/.pi/agent/npm`, and the second
-  at `/opt/pisafe/tools`, whose `bin/` directory of relative symlinks is the one
-  `PATH` entry the profile adds — behind the image's own directories, ahead of
-  the run's `~/.local/bin`. `pins/` is pisafe's record and is mounted nowhere.
-  Installing globally inside a run therefore fails while `pi -e <package>` still
-  works, and the run's mountpoint is created before the container starts so
-  Podman cannot leave it root-owned.
+  read-only at `/opt/pisafe/profile` and the second at `/opt/pisafe/tools`,
+  whose `bin/` directory of relative symlinks is the one `PATH` entry the
+  profile adds — behind the image's own directories, ahead of the run's
+  `~/.local/bin`. `pins/` is pisafe's record and is mounted nowhere. Both mounts
+  are outside every path a run writes, and Pi's own package store,
+  `~/.pi/agent/npm`, is an ordinary directory in the run's home: `pi install`
+  succeeds there, serves that run, and dies with it. The directory is created
+  before the container starts so Podman cannot leave it root-owned.
 - Each run gets a `settings.json` and `trust.json` written into its home, not
   mounted: they list each installed package by absolute path — never as an
   `npm:` source, which would make Pi re-check versions against a read-only store
   — pin `transport: "sse"`, and trust the run's own workspace. Whatever Pi then
-  writes dies with the run.
+  writes dies with the run. Every start rebuilds the profile's own entries from
+  the record, so a removed extension disappears, and keeps every entry that is
+  not the profile's, so a package the run installed survives a resume.
 - `pisafe extension install PACKAGE[@VERSION]` is two containers with pisafe
   holding the pin between them: the first reports what the spec resolves to
   through `npm pack --dry-run --json`, the second installs that exact version
@@ -394,6 +397,13 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   removing a package silences an offer without clearing anything, and a stop
   prints only when the day's check moved what is pending. Naming a package runs
   the same resolve-and-verify install path a first install takes.
+- Stopping a run also reports what the run installed into its own package
+  store, read from the run's settings out of run storage after the container is
+  gone, bounded at 1 MiB. Every entry the profile did not put there is the
+  run's; an `npm:` source is named with the `pisafe extension install` line that
+  would keep it, anything else is named as something pisafe cannot pin. Sources
+  are quoted, because a run chose them. Nothing is applied and nothing fails: a
+  run whose settings are missing, oversized, or malformed reports nothing.
 - `pisafe tool install PACKAGE[@VERSION]` uses that install path and then reads
   back what the tree claims: npm's own `node_modules/.bin` links, filtered to
   those pointing into the named package. A name another tool already provides
@@ -801,8 +811,9 @@ Verified against a real ARM64 VM:
 - **The profile mount** (`TestLiveTheProfileLoadsAndStaysReadOnlyToTheRun`): a
   package seeded into the profile registers a flag that `pi --help` then prints,
   so its code ran; the repository's own extension loads without a trust prompt;
-  `pi -e` still works; and the run can neither write the store nor `pi install`
-  into it.
+  `pi -e` still works; the profile refuses every write; `pi install` succeeds,
+  leaving the package in the run's own store and the profile exactly as it was;
+  and what a stop would report is that package and not the profile's.
 - **Pinned installs** (`TestLiveAnInstalledExtensionIsPinnedToWhatWasFetched`):
   the recorded pin is the registry's own answer, bytes that hash to anything
   else never reach the profile, the installed tree is that exact release,
@@ -949,8 +960,8 @@ A persistent Lima instance named `pisafe` was left running with security profile
 holding cached base/test images plus the current managed run image:
 
 ```text
-recipe digest: sha256:41946f85dcd240a07ecf34bf7dc4255cd0f0b8d1b405db06ee1cc902b65cbf5f
-image ID:      sha256:4d4592b20baf1c9556a7ed5c00e6d25cf3fcdfc8087cc5c8d1f8646b717f63b9
+recipe digest: sha256:91a234aed75f42506f7da4ba2179e4a8e5b9001b4b6db4da176ad1df07ca9559
+image ID:      sha256:2853c0a1906dbffe11f9306877b6112a73e3d444c9614bbc21bce4d75996f757
 ```
 
 The instance was recreated during Phase 2: the storage helper gained the project

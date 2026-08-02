@@ -11,6 +11,7 @@ import (
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/hostnet"
 	"github.com/mpizenberg/pisafe/internal/lima"
+	"github.com/mpizenberg/pisafe/internal/profile"
 	"github.com/mpizenberg/pisafe/internal/providers"
 	"github.com/mpizenberg/pisafe/internal/runctl"
 	"github.com/mpizenberg/pisafe/internal/runimage"
@@ -41,10 +42,45 @@ func runStop(ctx context.Context, runID string, out io.Writer) error {
 	if manifest.LastError != "" {
 		fmt.Fprintf(out, "Warning: %s\n", manifest.LastError)
 	}
+	transport := lima.NewTransport()
+	notifySelfInstalled(ctx, transport, runID, out)
 	// The stopped run's own image is enough to ask npm a question, which keeps
 	// the check off the path that installs and verifies the current one.
-	notifyExtensionUpdates(ctx, lima.NewTransport(), manifest.Image, out)
+	notifyExtensionUpdates(ctx, transport, manifest.Image, out)
 	return nil
+}
+
+// notifySelfInstalled reports what the run installed into its own package
+// store, which nothing else will: a run's home is reclaimed with the run. It
+// is an offer in the same sense an update is — pisafe names the command and
+// applies nothing, because installing into the profile is a decision about
+// every later run of every project.
+func notifySelfInstalled(
+	ctx context.Context,
+	transport lima.Transport,
+	runID string,
+	out io.Writer,
+) {
+	printSelfInstalled(out, runID, transport.ReadSelfInstalled(ctx, runID))
+}
+
+// printSelfInstalled names what a run installed and what would keep it. Every
+// source was chosen inside the run, so it is quoted rather than written to the
+// terminal as it stands, and a source pisafe cannot pin is still reported: the
+// run had it, and saying nothing would be the surprise.
+func printSelfInstalled(out io.Writer, runID string, installed []profile.SelfInstalled) {
+	if len(installed) == 0 {
+		return
+	}
+	fmt.Fprintf(out, "%s installed %d package(s) for itself:\n", runID, len(installed))
+	for _, entry := range installed {
+		keep := "pisafe extension install " + entry.Name
+		if entry.Name == "" {
+			keep = "pisafe can only keep an npm package"
+		}
+		fmt.Fprintf(out, "  %q\n      %s\n", entry.Source, keep)
+	}
+	fmt.Fprintln(out, "They went with the run; nothing is kept unless you install it.")
 }
 
 func runResume(ctx context.Context, runID string, out io.Writer) error {

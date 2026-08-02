@@ -53,11 +53,14 @@ const (
 	// variable points it here, so the layer cannot accumulate arbitrary state.
 	containerCacheRoot   = "/cache"
 	containerSessionRoot = "/sessions"
-	// containerPackageRoot is where Pi installs the packages it shares between
-	// projects. The profile mounts there read-only, which is what makes
-	// pi install fail inside a run while pi -e, which installs to a temporary
-	// directory for one run, still works.
-	containerPackageRoot = containerHome + "/.pi/agent/npm"
+	// containerProfileRoot is where the profile's packages are mounted. It is
+	// deliberately not Pi's own global package store: mounting there read-only
+	// made pi install fail, and an agent told it cannot install globally
+	// installs into the repository instead, where the package is committed and
+	// arrives on the user's Mac. Pi's store stays an ordinary directory in the
+	// run's home, so a global install succeeds, serves that run, and dies with
+	// it, while nothing a run does reaches the profile at all.
+	containerProfileRoot = "/opt/pisafe/profile"
 	// containerToolRoot is where the installed commands are mounted. It is
 	// outside the run's home, which is writable, and outside the image's own
 	// directories, which the run must not be able to appear to have changed.
@@ -125,7 +128,7 @@ type Mount struct {
 // so it depends on nothing about the run.
 func ProfileMount() Mount {
 	return Mount{
-		Destination: containerPackageRoot,
+		Destination: containerProfileRoot,
 		Source:      ProfilePath() + "/" + extensionsNamespace,
 	}
 }

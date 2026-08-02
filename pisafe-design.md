@@ -298,10 +298,13 @@ What follows:
   or removes what another run handed over, and a live run's transcripts reach no
   concurrent run.
 - **The profile is written only from the Mac**, by a command the user runs
-  deliberately, and every run mounts it read-only at Pi's own global package
-  store. So installing globally inside a run fails, while trying an extension
-  for the length of one run still works. A package is installed only at an exact
-  version whose fetched bytes match the recorded integrity hash.
+  deliberately, and every run mounts it read-only at a path of pisafe's
+  choosing. Pi's own global package store is part of the run's writable home, so
+  installing inside a run works and serves that run alone; nothing it writes has
+  a path to the profile. A package reaches the profile only at an exact version
+  whose fetched bytes match the recorded integrity hash. What a run installed
+  for itself is reported when it stops, so keeping it is a command away and
+  losing it is never a surprise.
 - **An update is discovered without being applied.** What the registry now
   resolves an installed name to is checked at most once a day, never on the path
   that starts a run, and reported when a run stops; moving a pin happens only
@@ -522,9 +525,9 @@ and errors, and fail-closed behavior when the broker or upstream is down.
     refs.
 14. `pisafe cp` refuses traversal paths, escaping symlinks, and special files,
     enforces size and count limits, and never overwrites without confirmation.
-15. Nothing in a run can write the global profile: installing a package
-    globally fails on the read-only store, while trying one for the length of
-    that run still works.
+15. Nothing in a run can write the global profile: installing a package inside
+    a run succeeds, loads, and leaves the profile the next run mounts
+    byte-for-byte what the user installed.
 16. Two runs of one project each read what earlier runs finished and neither
     sees the other's live transcripts; a run of a different project reaches
     neither those transcripts nor that project's caches.

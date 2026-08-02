@@ -255,19 +255,23 @@ func TestSharedLayersKeepTheProjectSideReadOnlyToTheRun(t *testing.T) {
 	}
 }
 
-// TestTheProfileMountsWhereAgentCodeWouldInstallGlobally is invariant 1 as the
-// container line expresses it: the one path Pi writes a global package to is
-// the profile, and it arrives read-only.
-func TestTheProfileMountsWhereAgentCodeWouldInstallGlobally(t *testing.T) {
+// TestTheProfileMountsOutsideEveryPathARunWrites is invariant 1 as the
+// container line expresses it: the profile arrives read-only, and nowhere near
+// Pi's own package store, which stays part of the run's writable home so a
+// global install succeeds for the run and reaches nothing else.
+func TestTheProfileMountsOutsideEveryPathARunWrites(t *testing.T) {
 	args, err := DefaultSpec("run-123", testProjectKey, testImageID).RunArgs()
 	if err != nil {
 		t.Fatal(err)
 	}
 	joined := strings.Join(args, " ")
 	expected := "type=bind,src=/var/lib/pisafe/global/default/extensions," +
-		"dst=/home/node/.pi/agent/npm,ro,nodev,nosuid"
+		"dst=/opt/pisafe/profile,ro,nodev,nosuid"
 	if !strings.Contains(joined, expected) {
 		t.Errorf("run args lack %q:\n%s", expected, joined)
+	}
+	if strings.Contains(joined, "dst="+containerHome+"/.pi") {
+		t.Errorf("something is mounted inside Pi's own agent directory:\n%s", joined)
 	}
 	// The record of what is pinned is pisafe's, not the run's.
 	if strings.Contains(joined, ProfilePinsPath()) {

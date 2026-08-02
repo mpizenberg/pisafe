@@ -25,11 +25,11 @@ import (
 
 const (
 	runHome = "/home/node"
-	// packageRoot is where the read-only profile is mounted and workRoot where
+	// profileRoot is where the read-only profile is mounted and workRoot where
 	// the run's own workspace is. The controller composes what this helper is
 	// told, and the helper still refuses a path outside either, so no
 	// configuration can point Pi at something that is not the run's.
-	packageRoot           = runHome + "/.pi/agent/npm"
+	profileRoot           = "/opt/pisafe/profile"
 	workRoot              = "/work"
 	sshPublicKeySize      = 4096
 	modelsConfigSizeLimit = int64(1 << 20)
@@ -186,7 +186,7 @@ func configureProfile(home string, in io.Reader) error {
 	}
 	packages := make([]any, 0, len(configuration.Packages))
 	for _, path := range configuration.Packages {
-		if !strings.HasPrefix(path, packageRoot+"/") || filepath.Clean(path) != path {
+		if !strings.HasPrefix(path, profileRoot+"/") || filepath.Clean(path) != path {
 			return fmt.Errorf("profile package %q is not in the mounted profile", path)
 		}
 		packages = append(packages, path)
@@ -202,7 +202,9 @@ func configureProfile(home string, in io.Reader) error {
 	}
 	settings, err := updateAgentSettings(
 		filepath.Join(agentDirectory, "settings.json"),
-		func(settings map[string]any) { settings["packages"] = packages },
+		func(settings map[string]any) {
+			settings["packages"] = append(packages, runInstalledPackages(settings)...)
+		},
 	)
 	if err != nil {
 		return err
@@ -213,6 +215,23 @@ func configureProfile(home string, in io.Reader) error {
 		}
 	}
 	return trustWorkspace(agentDirectory, workspace)
+}
+
+// runInstalledPackages is everything in the run's settings that the profile did
+// not put there — what pi install added inside the run. The profile is the
+// authority on its own entries, so those are rebuilt from the record every
+// start and a stale one disappears; a run's own belong to the run, and dropping
+// them on resume would unload a package that is still installed.
+func runInstalledPackages(settings map[string]any) []any {
+	existing, _ := settings["packages"].([]any)
+	kept := make([]any, 0, len(existing))
+	for _, entry := range existing {
+		if path, ok := entry.(string); ok && strings.HasPrefix(path, profileRoot+"/") {
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	return kept
 }
 
 // trustWorkspace records the run's own workspace as trusted, so Pi loads the

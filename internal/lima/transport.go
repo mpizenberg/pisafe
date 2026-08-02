@@ -117,12 +117,13 @@ done
 
 	// prepareRunLayoutScript builds what the run's mounts need inside the
 	// filesystems the privileged helper allocated: the run-private half of
-	// every overlay, and the mountpoint for the read-only profile. Both the
-	// mode and the ownership are what the container needs, and are what the
-	// helper would have applied had any of these names been knowable when it
-	// allocated the filesystem. The mountpoint matters even though Podman would
-	// create one: a mountpoint Podman creates is owned by the container's root,
-	// which would leave Pi unable to write its own settings beside it.
+	// every overlay, and Pi's own agent directory. Both the mode and the
+	// ownership are what the container needs, and are what the helper would
+	// have applied had any of these names been knowable when it allocated the
+	// filesystem. The agent directory matters even though Podman would create
+	// one: a directory Podman creates is owned by the container's root, which
+	// would leave Pi unable to write its settings or install a package for the
+	// length of the run.
 	prepareRunLayoutScript = `set -eu
 exec podman unshare sh -ceu '
 set -eu
@@ -249,6 +250,18 @@ record=$1/$2
 test -f "$record" || exit 0
 exec cat "$record"
 ' pisafe-profile "$@"
+`
+
+	// readRunSettingsScript prints the Pi settings one run left behind. The
+	// file is the run's own, so it is read after the container is gone, out of
+	// run storage, and bounded here rather than trusted to be small.
+	readRunSettingsScript = `set -eu
+exec podman unshare sh -ceu '
+set -eu
+settings=/var/lib/pisafe/runs/$1/home/.pi/agent/settings.json
+test -f "$settings" || exit 0
+exec head -c 1048576 "$settings"
+' pisafe-settings "$@"
 `
 
 	// publishSnapshotScript materializes one cache's merged view into a new
@@ -736,6 +749,24 @@ func (transport Transport) readProfileFile(ctx context.Context, name string) ([]
 	return transport.shellScript(
 		ctx, nil, readProfileFileScript, runcontainer.ProfilePinsPath(), name,
 	)
+}
+
+// ReadSelfInstalled reports what one run installed into its own package store.
+// A run that installed nothing, or whose storage is already gone, reports
+// nothing rather than failing: this is something to mention, never a reason to
+// fail the command that asked.
+func (transport Transport) ReadSelfInstalled(
+	ctx context.Context,
+	runID string,
+) []profile.SelfInstalled {
+	if err := runid.Validate(runID); err != nil {
+		return nil
+	}
+	settings, err := transport.shellScript(ctx, nil, readRunSettingsScript, runID)
+	if err != nil {
+		return nil
+	}
+	return profile.ReadSelfInstalled(settings, runcontainer.ProfileMount().Destination)
 }
 
 // PublishCacheSnapshot keeps what one run added to a declared cache as a new

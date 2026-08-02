@@ -534,7 +534,7 @@ func TestConfigureInferencePinsSSETransportPreservingSettings(t *testing.T) {
 func TestConfigureProfileNamesThePackagesAndTrustsTheWorkspace(t *testing.T) {
 	home := t.TempDir()
 	agent := filepath.Join(home, ".pi", "agent")
-	installed := packageRoot + "/earendil-works-plan-mode-bf0f2759/node_modules/@earendil-works/plan-mode"
+	installed := profileRoot + "/earendil-works-plan-mode-bf0f2759/node_modules/@earendil-works/plan-mode"
 	configure := func(packages ...string) error {
 		document, err := json.Marshal(profile.Configuration{
 			Packages:  packages,
@@ -591,6 +591,24 @@ func TestConfigureProfileNamesThePackagesAndTrustsTheWorkspace(t *testing.T) {
 	if settings["theme"] != "dark" {
 		t.Fatalf("settings dropped what Pi wrote: %v", settings)
 	}
+
+	// What the run installed for itself is the run's, and a resume that
+	// dropped it would unload a package still sitting in the run's home.
+	if err := os.WriteFile(
+		filepath.Join(agent, "settings.json"),
+		[]byte(`{"packages":["`+installed+`","npm:pi-web-access"]}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := configure(installed); err != nil {
+		t.Fatal(err)
+	}
+	settings = read("settings.json")
+	packages, _ = settings["packages"].([]any)
+	if len(packages) != 2 || packages[0] != installed || packages[1] != "npm:pi-web-access" {
+		t.Fatalf("settings packages = %v", settings["packages"])
+	}
 }
 
 func TestConfigureProfileRefusesWhatIsNotTheRuns(t *testing.T) {
@@ -600,7 +618,7 @@ func TestConfigureProfileRefusesWhatIsNotTheRuns(t *testing.T) {
 			Workspace: "/work/project",
 		},
 		"climbing package": {
-			Packages:  []string{packageRoot + "/../../.ssh"},
+			Packages:  []string{profileRoot + "/../../.ssh"},
 			Workspace: "/work/project",
 		},
 		"workspace outside the run": {Workspace: "/etc"},

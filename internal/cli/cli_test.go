@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/profile"
 	"github.com/mpizenberg/pisafe/internal/runcopy"
 	"github.com/mpizenberg/pisafe/internal/runctl"
 	"github.com/mpizenberg/pisafe/internal/runid"
@@ -945,5 +946,35 @@ func TestAKeyIsReadFromStdinAndMustNotBeBlank(t *testing.T) {
 		if key != "sk-test-key" {
 			t.Errorf("%s: key = %q", name, key)
 		}
+	}
+}
+
+// TestPrintSelfInstalledQuotesWhatTheRunChose covers the report a stop makes
+// about the run's own packages. Every source came from inside the run, so none
+// of it reaches the terminal unquoted, and a source pisafe cannot pin is named
+// rather than dropped.
+func TestPrintSelfInstalledQuotesWhatTheRunChose(t *testing.T) {
+	var output bytes.Buffer
+	printSelfInstalled(&output, "project-run", []profile.SelfInstalled{
+		{Source: "npm:pi-web-access", Name: "pi-web-access"},
+		{Source: "git:github.com/user/repo\n\033[2Kfake line"},
+	})
+	for _, expected := range []string{
+		"project-run installed 2 package(s) for itself",
+		`"npm:pi-web-access"`,
+		"pisafe extension install pi-web-access",
+		`"git:github.com/user/repo\n\x1b[2Kfake line"`,
+		"pisafe can only keep an npm package",
+		"nothing is kept unless you install it",
+	} {
+		if !strings.Contains(output.String(), expected) {
+			t.Errorf("output lacks %q:\n%s", expected, output.String())
+		}
+	}
+
+	output.Reset()
+	printSelfInstalled(&output, "project-run", nil)
+	if output.Len() != 0 {
+		t.Errorf("a run that installed nothing said %q", output.String())
 	}
 }

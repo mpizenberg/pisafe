@@ -460,3 +460,47 @@ func TestAToolRecordSurvivesStorage(t *testing.T) {
 		t.Fatalf("stored %+v, found %v", tool, found)
 	}
 }
+
+// TestARunsOwnPackagesAreReadBackWithoutBeingTrusted covers what stopping a run
+// reports. The settings file is written inside the run, so the point is as much
+// what is ignored as what is found: only the profile's own entries are dropped
+// as pisafe's, and only an npm source becomes something pisafe offers to keep.
+func TestARunsOwnPackagesAreReadBackWithoutBeingTrusted(t *testing.T) {
+	const profileRoot = "/opt/pisafe/profile"
+	settings := []byte(`{
+		"theme": "dark",
+		"packages": [
+			"` + profileRoot + `/aardvark-cf9c1cb8/node_modules/aardvark",
+			"npm:pi-web-access",
+			"npm:@earendil-works/plan-mode@0.4.1",
+			"npm:pi-web-access",
+			"npm:Not A Name",
+			"git:github.com/user/repo",
+			{"source": "npm:not-a-string"},
+			""
+		]
+	}`)
+	installed := ReadSelfInstalled(settings, profileRoot)
+	want := []SelfInstalled{
+		{Source: "npm:pi-web-access", Name: "pi-web-access"},
+		{Source: "npm:@earendil-works/plan-mode@0.4.1", Name: "@earendil-works/plan-mode"},
+		{Source: "npm:Not A Name"},
+		{Source: "git:github.com/user/repo"},
+	}
+	if !slices.Equal(installed, want) {
+		t.Errorf("installed = %#v, want %#v", installed, want)
+	}
+
+	// Nothing here may fail: a run that wrote rubbish still has to stop.
+	for name, content := range map[string][]byte{
+		"empty":           nil,
+		"not JSON":        []byte("{"),
+		"packages absent": []byte(`{"theme":"dark"}`),
+		"packages wrong":  []byte(`{"packages":"all of them"}`),
+		"only profile's":  []byte(`{"packages":["` + profileRoot + `/a/node_modules/a"]}`),
+	} {
+		if found := ReadSelfInstalled(content, profileRoot); len(found) != 0 {
+			t.Errorf("%s reported %#v", name, found)
+		}
+	}
+}

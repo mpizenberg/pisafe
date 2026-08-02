@@ -383,8 +383,9 @@ func configureRunProfile(
 
 // TestLiveTheProfileLoadsAndStaysReadOnlyToTheRun is invariant 1 end to end. An
 // extension the user installed has to run in every run, and no code inside a
-// run may change what the next one loads — which is one property, because the
-// profile is mounted exactly where Pi would have installed a package itself.
+// run may change what the next one loads. A run installing a package for itself
+// is not that: it writes its own home, and the profile is somewhere it has no
+// writable handle on at all.
 func TestLiveTheProfileLoadsAndStaysReadOnlyToTheRun(t *testing.T) {
 	if os.Getenv("PISAFE_LIVE_LIMA") != "1" {
 		t.Skip("set PISAFE_LIVE_LIMA=1 to test the dedicated VM")
@@ -441,23 +442,38 @@ sed 's/local-flag/temporary-flag/' /work/project/.pi/extensions/local.ts >/tmp/t
 		t.Errorf("an extension tried for one run did not load:\n%s", tried)
 	}
 
-	// The profile arrives where Pi installs a global package, so refusing the
-	// write and refusing the install are the same refusal.
-	packageRoot := runcontainer.ProfileMount().Destination
+	// The profile itself refuses every write, from anywhere in the run.
+	profileRoot := runcontainer.ProfileMount().Destination
 	written := inContainer(t, ctx, transport, spec,
-		"touch "+packageRoot+"/canary 2>&1 || true")
+		"touch "+profileRoot+"/canary 2>&1 || true")
 	if !strings.Contains(written, "Read-only file system") {
 		t.Errorf("the profile accepted a write from the run: %q", written)
 	}
+	// Pi's own package store is the run's, so installing globally succeeds and
+	// the package loads. An agent that cannot install globally installs into
+	// the repository instead, which is the run's work rather than its tooling.
 	installOutput := inContainer(t, ctx, transport, spec,
-		"pi install npm:is-number@7.0.0 2>&1 || echo REFUSED")
-	if !strings.Contains(installOutput, "REFUSED") {
-		t.Errorf("pi install succeeded inside a run:\n%s", installOutput)
+		"cd /work/project && pi install npm:is-number@7.0.0 2>&1")
+	if strings.Contains(installOutput, "EROFS") ||
+		strings.Contains(installOutput, "read-only") {
+		t.Errorf("pi install was refused inside a run:\n%s", installOutput)
+	}
+	if listed := inContainer(
+		t, ctx, transport, spec, "ls -A /home/node/.pi/agent/npm/node_modules",
+	); !strings.Contains(listed, "is-number") {
+		t.Errorf("a global install left nothing in the run's own store: %q", listed)
+	}
+	// What stopping reports: the run's own package, and not the profile's.
+	selfInstalled := transport.ReadSelfInstalled(ctx, spec.RunID)
+	if len(selfInstalled) != 1 || selfInstalled[0].Name != "is-number" {
+		t.Errorf("the run's own packages read back as %#v", selfInstalled)
 	}
 	// Only the packages are mounted. What pisafe pinned them to is its own.
-	if listed := inContainer(t, ctx, transport, spec, "ls -A "+packageRoot); listed != installed.Directory {
+	if listed := inContainer(t, ctx, transport, spec, "ls -A "+profileRoot); listed != installed.Directory {
 		t.Errorf("the run sees %q in the profile, want only %q", listed, installed.Directory)
 	}
+	// The point of all of it: what the run installed reached the run and
+	// nothing else, so the next run's profile is the one the user installed.
 	if listed := runLive(
 		t, ctx, "podman", "unshare", "ls", "-A", runcontainer.ProfileMount().Source,
 	); listed != installed.Directory {

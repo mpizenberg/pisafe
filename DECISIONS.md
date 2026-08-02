@@ -363,15 +363,20 @@ history holds them. New entries are appended in full.
   Pi writes both — `/settings`, `pi install`, and `/trust` all do — and a
   read-only mount would turn ordinary Pi use into an I/O error. The copy dies
   with the run, so agent code still cannot change what any later run sees.
-- The profile mounts at Pi's own global package store, `~/.pi/agent/npm`, rather
-  than at a neutral path of pisafe's choosing. A neutral mount needs a second,
-  purely negative one — an empty read-only filesystem over the package store —
-  to keep `pi install` from silently succeeding into a run home and vanishing at
-  stop. One mount states the property directly: the global package store is
-  read-only, so installing globally fails while `pi -e <package>` still works,
-  because that path installs to a temporary directory for one run. Trying an
-  extension stays ephemeral and keeping one goes through a pisafe command,
-  without pisafe having to enforce the split itself.
+- The profile mounts at a neutral path, `/opt/pisafe/profile`, and Pi's own
+  global package store stays an ordinary writable directory in the run's home.
+  Mounting the profile *at* the package store was tried first, on the reasoning
+  that one read-only mount states the property directly — installing globally
+  inside a run fails, so nothing a run installs can outlive it. What that misses
+  is where a blocked agent goes next: told `EROFS` by `pi install`, it reran the
+  command as `pi install -l` and committed the package into the repository,
+  which then arrived on the user's Mac through `apply`. Polluting the checkout
+  is worse than an install that works for one run and dies with it, and the
+  original objection to a neutral mount — that a run-local install vanishes at
+  stop unremarked — is answered by remarking on it: stopping reports what the
+  run installed and offers to keep it. *Reverses an earlier decision on
+  evidence; the mount path is cheap to move back, but the invariant's wording
+  moved with it.*
 - A run reaches a profile package by absolute path, not as an `npm:` source.
   Both spellings load, but an `npm:` source makes Pi re-check the installed
   version at every startup and install when it disagrees, so a read-only store
@@ -430,6 +435,16 @@ history holds them. New entries are appended in full.
   that briefly does not exist. Two installs at once can lose an entry from the
   record; the loser's tree stays unrecorded and re-running the command fixes it.
   A lock was not taken for a single-user command.
+- What a run installed for itself is reported at stop, and reported rather than
+  prompted for. An interactive yes/no was not taken: every other offer in pisafe
+  prints a command and applies nothing, and stopping is also reached from apply,
+  where a prompt would interrupt an import. The report is unconditional, unlike
+  the update offer's once-per-change rule, because it is news about the run in
+  front of the user rather than a standing fact they may already have declined.
+  It is read from the run's own settings out of run storage after the container
+  is gone, which is where a run's home lives until it is discarded — so nothing
+  has to happen before teardown, and a run whose settings say nothing usable
+  costs a failed read and no message.
 - The update offer is made when a run stops, not when one starts. Starting a run
   is when the user is waiting and when nothing may depend on the registry being
   reachable; stopping one is when they have finished, when slow best-effort work

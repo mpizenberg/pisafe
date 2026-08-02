@@ -38,7 +38,7 @@ func TestARunIsToldWhatTheProfileHoldsWhenItStarts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantPackage := "/home/node/.pi/agent/npm/earendil-works-plan-mode-bf0f2759" +
+	wantPackage := "/opt/pisafe/profile/earendil-works-plan-mode-bf0f2759" +
 		"/node_modules/@earendil-works/plan-mode"
 	stdin := stdinFor(backend.calls, "configure-profile")
 	if !strings.Contains(stdin, wantPackage) {
