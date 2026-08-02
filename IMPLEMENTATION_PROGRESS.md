@@ -402,9 +402,10 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   record naming it. `tool remove` and `tool list` complete the set; there is no
   `tool update`, because installing again is one.
 - The run image carries the toolchain a run cannot install for itself: `curl`,
-  `jq`, `ripgrep`, `fd`, `python3`, and `unzip` from Debian, plus `pnpm` and
-  `uv` pinned to a recorded digest, alongside the `node`, `npm`, `git`,
-  `openssl`, and `ssh` it already had.
+  `jq`, `ripgrep`, `fd`, and `unzip` from Debian, plus `pnpm` and `uv` pinned to
+  a recorded digest, alongside the `node`, `npm`, `git`, `openssl`, and `ssh` it
+  already had. `uv` then installs CPython 3.13.14 into the image and links it as
+  `python`, `python3`, and `python3.13`, so both spellings are one interpreter.
 
 ### Naming, emptying, and exporting durable state
 
@@ -948,8 +949,8 @@ A persistent Lima instance named `pisafe` was left running with security profile
 holding cached base/test images plus the current managed run image:
 
 ```text
-recipe digest: sha256:66c257a546ba5a3d50e6810903296bb883be4b0800deb1e271d6d6d05f93b59c
-image ID:      sha256:fe44e5112513ba064fcead963ae0f4b550d6bbf1f7e6e53b542752151f297083
+recipe digest: sha256:41946f85dcd240a07ecf34bf7dc4255cd0f0b8d1b405db06ee1cc902b65cbf5f
+image ID:      sha256:4d4592b20baf1c9556a7ed5c00e6d25cf3fcdfc8087cc5c8d1f8646b717f63b9
 ```
 
 The instance was recreated during Phase 2: the storage helper gained the project

@@ -15,7 +15,7 @@ import (
 // is not here cannot be obtained from inside one at all.
 var imageToolchain = []string{
 	"node", "npm", "pnpm", "corepack", "git",
-	"curl", "jq", "unzip", "rg", "fd", "python3", "uv", "uvx",
+	"curl", "jq", "unzip", "rg", "fd", "python", "python3", "uv", "uvx",
 }
 
 // TestLiveTheToolchainIsReachableAndNeverShadowed covers what naming PATH costs

@@ -48,15 +48,17 @@ RUN set -eu; \
 # profile mounts read-only, so a binary that is not here does not exist. Debian
 # supplies what it carries; pnpm and uv are pinned to a digest recorded here, so
 # a build whose artifact changed fails rather than installing something else.
-# The last directory is where the commands the user installed are mounted, and
-# it belongs to the image so that a run always finds it whether or not any were.
+# Python comes from uv rather than Debian, which means one interpreter reachable
+# as python as well as python3, and an exact build whose checksum the pinned uv
+# release carries. The last directory is where the commands the user installed
+# are mounted, and it belongs to the image so that a run always finds it whether
+# or not any were.
 RUN set -eu; \
     apt-get update; \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         curl \
         fd-find \
         jq \
-        python3 \
         ripgrep \
         unzip; \
     rm -rf /var/lib/apt/lists/*; \
@@ -74,6 +76,10 @@ RUN set -eu; \
         | sha256sum -c -; \
     tar -xzf uv.tar.gz --strip-components=1 -C /usr/local/bin; \
     rm -f uv.tar.gz; \
+    UV_PYTHON_INSTALL_DIR=/opt/pisafe/python UV_PYTHON_BIN_DIR=/usr/local/bin \
+        uv python install --preview-features python-install-default --default 3.13.14; \
+    test "$(python -V)" = "Python 3.13.14"; \
+    test "$(python3 -V)" = "Python 3.13.14"; \
     rm -rf /root/.npm /root/.cache; \
     install -d -m 0755 /opt/pisafe/tools
 

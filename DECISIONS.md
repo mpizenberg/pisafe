@@ -484,6 +484,17 @@ history holds them. New entries are appended in full.
   version set that Debian security updates then invalidate. uv also introduces
   `github.com` as a build-time origin beyond the npm registry and the Debian
   mirrors, because uv publishes no npm package.
+- Python comes from `uv python install`, not from Debian, and is linked as
+  `python` as well as `python3`. Debian ships no `python` name at all, which is
+  the spelling anything written this decade reaches for first, and adding
+  `python-is-python3` would have been a second package to carry a symlink. The
+  uv route also pins the interpreter to an exact build — 3.13.14 — whose
+  checksum the already-pinned uv release carries, so it is the one part of the
+  image's Debian layer that stops floating. It costs 94 MB and depends on
+  `--default`, which uv still marks experimental; the build names the flag
+  explicitly and asserts both spellings report the pinned version, so a uv bump
+  that changes the behaviour fails the build rather than shipping an image
+  without a `python`.
 - pisafe keeps npm as its own installer. pnpm was measured against it rather
   than adopted: `npm install` already writes a lockfile covering every
   transitive dependency with an integrity hash, and that lockfile is inside the
