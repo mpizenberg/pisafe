@@ -435,6 +435,16 @@ history holds them. New entries are appended in full.
   that briefly does not exist. Two installs at once can lose an entry from the
   record; the loser's tree stays unrecorded and re-running the command fixes it.
   A lock was not taken for a single-user command.
+- The container mount check guards starting a container, not every path that
+  touches one; identity — name, label, image — is proved everywhere. Checking
+  mounts before a teardown too was the first shape, and it stranded every run
+  whose container predated the profile mount moving: `stop` refused the
+  container, and so did `apply`, which stops first, leaving no way to reach the
+  work except discarding it. The check protects what a running container can
+  reach, and a stop neither reuses the container nor reads anything through it —
+  what it publishes it reads from run storage. Special-casing the old
+  destination was not taken: it would have left the same trap for the next
+  layout change, and one is enough to learn from.
 - What a run installed for itself is reported at stop, and reported rather than
   prompted for. An interactive yes/no was not taken: every other offer in pisafe
   prints a command and applies nothing, and stopping is also reached from apply,

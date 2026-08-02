@@ -231,7 +231,7 @@ func (controller Controller) StartPrepared(
 	if _, err := controller.podman(ctx, nil, runArgs...); err != nil {
 		return runstate.Manifest{}, fmt.Errorf("start run container: %w", err)
 	}
-	inspection, err := controller.inspectContainer(ctx, spec)
+	inspection, err := controller.inspectStartedContainer(ctx, spec)
 	if err != nil {
 		return runstate.Manifest{}, err
 	}

@@ -106,7 +106,7 @@ func TestAWritableProfileIsNotAcceptedAsARunsProfile(t *testing.T) {
 		append([]string{"podman"}, runArgs...),
 		spec.ContainerName(),
 	)
-	if err := validateContainerInspection(spec, *inspection); err != nil {
+	if err := validateRunMounts(spec, *inspection); err != nil {
 		t.Fatalf("a correctly mounted run was refused: %v", err)
 	}
 	for index := range inspection.Mounts {
@@ -115,7 +115,43 @@ func TestAWritableProfileIsNotAcceptedAsARunsProfile(t *testing.T) {
 		}
 		inspection.Mounts[index].Writable = true
 	}
-	if err := validateContainerInspection(spec, *inspection); err == nil {
+	if err := validateRunMounts(spec, *inspection); err == nil {
 		t.Fatal("a writable profile was accepted")
+	}
+}
+
+// TestAContainerFromAnEarlierLayoutCanStillBeStopped is why the mount check
+// guards starting rather than every path. A run's container is built from the
+// layout its pisafe knew; changing that layout must not strand the run holding
+// the user's work, and stopping it neither reuses the container nor reads
+// anything through it.
+func TestAContainerFromAnEarlierLayoutCanStillBeStopped(t *testing.T) {
+	spec := runcontainer.DefaultSpec("run-123", testProject.Key, testImage)
+	runArgs, err := spec.RunArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspection := inspectionFromRunArgs(
+		append([]string{"podman"}, runArgs...),
+		spec.ContainerName(),
+	)
+	for index := range inspection.Mounts {
+		if inspection.Mounts[index].Destination == runcontainer.ProfileMount().Destination {
+			inspection.Mounts[index].Destination = "/home/node/.pi/agent/npm"
+		}
+	}
+	if err := validateContainerIdentity(spec, *inspection); err != nil {
+		t.Errorf("a run of an earlier layout was not recognized: %v", err)
+	}
+	if err := validateRunMounts(spec, *inspection); err == nil {
+		t.Error("an earlier layout was accepted as one to keep running")
+	}
+
+	// Identity is what every path proves, so a container that is not the run's
+	// is refused wherever it turns up.
+	other := *inspection
+	other.Config.Labels = map[string]string{"io.pisafe.run": "someone-else"}
+	if err := validateContainerIdentity(spec, other); err == nil {
+		t.Error("a container labelled for another run was accepted")
 	}
 }

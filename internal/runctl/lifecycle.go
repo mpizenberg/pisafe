@@ -146,7 +146,7 @@ func (controller Controller) Resume(
 			errors.Join(fmt.Errorf("start run container: %w", err), cleanupErr),
 		)
 	}
-	inspection, err := controller.inspectContainer(ctx, spec)
+	inspection, err := controller.inspectStartedContainer(ctx, spec)
 	if err != nil || inspection == nil || inspection.State.Status != "running" {
 		if err == nil {
 			err = errors.New("resumed container is not running")
@@ -344,7 +344,23 @@ func (controller Controller) inspectContainer(
 		return nil, fmt.Errorf("expected one exact run container, got %d", len(inspections))
 	}
 	inspection := &inspections[0]
-	if err := validateContainerInspection(spec, *inspection); err != nil {
+	if err := validateContainerIdentity(spec, *inspection); err != nil {
+		return nil, err
+	}
+	return inspection, nil
+}
+
+// inspectStartedContainer is inspectContainer for a container pisafe has just
+// started, where the mounts it came up with are the thing being proved.
+func (controller Controller) inspectStartedContainer(
+	ctx context.Context,
+	spec runcontainer.Spec,
+) (*containerInspection, error) {
+	inspection, err := controller.inspectContainer(ctx, spec)
+	if err != nil || inspection == nil {
+		return inspection, err
+	}
+	if err := validateRunMounts(spec, *inspection); err != nil {
 		return nil, err
 	}
 	return inspection, nil
@@ -359,7 +375,10 @@ type mountRequirement struct {
 	readOnly bool
 }
 
-func validateContainerInspection(
+// validateContainerIdentity proves the container is the run's own before
+// anything acts on it. Every path needs this much, including the ones whose
+// next move is to destroy it.
+func validateContainerIdentity(
 	spec runcontainer.Spec,
 	inspection containerInspection,
 ) error {
@@ -376,6 +395,19 @@ func validateContainerInspection(
 	if inspection.Config.Labels["io.pisafe.run"] != spec.RunID {
 		return errors.New("run container label does not match manifest")
 	}
+	return nil
+}
+
+// validateRunMounts proves a container reaches only what its run may, and
+// nothing writable that a later run reads. It guards what pisafe has just
+// started and is about to hand over, which is where the property has to hold.
+// Tearing a container down does not need it: what a stop publishes it reads
+// from run storage rather than through the container, and requiring the check
+// there would strand a run whose container predates a change to the layout.
+func validateRunMounts(
+	spec runcontainer.Spec,
+	inspection containerInspection,
+) error {
 	profileMount := runcontainer.ProfileMount()
 	toolsMount := runcontainer.ToolsMount()
 	expected := map[string]mountRequirement{

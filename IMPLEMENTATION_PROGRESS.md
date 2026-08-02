@@ -478,6 +478,15 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   window resizes, and the exit status are the session's. Only an active run
   within its budget is reachable; a stopped one is refused naming
   `pisafe resume`. `zed` shares that check.
+- Every path that touches a run's container proves its identity — name, label,
+  and image against the manifest. What the container is mounted on is proved
+  where pisafe has just started one and is about to hand it over, at run and at
+  resume: a writable profile or an unexpected persistent mount there is agent
+  code able to reach what a later run reads. Stopping proves identity only. It
+  destroys the container and publishes from run storage rather than through it,
+  and requiring the current layout would strand a run whose container was built
+  by an earlier pisafe — which is not hypothetical, since moving the profile
+  mount did exactly that.
 - `pisafe stop` removes only the container and accounts elapsed active seconds
   conservatively; `pisafe resume` verifies VM boundary, storage identity, image,
   container identity, and mount sources before recreating with the remaining
@@ -614,9 +623,13 @@ with a fake VM boundary:
   exactly pinned npm package installable; a reinstall replacing rather than
   accumulating; two tools refusing to answer to one name; the links a run
   searches derived from the record; installed extensions becoming the packages a
-  run loads; a writable profile refused as a run's profile; and an offer that
-  survives storage, differs only from what is installed, degrades to silence
-  when it is corrupt, and is made once per change.
+  run loads; a writable profile refused as a run's profile; a container built
+  from an earlier mount layout still recognized as the run's and still
+  stoppable, while refused as one to keep running; a container labelled for
+  another run refused everywhere; the packages a run installed for itself read
+  back without any of it being trusted; and an offer that survives storage,
+  differs only from what is installed, degrades to silence when it is corrupt,
+  and is made once per change.
 - **Backup and restore**: a manifest recording what a restore needs and nothing
   more, checked field by field so a credential has nowhere to travel; a manifest
   a restore cannot trust refused; an unfinished backup not readable as one; only
