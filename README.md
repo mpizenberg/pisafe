@@ -34,7 +34,10 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
 
 The release layout places `pisafe-guest-linux-arm64` beside `pisafe`; during
 development, `PISAFE_GUEST_HELPER=/absolute/path/to/helper` selects it
-explicitly. The run-image Containerfile is compiled into the controller.
+explicitly. The run-image Containerfile is compiled into the controller. Both
+commands are one build: `pisafe` refuses a helper that answers to a different
+set of calls than it makes, before a run exists rather than inside a half-made
+one, and names what to rebuild.
 
 ## Getting started
 

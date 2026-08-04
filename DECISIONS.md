@@ -133,6 +133,18 @@ history holds them. New entries are appended in full.
   at runtime would require a Go toolchain in the installed product; checking a
   binary into Git would make history unreviewable. Changing the layout changes
   the managed recipe digest.
+- Because the helper is a separate artifact, the controller refuses one that
+  does not carry the exact call contract it was itself built with: a
+  compile-time constant naming every call and its arguments, which the helper
+  prints as its usage error and therefore carries in its bytes. A hand-bumped
+  version constant was not taken, because forgetting to bump it is the same
+  forgetting that leaves a helper unbuilt; a VCS or build-time stamp was not
+  taken either, because two builds from one dirty tree carry the same commit,
+  which is exactly the case that skews during development. Renaming a call, or
+  changing what it takes, now costs a clear failure before a run exists rather
+  than a usage error from the guest halfway through creating one. A call whose
+  meaning changes while its name does not stays invisible to this check, so such
+  a change renames the call.
 - Pi's transitive tree is frozen by the `npm-shrinkwrap.json` Pi publishes
   inside its own tarball, which the pinned top-level digest already covers, so
   the build asserts that shrinkwrap is still there rather than shipping a

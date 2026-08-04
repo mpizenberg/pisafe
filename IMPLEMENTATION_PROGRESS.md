@@ -231,7 +231,13 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   platform, and a valid immutable SHA-256 ID, which is what run containers
   receive. Artifact loading rejects symlinks, file swaps, oversize inputs,
   non-ELF or non-ARM64 helpers, dynamic interpreters, and imported shared
-  libraries.
+  libraries. It also rejects a helper that does not carry
+  `internal/guestcall.Contract`, the compile-time text naming every call and its
+  arguments: the helper prints it as its usage error, so it is in the binary,
+  and the controller looks for the exact bytes it was built with. The
+  controller and the helper are separate binaries, so rebuilding one and not the
+  other used to surface as a usage error from the guest halfway through creating
+  a run; it now fails before the run exists, naming what to rebuild.
 - Build-time SSH host keys are removed; a network-disabled one-shot container
   generates each run's host key and installs only its client public key.
 - Run commands require an immutable `sha256:` ID and use UID/GID 1000, read-only

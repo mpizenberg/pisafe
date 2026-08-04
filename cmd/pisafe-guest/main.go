@@ -18,6 +18,7 @@ import (
 	"syscall"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/guestcall"
 	"github.com/mpizenberg/pisafe/internal/piagent"
 	"github.com/mpizenberg/pisafe/internal/profile"
 	"github.com/mpizenberg/pisafe/internal/runcopy"
@@ -48,57 +49,57 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 		return usageError()
 	}
 	switch args[0] {
-	case "materialize":
+	case guestcall.Materialize:
 		if len(args) != 3 {
 			return usageError()
 		}
 		return materialize(ctx, args[1], args[2], out)
-	case "prepare-apply":
+	case guestcall.PrepareApply:
 		if len(args) != 4 {
 			return usageError()
 		}
 		return prepareApply(ctx, args[1], args[2], args[3], in, out)
-	case "diff":
+	case guestcall.Diff:
 		if len(args) != 2 {
 			return usageError()
 		}
 		return diffRun(ctx, args[1], in, out)
-	case "export":
+	case guestcall.Export:
 		if len(args) != 3 {
 			return usageError()
 		}
 		return runcopy.Archive(args[1], args[2], out)
-	case "import":
+	case guestcall.Import:
 		if len(args) != 5 {
 			return usageError()
 		}
 		return importCopy(args[1], args[2], args[3], args[4], in, out)
-	case "configure-ssh":
+	case guestcall.ConfigureSSH:
 		if len(args) != 1 {
 			return usageError()
 		}
 		return configureSSH(ctx, runHome, in, out, generateHostKey)
-	case "configure-models":
+	case guestcall.ConfigureModels:
 		if len(args) != 1 {
 			return usageError()
 		}
 		return configureModels(runHome, in)
-	case "configure-identity":
+	case guestcall.ConfigureIdentity:
 		if len(args) != 1 {
 			return usageError()
 		}
 		return configureIdentity(ctx, runHome, in)
-	case "configure-profile":
+	case guestcall.ConfigureProfile:
 		if len(args) != 1 {
 			return usageError()
 		}
 		return configureProfile(runHome, in)
-	case "serve-ssh":
+	case guestcall.ServeSSH:
 		if len(args) != 1 {
 			return usageError()
 		}
 		return serveSSH(runHome)
-	case "proxy-ssh":
+	case guestcall.ProxySSH:
 		if len(args) != 1 {
 			return usageError()
 		}
@@ -109,15 +110,7 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 }
 
 func usageError() error {
-	return errors.New(
-		"usage: pisafe-guest <materialize <stage-directory> <workspace>" +
-			"|prepare-apply <keep|drop> <workspace> <package-directory>" +
-			"|diff <workspace>" +
-			"|export <workspace> <path>" +
-			"|import <workspace> <destination> <name> <replace|refuse>" +
-			"|configure-ssh|configure-models|configure-identity|configure-profile" +
-			"|serve-ssh|proxy-ssh>",
-	)
+	return errors.New("usage: " + guestcall.Contract)
 }
 
 // importCopy unpacks an archive the Mac sent into the run's workspace. An empty

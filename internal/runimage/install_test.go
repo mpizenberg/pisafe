@@ -14,6 +14,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/mpizenberg/pisafe/internal/guestcall"
 )
 
 type imageCall struct {
@@ -184,6 +186,29 @@ func TestLoadPackagedArtifactsRejectsSymlink(t *testing.T) {
 	}
 }
 
+// A helper built before a call was renamed parses as the right kind of binary
+// and answers the controller with a usage error halfway through creating a run,
+// so the controller has to recognize it from its bytes.
+func TestLoadPackagedArtifactsRejectsHelperWithoutTheCallContract(t *testing.T) {
+	root := t.TempDir()
+	guestPath := filepath.Join(root, "pisafe-guest")
+	stale := bytes.ReplaceAll(
+		minimalARM64ELF(),
+		[]byte(guestcall.ConfigureModels),
+		[]byte("configure-inference"),
+	)
+	if err := os.WriteFile(guestPath, stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadPackagedArtifacts(guestPath)
+	if err == nil {
+		t.Fatal("LoadPackagedArtifacts accepted a helper built from other calls")
+	}
+	if !strings.Contains(err.Error(), PackagedGuestName) {
+		t.Fatalf("error does not say what to rebuild: %v", err)
+	}
+}
+
 func testArtifacts(t *testing.T) Artifacts {
 	t.Helper()
 	return Artifacts{
@@ -202,7 +227,7 @@ func minimalARM64ELF() []byte {
 	binary.LittleEndian.PutUint16(header[18:20], uint16(elf.EM_AARCH64))
 	binary.LittleEndian.PutUint32(header[20:24], uint32(elf.EV_CURRENT))
 	binary.LittleEndian.PutUint16(header[52:54], 64)
-	return header
+	return append(header, guestcall.Contract...)
 }
 
 func inspectJSON(t *testing.T, recipe string) []byte {

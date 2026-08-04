@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/mpizenberg/pisafe/internal/guestcall"
 	"github.com/mpizenberg/pisafe/internal/runid"
 )
 
@@ -371,7 +372,7 @@ func renderConfig(
 		"  ProxyCommand ssh -F " + quoteConfig(gateway.ConfigFile) +
 		" -o ClearAllForwardings=yes -o BatchMode=yes " + gateway.Alias +
 		" /usr/bin/podman exec --interactive " + containerName +
-		" /usr/local/bin/pisafe-guest proxy-ssh\n"
+		" /usr/local/bin/pisafe-guest " + guestcall.ProxySSH + "\n"
 }
 
 func quoteConfig(value string) string {

@@ -10,6 +10,7 @@ import (
 	"strconv"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/guestcall"
 	"github.com/mpizenberg/pisafe/internal/profile"
 	"github.com/mpizenberg/pisafe/internal/runcopy"
 	"github.com/mpizenberg/pisafe/internal/runid"
@@ -457,7 +458,7 @@ func (spec Spec) RunArgs() ([]string, error) {
 	}
 	return append(args,
 		spec.ImageID,
-		"pisafe-guest", "serve-ssh",
+		"pisafe-guest", guestcall.ServeSSH,
 	), nil
 }
 
@@ -609,7 +610,7 @@ func (spec Spec) ConfigureSSHArgs() ([]string, error) {
 		"--mount", "type=bind,src=" + spec.HomePath() + ",dst=" + containerHome + ",nodev,nosuid",
 		"--env", "HOME=" + containerHome,
 		spec.ImageID,
-		"pisafe-guest", "configure-ssh",
+		"pisafe-guest", guestcall.ConfigureSSH,
 	}, nil
 }
 
@@ -625,7 +626,7 @@ func (spec Spec) MaterializeArgs(projectDirectory string) ([]string, error) {
 		"--user", containerUser,
 		"--workdir", containerWorkRoot,
 		spec.ContainerName(),
-		"pisafe-guest", "materialize",
+		"pisafe-guest", guestcall.Materialize,
 		containerWorkRoot + "/stage",
 		containerWorkRoot + "/" + projectDirectory,
 	}, nil
@@ -635,13 +636,13 @@ func (spec Spec) MaterializeArgs(projectDirectory string) ([]string, error) {
 // on, piped through stdin into the run home. It runs after activation and
 // resume so a fresh capability always replaces the previous one.
 func (spec Spec) ConfigureModelsArgs() ([]string, error) {
-	return spec.configureArgs("configure-models")
+	return spec.configureArgs(guestcall.ConfigureModels)
 }
 
 // ConfigureIdentityArgs installs the Git identity piped through stdin into the
 // run home. It runs once at creation, because the run home keeps it.
 func (spec Spec) ConfigureIdentityArgs() ([]string, error) {
-	return spec.configureArgs("configure-identity")
+	return spec.configureArgs(guestcall.ConfigureIdentity)
 }
 
 // ConfigureProfileArgs tells the run which profile packages to load and which
@@ -649,7 +650,7 @@ func (spec Spec) ConfigureIdentityArgs() ([]string, error) {
 // resume, because the profile changes between runs and the run's own copy of
 // what it says does not survive one.
 func (spec Spec) ConfigureProfileArgs() ([]string, error) {
-	return spec.configureArgs("configure-profile")
+	return spec.configureArgs(guestcall.ConfigureProfile)
 }
 
 func (spec Spec) configureArgs(command string) ([]string, error) {
@@ -680,7 +681,7 @@ func (spec Spec) PrepareApplyArgs(
 	}
 	return append(
 		args,
-		"pisafe-guest", "prepare-apply",
+		"pisafe-guest", guestcall.PrepareApply,
 		string(baseline),
 		containerWorkRoot+"/"+projectDirectory,
 		containerWorkRoot+"/"+applyPackage,
@@ -695,7 +696,7 @@ func (spec Spec) DiffArgs(projectDirectory string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(args, "pisafe-guest", "diff", containerWorkRoot+"/"+projectDirectory), nil
+	return append(args, "pisafe-guest", guestcall.Diff, containerWorkRoot+"/"+projectDirectory), nil
 }
 
 // ExportArgs streams one path of the run's workspace out as a tar on standard
@@ -712,7 +713,7 @@ func (spec Spec) ExportArgs(projectDirectory, requestPath string) ([]string, err
 	}
 	return append(
 		args,
-		"pisafe-guest", "export",
+		"pisafe-guest", guestcall.Export,
 		containerWorkRoot+"/"+projectDirectory,
 		requested,
 	), nil
@@ -748,7 +749,7 @@ func (spec Spec) ImportArgs(
 	}
 	return append(
 		args,
-		"pisafe-guest", "import",
+		"pisafe-guest", guestcall.Import,
 		containerWorkRoot+"/"+projectDirectory,
 		destination,
 		name,

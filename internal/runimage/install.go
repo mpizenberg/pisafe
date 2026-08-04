@@ -15,9 +15,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/mpizenberg/pisafe/internal/guestcall"
 )
 
 const (
+	// PackagedGuestName is the file the controller is shipped beside, holding
+	// the helper that goes into the run image.
+	PackagedGuestName = "pisafe-guest-linux-arm64"
+
 	managedTagPrefix     = "localhost/pisafe-run:managed-"
 	recipeLabel          = "io.pisafe.recipe.digest"
 	maxContainerfileSize = 1 << 20
@@ -78,6 +84,13 @@ func (artifacts Artifacts) Validate() error {
 	}
 	if len(libraries) != 0 {
 		return fmt.Errorf("guest helper must be statically linked")
+	}
+	if !bytes.Contains(artifacts.Guest, []byte(guestcall.Contract)) {
+		return fmt.Errorf(
+			"guest helper answers to a different set of calls than this pisafe "+
+				"makes; rebuild %s from this source tree",
+			PackagedGuestName,
+		)
 	}
 	return nil
 }

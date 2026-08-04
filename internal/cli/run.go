@@ -115,7 +115,8 @@ func packagedRunArtifacts() (runimage.Artifacts, error) {
 	artifacts, err := runimage.LoadPackagedArtifacts(guestPath)
 	if err != nil {
 		return runimage.Artifacts{}, fmt.Errorf(
-			"load packaged Linux helper (build pisafe-guest-linux-arm64 beside pisafe or set %s): %w",
+			"load packaged Linux helper (build %s beside pisafe or set %s): %w",
+			runimage.PackagedGuestName,
 			guestHelperEnvironment,
 			err,
 		)
@@ -135,7 +136,7 @@ func packagedGuestPath() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve pisafe executable: %w", err)
 	}
-	return filepath.Join(filepath.Dir(executable), "pisafe-guest-linux-arm64"), nil
+	return filepath.Join(filepath.Dir(executable), runimage.PackagedGuestName), nil
 }
 
 func printRunResult(out io.Writer, result runstart.Result, inferenceConfigured bool) error {
