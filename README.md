@@ -55,11 +55,11 @@ pisafe run
 ```
 
 The first run creates the VM and builds the run image, which takes a few
-minutes; later ones start in seconds. `run` prints a run ID and a one-time
-`ssh -F` line to paste into Zed's Remote Projects dialog, or reach the same
-container from your terminal with `pisafe connect RUN`, which opens a shell in
-the staged repository — type `pi` there to start the agent. It can build,
-fetch, and run tests without touching your checkout.
+minutes; later ones start in seconds. `run` prints a run ID; `pisafe zed RUN`
+then opens the staged repository in Zed, or reach the same container from your
+terminal with `pisafe connect RUN`, which opens a shell in it — type `pi`
+there to start the agent. It can build, fetch, and run tests without touching
+your checkout.
 
 When the run has something you want:
 
@@ -125,8 +125,14 @@ runs of one repository is a question pisafe asks rather than answers, and
 changes, as a baseline commit. Untracked and ignored files stay behind unless
 `--include` names them; a credential-shaped path additionally needs
 `--include-unsafe`, because everything in the run can read and exfiltrate it.
-The command prints a one-time `ssh -F` line to paste into Zed's Remote
-Projects dialog — pisafe never edits your global SSH or Zed settings.
+The command prints an `ssh -F` line that reaches the run from any SSH client.
+
+`zed` opens a run's workspace in Zed. A run's alias is defined only in pisafe's
+own per-run SSH config, and Zed hands `ssh` nothing but what a saved connection
+carries, so `pisafe zed` saves one for the run and removes it again when the run
+is discarded or collected. That list is the only file outside pisafe's own state
+it writes, and it holds nothing but the run's alias and the config file to reach
+it by; your SSH configuration is never touched.
 
 `connect` attaches your terminal to a shell in the run's workspace, where `pi`
 starts the agent. It needs no editor, and it reaches the same container, files,

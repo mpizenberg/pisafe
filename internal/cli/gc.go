@@ -51,6 +51,9 @@ func runGC(ctx context.Context, args []string, out io.Writer) error {
 		return nil
 	}
 	done, collectErr := controller.Collect(ctx, plan, now)
+	for _, runID := range done.Reclaimed {
+		forgetZedConnection(runID, out)
+	}
 	images, pruneErr := installer.Prune(ctx, recipe, plan.KeepImages)
 	printCollection(out, done, images, false)
 	return errors.Join(collectErr, pruneErr)

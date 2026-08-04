@@ -191,6 +191,7 @@ func runDiscard(ctx context.Context, runID string, out io.Writer) error {
 	if err := controller.Discard(ctx, runID); err != nil {
 		return err
 	}
+	forgetZedConnection(runID, out)
 	fmt.Fprintf(
 		out,
 		"Discarded %s; its container, workspace, home, SSH key, and record were removed.\n",

@@ -175,8 +175,7 @@ func printRunResult(out io.Writer, result runstart.Result, inferenceConfigured b
 			namedList{label: "ignored", names: result.Excluded.Ignored},
 		)
 	}
-	fmt.Fprintln(out, "Zed:      Remote Projects > Connect New Server, then paste the SSH command")
-	fmt.Fprintf(out, "           After that: pisafe zed %s\n", manifest.RunID)
+	fmt.Fprintf(out, "Zed:       pisafe zed %s\n", manifest.RunID)
 	if inferenceConfigured {
 		fmt.Fprintln(out, "Pi:        keep `pisafe broker` running on this Mac to serve inference")
 	} else {

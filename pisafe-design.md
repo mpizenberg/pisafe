@@ -438,7 +438,13 @@ container through Lima's own control connection and a stdio relay. The client
 private key stays on macOS, the container generates its own host key and runs
 `sshd` as the non-root run user, and the Mac pins that host key before the first
 connection. `pisafe` writes only its own per-run config fragment and never edits
-the user's global SSH or Zed settings.
+the user's SSH configuration.
+
+That fragment is reached with `ssh -F`, which Zed passes along only from a saved
+connection, so `pisafe zed` adds one for the run it is opening and takes it back
+out when the run is reclaimed. Zed's saved connections are the one file outside
+`pisafe`'s own state it writes, and it writes nothing there but the host and the
+config file to reach it by.
 
 Zed runs source, language servers, tasks, and terminal commands on the remote
 machine, which keeps executable project tooling in the sandbox. The local UI

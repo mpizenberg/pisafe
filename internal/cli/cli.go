@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -60,7 +59,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 		if err != nil {
 			return err
 		}
-		return runZed(ctx, runID)
+		return runZed(ctx, runID, out)
 	case "stop":
 		runID, err := runIDArgument(ctx, args[1:])
 		if err != nil {
@@ -228,7 +227,12 @@ Usage:
                    superseded run images. Their pisafe/RUN branches keep the
                    work. A run whose work was never imported is only reported;
                    discard it explicitly.
-  pisafe zed [RUN] Open a configured run in Zed
+  pisafe zed [RUN] Open a run in Zed, saving the connection it needs first.
+                   A run's alias resolves only through pisafe's own per-run SSH
+                   config, so one entry per run goes into Zed's saved
+                   connections and comes back out when the run is discarded or
+                   collected. Nothing else outside pisafe's own state is
+                   written.
   pisafe login     Show which providers are logged in. Runs are offered all of
                    them at once and pick between them in Pi's model list.
   pisafe login chatgpt
@@ -256,8 +260,9 @@ twice, whatever the checkout holds.
 
 Runs never receive provider credentials; pisafe login keeps them in the
 macOS Keychain and pisafe broker relays inference to a revocable per-run
-capability. After creating a run, use the printed one-time Zed Remote
-Projects command; pisafe never edits global SSH or Zed settings.`)
+capability. Zed's saved connections are the only file outside pisafe's own
+state it writes, one entry per run and only when you run pisafe zed; your SSH
+configuration is never touched.`)
 }
 
 func runList(out io.Writer) error {
@@ -412,24 +417,4 @@ func activeRun(runID string) (runstate.Manifest, error) {
 		return runstate.Manifest{}, fmt.Errorf("run %q has no SSH connection", runID)
 	}
 	return manifest, nil
-}
-
-func runZed(ctx context.Context, runID string) error {
-	manifest, err := activeRun(runID)
-	if err != nil {
-		return err
-	}
-	zed, err := exec.LookPath("zed")
-	if err != nil {
-		return fmt.Errorf("find Zed CLI: install it from Zed's command palette")
-	}
-	command := exec.CommandContext(
-		ctx,
-		zed,
-		"ssh://"+manifest.SSH.Alias+manifest.Workspace,
-	)
-	if output, err := command.CombinedOutput(); err != nil {
-		return fmt.Errorf("open run in Zed: %s", output)
-	}
-	return nil
 }

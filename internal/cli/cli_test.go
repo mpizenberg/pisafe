@@ -17,6 +17,7 @@ import (
 	"github.com/mpizenberg/pisafe/internal/runcopy"
 	"github.com/mpizenberg/pisafe/internal/runctl"
 	"github.com/mpizenberg/pisafe/internal/runid"
+	"github.com/mpizenberg/pisafe/internal/runssh"
 	"github.com/mpizenberg/pisafe/internal/runstart"
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
@@ -1037,5 +1038,59 @@ func TestPrintSelfInstalledQuotesWhatTheRunChose(t *testing.T) {
 	printSelfInstalled(&output, "project-run", nil)
 	if output.Len() != 0 {
 		t.Errorf("a run that installed nothing said %q", output.String())
+	}
+}
+
+func TestZedConnectionsAreSavedAndReclaimedUnderTheSameAlias(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	settings := filepath.Join(home, ".config", "zed", "settings.json")
+	runID := "tessera-20260804-134311-bf9fdd2fcdb6"
+	manifest := runstate.Manifest{
+		RunID:     runID,
+		Workspace: "/work/tessera",
+		SSH: &runstate.SSHConnection{
+			Alias:      runssh.Alias(runID),
+			ConfigFile: filepath.Join(home, "ssh", runID, "ssh.config"),
+		},
+	}
+
+	path, added, err := saveZedConnection(manifest)
+	if err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if path != settings || !added {
+		t.Fatalf("saved to %q (added=%v), want %q", path, added, settings)
+	}
+	saved, err := os.ReadFile(settings)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	for _, expected := range []string{manifest.SSH.Alias, manifest.SSH.ConfigFile} {
+		if !strings.Contains(string(saved), expected) {
+			t.Fatalf("saved settings lack %q:\n%s", expected, saved)
+		}
+	}
+
+	// Nothing is written twice, so opening a run again never waits for Zed to
+	// reread settings it already has.
+	if _, added, err := saveZedConnection(manifest); err != nil || added {
+		t.Fatalf("saving again: added=%v err=%v", added, err)
+	}
+
+	var output bytes.Buffer
+
+	// Removal derives the alias from the run ID alone, because a collected run
+	// has no record left to read it from.
+	forgetZedConnection(runID, &output)
+	if output.Len() != 0 {
+		t.Fatalf("reclaiming a saved connection warned: %s", output.String())
+	}
+	reclaimed, err := os.ReadFile(settings)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	if strings.Contains(string(reclaimed), runID) {
+		t.Fatalf("settings still hold the reclaimed run:\n%s", reclaimed)
 	}
 }

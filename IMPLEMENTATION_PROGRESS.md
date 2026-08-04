@@ -265,6 +265,13 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   `podman exec --interactive <run-container> pisafe-guest proxy-ssh`, which
   relays binary stdio only to container loopback. The client private key never
   enters Lima or the run.
+- `internal/zedsettings` splices Zed's saved connections in place, so the
+  comments and layout of a settings file it edits survive: it walks JSON with
+  comments to the byte range of the one value it changes and rewrites nothing
+  else. `pisafe zed` adds the run's host and the `-F` path that reaches it;
+  `discard` and `gc` take it back out under the same alias, derived from the run
+  ID because a collected run has no record left to read it from. A host already
+  saved is never rewritten, so whatever Zed keeps in that entry is left alone.
 
 ### Inference broker and provider logins
 
@@ -524,8 +531,9 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
 - `pisafe stop` removes only the container and accounts elapsed active seconds
   conservatively; `pisafe resume` verifies VM boundary, storage identity, image,
   container identity, and mount sources before recreating with the remaining
-  budget. `pisafe zed` opens a connection the user saved once through Zed's
-  "Connect New Server" flow; pisafe never edits global SSH or Zed settings.
+  budget. `pisafe zed` saves the connection Zed needs before opening a run and
+  takes it back out when the run is reclaimed; pisafe never edits SSH
+  configuration.
 
 ## Tests and verification
 
@@ -1111,6 +1119,14 @@ These explain why parts of the code look the way they do:
     blocked writing into a pipe the Mac had already closed. Invisible for as
     long as every sender was Go's `archive/tar`, which writes exactly the two
     zero blocks the reader consumes; the extractor now drains what it is given.
+21. `pisafe zed` failing on the first open of a run even with the connection
+    saved: Zed rereads its settings from a file watcher, and a run handed over
+    in the same breath as the write reaches `ssh` with no `-F` and an
+    unresolvable host name. Zed's log names the exact `ssh` argument vector,
+    which is what made this measurable rather than guessed at — probe
+    connections written and opened at 0, 0.1, 0.25, 0.5, and 1.0 seconds failed
+    to resolve only at none. `zed` now settles for half a second when, and only
+    when, it wrote.
 
 ## Known gaps
 

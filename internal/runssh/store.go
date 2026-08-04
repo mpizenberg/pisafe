@@ -53,6 +53,12 @@ type Endpoint struct {
 	HostKeyFingerprint string
 }
 
+// Alias is the SSH host name a run answers to. It outlives the run's record in
+// whatever a client saved it in, so it is derived from the run ID alone.
+func Alias(runID string) string {
+	return "pisafe-" + runID
+}
+
 func NewStore(root string) Store {
 	cleaned := filepath.Clean(root)
 	if root != "" {
@@ -157,7 +163,7 @@ func (store Store) Finalize(
 		return Endpoint{}, fmt.Errorf("validate run SSH host key: %w", err)
 	}
 
-	alias := "pisafe-" + prepared.RunID
+	alias := Alias(prepared.RunID)
 	knownHosts := filepath.Join(store.runRoot(prepared.RunID), "known_hosts")
 	configFile := filepath.Join(store.runRoot(prepared.RunID), "ssh.config")
 	wroteKnownHosts := false

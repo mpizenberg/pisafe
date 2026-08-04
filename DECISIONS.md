@@ -27,8 +27,27 @@ history holds them. New entries are appended in full.
   would disappear across stop/resume and need a second process-lifecycle
   mechanism.
 - PiSafe writes one strict SSH config fragment per run and never edits the
-  user's global SSH or Zed settings: `pisafe run` prints the exact command for
-  Zed's one-time "Connect New Server" flow, which supports `-F`.
+  user's SSH configuration. `pisafe zed` does write Zed's list of saved
+  connections, because Zed passes `ssh` nothing but what such an entry carries
+  and a run's alias resolves only through that fragment. The alternative, one
+  `Include` line in `~/.ssh/config`, was rejected although it is a single
+  idempotent edit that would serve every SSH client at once: it makes every run
+  alias resolvable to everything on the Mac, and the file it edits is the one
+  users guard most.
+- Zed's settings are edited by splicing the one value that changes, never by
+  re-encoding the file: they are JSON with comments, and a round-trip through an
+  encoder would delete the user's. An entry whose host is already saved is left
+  exactly as found, so what Zed records in it stays the user's.
+- A run's saved connection is written when `pisafe zed` opens the run and
+  removed when `discard` or `gc` reclaims it, giving it the lifetime of the SSH
+  fragment it points at. Writing it at `pisafe run` instead would put an entry
+  in Zed's settings for people who never open Zed.
+- `pisafe zed` waits half a second after saving a connection before handing the
+  run to Zed. Zed rereads its settings from a file watcher and offers nothing to
+  synchronize against, and without the wait the first open of a run reaches
+  `ssh` under an unresolvable host name — measured, not assumed: Zed applies a
+  new connection's arguments at a 100ms delay and not at none. Removing the wait
+  brings that first-open failure back.
 - The output and forward chains accept `ct state established,related` like the
   input chain always has. Live testing showed the broker handshake dying
   because sshd's SYN-ACK from `192.0.2.1:18080` carries the client's ephemeral
