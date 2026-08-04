@@ -363,11 +363,18 @@ func TestConnectArgvRunsInTheWorkspaceWithATerminalOnlyWhenInteractive(t *testin
 	// A redirect written on the pisafe command line has to survive as syntax:
 	// quoting it per word would send the run a program with that name.
 	piped := connectArgv(manifest, []string{"cat > cf-analytics.json"}, false)
-	if piped[len(piped)-1] != `cd '/work/my project' && exec cat > cf-analytics.json` {
+	if piped[len(piped)-1] != `cd '/work/my project' && cat > cf-analytics.json` {
 		t.Fatalf("remote command = %q", piped[len(piped)-1])
 	}
 	if !slices.Contains(piped, "-T") || slices.Contains(piped, "-t") {
 		t.Fatalf("a redirected copy asked for a terminal: %#v", piped)
+	}
+
+	// Every command of a list has to reach the run: an exec would run the first
+	// and drop the rest, and would refuse a variable assignment outright.
+	list := connectArgv(manifest, []string{"npm", "test;", "CI=1", "npm", "run", "build"}, false)
+	if list[len(list)-1] != `cd '/work/my project' && npm test; CI=1 npm run build` {
+		t.Fatalf("remote command = %q", list[len(list)-1])
 	}
 }
 

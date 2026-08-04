@@ -393,6 +393,13 @@ chooses between them in Pi's own model list rather than through a pisafe
 command. One relay serves them all: the provider's name leads the path, and the
 run capability authorizes the run rather than any one provider.
 
+Which of those models a run opens on is pisafe's to say, because Pi's own
+per-provider defaults are keyed by Pi's provider names and pisafe's are not
+among them. A run is told to open on the model pisafe prefers, at the reasoning
+effort it prefers, wherever a configured upstream offers it; where none does,
+the choice goes back to Pi. What a run then chooses for itself is the run's own:
+the settings a resume writes fill in only what the run has not answered.
+
 The broker lives on the Mac, which the firewall denies, so its path into runs is
 explicit and narrow: the controller opens one reverse SSH relay into the VM, the
 VM exposes a single dedicated relay address and port to containers — the

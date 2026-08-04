@@ -631,11 +631,11 @@ func (spec Spec) MaterializeArgs(projectDirectory string) ([]string, error) {
 	}, nil
 }
 
-// ConfigureInferenceArgs installs the Pi provider configuration piped through
-// stdin into the run home. It runs after activation and resume so a fresh
-// capability always replaces the previous one.
-func (spec Spec) ConfigureInferenceArgs() ([]string, error) {
-	return spec.configureArgs("configure-inference")
+// ConfigureModelsArgs installs the models a run may reach and the one it opens
+// on, piped through stdin into the run home. It runs after activation and
+// resume so a fresh capability always replaces the previous one.
+func (spec Spec) ConfigureModelsArgs() ([]string, error) {
+	return spec.configureArgs("configure-models")
 }
 
 // ConfigureIdentityArgs installs the Git identity piped through stdin into the

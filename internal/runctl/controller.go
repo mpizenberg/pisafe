@@ -75,11 +75,11 @@ type SSHStore interface {
 	Remove(string) error
 }
 
-// InferenceConfig renders the run-side Pi provider configuration around one
-// run-scoped capability. A nil InferenceConfig means no provider is
-// configured yet; the capability is still issued and rotated.
+// InferenceConfig renders the run-side Pi configuration around one run-scoped
+// capability. A nil InferenceConfig means no provider is configured yet; the
+// capability is still issued and rotated.
 type InferenceConfig interface {
-	ModelsJSON(capability string) ([]byte, error)
+	RunConfiguration(capability string) ([]byte, error)
 }
 
 type Controller struct {
@@ -287,7 +287,7 @@ func (controller Controller) StartPrepared(
 	if err != nil {
 		return runstate.Manifest{}, err
 	}
-	if err := controller.configureInference(ctx, spec, capability); err != nil {
+	if err := controller.configureModels(ctx, spec, capability); err != nil {
 		return runstate.Manifest{}, err
 	}
 
@@ -355,10 +355,10 @@ func (controller Controller) configureProfile(
 	return nil
 }
 
-// configureInference writes the run's models.json when a provider is
-// configured. Without one, the run simply has no Pi provider entry until the
-// next resume after configuration.
-func (controller Controller) configureInference(
+// configureModels tells the run which providers it may reach and which model to
+// open on, when a provider is configured. Without one, the run simply has no Pi
+// provider entry until the next resume after configuration.
+func (controller Controller) configureModels(
 	ctx context.Context,
 	spec runcontainer.Spec,
 	capability string,
@@ -366,11 +366,11 @@ func (controller Controller) configureInference(
 	if controller.inference == nil {
 		return nil
 	}
-	content, err := controller.inference.ModelsJSON(capability)
+	content, err := controller.inference.RunConfiguration(capability)
 	if err != nil {
 		return fmt.Errorf("render run inference configuration: %w", err)
 	}
-	args, err := spec.ConfigureInferenceArgs()
+	args, err := spec.ConfigureModelsArgs()
 	if err != nil {
 		return err
 	}

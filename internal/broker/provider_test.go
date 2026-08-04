@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/mpizenberg/pisafe/internal/piagent"
 )
 
 func testCapability() string {
@@ -80,7 +82,7 @@ func TestCanonicalPathAndEndpointPerAPI(t *testing.T) {
 // A catalog that cannot be routed must never reach a run: the name is what
 // separates two upstreams, and a run configured with an ambiguous one would
 // send a request to whichever provider happened to be checked first.
-func TestModelsJSONRefusesACatalogNoRunCouldUse(t *testing.T) {
+func TestRunConfigurationRefusesACatalogNoRunCouldUse(t *testing.T) {
 	provider := testProvider(t, "https://upstream.example", APIAnthropicMessages)
 	unnamed := provider
 	unnamed.Name = "Not A Name"
@@ -92,19 +94,19 @@ func TestModelsJSONRefusesACatalogNoRunCouldUse(t *testing.T) {
 		"no models":          {empty},
 		"one name twice":     {provider, provider},
 	} {
-		if _, err := catalog.ModelsJSON(testCapability()); err == nil {
+		if _, err := catalog.RunConfiguration(testCapability()); err == nil {
 			t.Errorf("%s was accepted", name)
 		}
 	}
 }
 
-func TestModelsJSONContainsOnlyTheRunCapability(t *testing.T) {
+func TestModelsContainOnlyTheRunCapability(t *testing.T) {
 	provider := testProvider(t, "https://api.anthropic.com", APIAnthropicMessages)
-	if _, err := (Catalog{provider}).ModelsJSON("garbage"); err == nil {
+	if _, err := (Catalog{provider}).modelsJSON("garbage"); err == nil {
 		t.Fatal("invalid capability was accepted")
 	}
 	provider.Models = testModels("claude-x")
-	content, err := (Catalog{provider}).ModelsJSON(testCapability())
+	content, err := (Catalog{provider}).modelsJSON(testCapability())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +139,7 @@ func TestModelsJSONContainsOnlyTheRunCapability(t *testing.T) {
 
 	// The OpenAI clients expect the /v1 prefix inside the base URL.
 	openai := namedProvider(t, "second", "https://api.openai.com", APIOpenAIResponses, "other-secret")
-	content, err = (Catalog{provider, openai}).ModelsJSON(testCapability())
+	content, err = (Catalog{provider, openai}).modelsJSON(testCapability())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,9 +160,9 @@ func TestModelsJSONContainsOnlyTheRunCapability(t *testing.T) {
 // The pinned Pi Codex client requires a JWT-shaped apiKey carrying a
 // chatgpt_account_id claim it can decode with atob, and appends
 // /codex/responses to the base URL itself.
-func TestModelsJSONWrapsCodexCapabilityAsJWT(t *testing.T) {
+func TestModelsWrapTheCodexCapabilityAsJWT(t *testing.T) {
 	provider := testProvider(t, "https://chatgpt.com/backend-api", APIOpenAICodexResponses)
-	content, err := (Catalog{provider}).ModelsJSON(testCapability())
+	content, err := (Catalog{provider}).modelsJSON(testCapability())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,5 +198,56 @@ func TestModelsJSONWrapsCodexCapabilityAsJWT(t *testing.T) {
 	}
 	if presentedCapability(entry.APIKey) != testCapability() {
 		t.Fatalf("unwrapped = %q", presentedCapability(entry.APIKey))
+	}
+}
+
+// What a run opens on is pisafe's to say, because Pi's own table of defaults is
+// keyed by names pisafe does not use. Where the preferred model is offered by
+// no configured upstream, the choice goes back to Pi rather than to an
+// arbitrary entry of somebody's catalog.
+func TestRunConfigurationOpensOnThePreferredModelWhereverItIsOffered(t *testing.T) {
+	elsewhere := testProvider(t, "https://upstream.example", APIAnthropicMessages)
+	subscription := namedProvider(
+		t, "chatgpt", "https://chatgpt.com/backend-api", APIOpenAICodexResponses, "session",
+	)
+	subscription.Models = testModels("gpt-1", preferredModel, "gpt-2")
+	keyed := namedProvider(t, "openai", "https://api.openai.com", APIOpenAIResponses, "key")
+	keyed.Models = testModels(preferredModel)
+
+	for name, expected := range map[string]piagent.Selection{
+		"unoffered": {},
+		"offered": {
+			Provider: "chatgpt",
+			Model:    preferredModel,
+			Thinking: preferredThinking,
+		},
+	} {
+		catalog := Catalog{elsewhere}
+		if name == "offered" {
+			catalog = Catalog{elsewhere, subscription, keyed}
+		}
+		content, err := catalog.RunConfiguration(testCapability())
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var configuration piagent.Configuration
+		if err := json.Unmarshal(content, &configuration); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if configuration.Default != expected {
+			t.Errorf("%s: default = %#v, want %#v", name, configuration.Default, expected)
+		}
+		if err := configuration.Validate(); err != nil {
+			t.Errorf("%s: a run was configured with %v", name, err)
+		}
+		var models struct {
+			Providers map[string]json.RawMessage `json:"providers"`
+		}
+		if err := json.Unmarshal(configuration.Models, &models); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(models.Providers) != len(catalog) {
+			t.Errorf("%s: a run was told about %d provider(s)", name, len(models.Providers))
+		}
 	}
 }

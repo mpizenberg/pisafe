@@ -18,6 +18,7 @@ import (
 	"syscall"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/piagent"
 	"github.com/mpizenberg/pisafe/internal/profile"
 	"github.com/mpizenberg/pisafe/internal/runcopy"
 	"github.com/mpizenberg/pisafe/internal/runssh"
@@ -29,11 +30,10 @@ const (
 	// the run's own workspace is. The controller composes what this helper is
 	// told, and the helper still refuses a path outside either, so no
 	// configuration can point Pi at something that is not the run's.
-	profileRoot           = "/opt/pisafe/profile"
-	workRoot              = "/work"
-	sshPublicKeySize      = 4096
-	modelsConfigSizeLimit = int64(1 << 20)
-	documentSizeLimit     = int64(1 << 20)
+	profileRoot       = "/opt/pisafe/profile"
+	workRoot          = "/work"
+	sshPublicKeySize  = 4096
+	documentSizeLimit = int64(1 << 20)
 )
 
 func main() {
@@ -78,11 +78,11 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 			return usageError()
 		}
 		return configureSSH(ctx, runHome, in, out, generateHostKey)
-	case "configure-inference":
+	case "configure-models":
 		if len(args) != 1 {
 			return usageError()
 		}
-		return configureInference(runHome, in)
+		return configureModels(runHome, in)
 	case "configure-identity":
 		if len(args) != 1 {
 			return usageError()
@@ -115,7 +115,7 @@ func usageError() error {
 			"|diff <workspace>" +
 			"|export <workspace> <path>" +
 			"|import <workspace> <destination> <name> <replace|refuse>" +
-			"|configure-ssh|configure-inference|configure-identity|configure-profile" +
+			"|configure-ssh|configure-models|configure-identity|configure-profile" +
 			"|serve-ssh|proxy-ssh>",
 	)
 }
@@ -167,39 +167,41 @@ func configureIdentity(ctx context.Context, home string, in io.Reader) error {
 	)
 }
 
-// configureInference replaces ~/.pi/agent/models.json with the content piped
-// from the Mac controller. It replaces atomically because resume rotates the
-// run capability while Pi may already be installed and configured. It also
-// pins Pi's transport to SSE: the default auto transport first dials a
-// WebSocket, which the broker's HTTP relay cannot speak.
-func configureInference(home string, in io.Reader) error {
-	content, err := io.ReadAll(io.LimitReader(in, modelsConfigSizeLimit+1))
+// configureModels replaces ~/.pi/agent/models.json with the providers the Mac
+// controller sent and names the model a run opens on. It replaces atomically
+// because resume rotates the run capability while Pi may already be installed
+// and configured. It also pins Pi's transport to SSE: the default auto
+// transport first dials a WebSocket, which the broker's HTTP relay cannot
+// speak.
+func configureModels(home string, in io.Reader) error {
+	configuration, err := decodeControllerDocument[piagent.Configuration](
+		in,
+		"inference configuration",
+	)
 	if err != nil {
-		return fmt.Errorf("read models configuration: %w", err)
+		return err
 	}
-	if int64(len(content)) > modelsConfigSizeLimit {
-		return errors.New("models configuration exceeds size limit")
+	if err := configuration.Validate(); err != nil {
+		return err
 	}
-	decoder := json.NewDecoder(bytes.NewReader(content))
-	var parsed map[string]any
-	if err := decoder.Decode(&parsed); err != nil {
-		return fmt.Errorf("models configuration is not a JSON object: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return errors.New("models configuration contains trailing data")
+	models, err := configuration.ModelsFile()
+	if err != nil {
+		return err
 	}
 
 	agentDirectory := filepath.Join(filepath.Clean(home), ".pi", "agent")
 	if err := os.MkdirAll(agentDirectory, 0o700); err != nil {
 		return fmt.Errorf("create Pi agent directory: %w", err)
 	}
-	if err := writeAgentFile(agentDirectory, "models.json", content); err != nil {
+	if err := writeAgentFile(agentDirectory, "models.json", models); err != nil {
 		return err
 	}
 	settings, err := updateAgentSettings(
 		filepath.Join(agentDirectory, "settings.json"),
-		func(settings map[string]any) { settings["transport"] = "sse" },
+		func(settings map[string]any) {
+			settings["transport"] = "sse"
+			openOn(settings, configuration.Default)
+		},
 	)
 	if err != nil {
 		return err
@@ -208,6 +210,24 @@ func configureInference(home string, in io.Reader) error {
 		return nil
 	}
 	return writeAgentFile(agentDirectory, "settings.json", settings)
+}
+
+// openOn names the model a run starts on, leaving alone anything the run has
+// already answered for itself: a model chosen inside a run belongs to the run,
+// and resume configures the same file again.
+func openOn(settings map[string]any, selection piagent.Selection) {
+	if !selection.Named() {
+		return
+	}
+	for key, value := range map[string]string{
+		"defaultProvider":      selection.Provider,
+		"defaultModel":         selection.Model,
+		"defaultThinkingLevel": selection.Thinking,
+	} {
+		if _, answered := settings[key]; !answered {
+			settings[key] = value
+		}
+	}
 }
 
 // configureProfile tells Pi which packages the read-only profile offers and
@@ -322,7 +342,7 @@ func updateAgentSettings(path string, update func(map[string]any)) ([]byte, erro
 // that loses a setting the agent corrupted.
 func readAgentDocument(path string) map[string]any {
 	existing, err := os.ReadFile(path)
-	if err != nil || int64(len(existing)) > modelsConfigSizeLimit {
+	if err != nil || int64(len(existing)) > documentSizeLimit {
 		return map[string]any{}
 	}
 	var parsed map[string]any

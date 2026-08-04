@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/mpizenberg/pisafe/internal/lima"
+	"github.com/mpizenberg/pisafe/internal/piagent"
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
@@ -135,10 +136,67 @@ func (provider Provider) Describe() string {
 // credential each is answered with never leaves the Mac either way.
 type Catalog []Provider
 
-// ModelsJSON renders the ~/.pi/agent/models.json content for one run, one
-// entry per configured upstream. The only secret it contains is that run's
-// revocable capability.
-func (catalog Catalog) ModelsJSON(capability string) ([]byte, error) {
+// preferredModel is the model runs open on, at preferredThinking effort,
+// wherever it is offered. Pi names a default of its own otherwise, from a table
+// keyed by its own provider names — which are not pisafe's, so a subscription
+// run would open on whatever its catalog happens to list first.
+const (
+	preferredModel    = "gpt-5.6-sol"
+	preferredThinking = "high"
+)
+
+// RunConfiguration renders everything one run is told about inference: the
+// providers it may reach and the model it opens on. The only secret it
+// contains is that run's revocable capability.
+func (catalog Catalog) RunConfiguration(capability string) ([]byte, error) {
+	models, err := catalog.modelsJSON(capability)
+	if err != nil {
+		return nil, err
+	}
+	configuration := piagent.Configuration{Models: models, Default: catalog.defaultSelection()}
+	if err := configuration.Validate(); err != nil {
+		return nil, err
+	}
+	encoded, err := json.Marshal(configuration)
+	if err != nil {
+		return nil, fmt.Errorf("encode run inference configuration: %w", err)
+	}
+	return encoded, nil
+}
+
+// defaultSelection is what a run opens on. The first configured upstream
+// offering the preferred model decides, because a Mac with several logins has
+// no better order to prefer them in than the one it lists them in.
+func (catalog Catalog) defaultSelection() piagent.Selection {
+	for _, provider := range catalog {
+		if !provider.offers(preferredModel) {
+			continue
+		}
+		return piagent.Selection{
+			Provider: provider.Name,
+			Model:    preferredModel,
+			Thinking: preferredThinking,
+		}
+	}
+	return piagent.Selection{}
+}
+
+// offers reports whether this upstream serves a model under that id.
+func (provider Provider) offers(id string) bool {
+	for _, model := range provider.Models {
+		var definition struct {
+			ID string `json:"id"`
+		}
+		if json.Unmarshal(model, &definition) == nil && definition.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// modelsJSON renders the ~/.pi/agent/models.json content for one run, one
+// entry per configured upstream.
+func (catalog Catalog) modelsJSON(capability string) ([]byte, error) {
 	if !runstate.ValidInferenceCapability(capability) {
 		return nil, errors.New("models configuration requires a valid run capability")
 	}
@@ -176,11 +234,11 @@ func (catalog Catalog) ModelsJSON(capability string) ([]byte, error) {
 	content := struct {
 		Providers map[string]providerEntry `json:"providers"`
 	}{Providers: entries}
-	encoded, err := json.MarshalIndent(content, "", "  ")
+	encoded, err := json.Marshal(content)
 	if err != nil {
 		return nil, fmt.Errorf("encode models configuration: %w", err)
 	}
-	return append(encoded, '\n'), nil
+	return encoded, nil
 }
 
 // Describe summarizes each configured upstream without exposing credentials.

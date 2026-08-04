@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/piagent"
 	"github.com/mpizenberg/pisafe/internal/profile"
 )
 
@@ -503,18 +504,30 @@ func TestConfigureSSHFailsClosed(t *testing.T) {
 	}
 }
 
-func TestConfigureInferenceInstallsAndReplacesModelsConfig(t *testing.T) {
+func TestConfigureModelsInstallsAndReplacesModelsConfig(t *testing.T) {
 	home := t.TempDir()
-	first := `{"providers":{"pisafe":{"apiKey":"first"}}}`
-	if err := configureInference(home, strings.NewReader(first)); err != nil {
+	target := filepath.Join(home, ".pi", "agent", "models.json")
+	// A run's own copy is indented whatever the wire carried, because the run is
+	// where somebody reads it to find out what their agent was offered.
+	installed := func(capability string) string {
+		return `{
+  "providers": {
+    "pisafe": {
+      "apiKey": "` + capability + `"
+    }
+  }
+}
+`
+	}
+
+	if err := configureModels(home, inferenceDocument(t, capabilityModels("first"))); err != nil {
 		t.Fatal(err)
 	}
-	target := filepath.Join(home, ".pi", "agent", "models.json")
 	content, err := os.ReadFile(target)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(content) != first {
+	if string(content) != installed("first") {
 		t.Fatalf("models.json = %q", content)
 	}
 	info, err := os.Stat(target)
@@ -525,17 +538,37 @@ func TestConfigureInferenceInstallsAndReplacesModelsConfig(t *testing.T) {
 		t.Fatalf("models.json mode = %#o", info.Mode().Perm())
 	}
 
-	second := `{"providers":{"pisafe":{"apiKey":"second"}}}`
-	if err := configureInference(home, strings.NewReader(second)); err != nil {
+	if err := configureModels(home, inferenceDocument(t, capabilityModels("second"))); err != nil {
 		t.Fatal(err)
 	}
 	content, err = os.ReadFile(target)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(content) != second {
+	if string(content) != installed("second") {
 		t.Fatalf("replaced models.json = %q", content)
 	}
+}
+
+func capabilityModels(capability string) json.RawMessage {
+	return json.RawMessage(`{"providers":{"pisafe":{"apiKey":"` + capability + `"}}}`)
+}
+
+func inferenceDocument(
+	t *testing.T,
+	models json.RawMessage,
+	selection ...piagent.Selection,
+) io.Reader {
+	t.Helper()
+	configuration := piagent.Configuration{Models: models}
+	if len(selection) == 1 {
+		configuration.Default = selection[0]
+	}
+	document, err := json.Marshal(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bytes.NewReader(document)
 }
 
 func TestConfigureIdentityGivesTheRunAnAuthor(t *testing.T) {
@@ -574,12 +607,12 @@ func TestConfigureIdentityGivesTheRunAnAuthor(t *testing.T) {
 	}
 }
 
-func TestConfigureInferencePinsSSETransportPreservingSettings(t *testing.T) {
+func TestConfigureModelsPinsSSETransportPreservingSettings(t *testing.T) {
 	home := t.TempDir()
-	models := `{"providers":{}}`
+	models := capabilityModels("run-capability")
 	settingsPath := filepath.Join(home, ".pi", "agent", "settings.json")
 
-	if err := configureInference(home, strings.NewReader(models)); err != nil {
+	if err := configureModels(home, inferenceDocument(t, models)); err != nil {
 		t.Fatal(err)
 	}
 	assertSettings := func(expected map[string]any) {
@@ -618,7 +651,7 @@ func TestConfigureInferencePinsSSETransportPreservingSettings(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if err := configureInference(home, strings.NewReader(models)); err != nil {
+	if err := configureModels(home, inferenceDocument(t, models)); err != nil {
 		t.Fatal(err)
 	}
 	assertSettings(map[string]any{"theme": "dark", "transport": "sse"})
@@ -627,10 +660,74 @@ func TestConfigureInferencePinsSSETransportPreservingSettings(t *testing.T) {
 	if err := os.WriteFile(settingsPath, []byte("{corrupt"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := configureInference(home, strings.NewReader(models)); err != nil {
+	if err := configureModels(home, inferenceDocument(t, models)); err != nil {
 		t.Fatal(err)
 	}
 	assertSettings(map[string]any{"transport": "sse"})
+}
+
+// A run opens on the model pisafe named, so that what it starts on does not
+// depend on a table Pi keys by its own provider names. What the run then
+// chooses for itself is the run's, and resume configures the same file again.
+func TestConfigureModelsNamesTheModelARunOpensOnWithoutOverridingIt(t *testing.T) {
+	home := t.TempDir()
+	models := capabilityModels("run-capability")
+	selection := piagent.Selection{
+		Provider: "pisafe",
+		Model:    "gpt-5.6-sol",
+		Thinking: "high",
+	}
+	settingsPath := filepath.Join(home, ".pi", "agent", "settings.json")
+	read := func() map[string]any {
+		t.Helper()
+		content, err := os.ReadFile(settingsPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var parsed map[string]any
+		if err := json.Unmarshal(content, &parsed); err != nil {
+			t.Fatal(err)
+		}
+		return parsed
+	}
+
+	if err := configureModels(home, inferenceDocument(t, models, selection)); err != nil {
+		t.Fatal(err)
+	}
+	settings := read()
+	if settings["defaultProvider"] != "pisafe" ||
+		settings["defaultModel"] != "gpt-5.6-sol" ||
+		settings["defaultThinkingLevel"] != "high" {
+		t.Fatalf("settings = %v", settings)
+	}
+
+	if err := os.WriteFile(
+		settingsPath,
+		[]byte(`{"defaultProvider":"pisafe","defaultModel":"gpt-5.4","defaultThinkingLevel":"low"}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := configureModels(home, inferenceDocument(t, models, selection)); err != nil {
+		t.Fatal(err)
+	}
+	settings = read()
+	if settings["defaultModel"] != "gpt-5.4" || settings["defaultThinkingLevel"] != "low" {
+		t.Fatalf("resume overrode what the run chose: %v", settings)
+	}
+
+	// A Mac with no preference leaves the choice to Pi rather than writing one.
+	bare := t.TempDir()
+	if err := configureModels(bare, inferenceDocument(t, models)); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(bare, ".pi", "agent", "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(content), "defaultModel") {
+		t.Fatalf("settings = %s", content)
+	}
 }
 
 func TestConfigureProfileNamesThePackagesAndTrustsTheWorkspace(t *testing.T) {
@@ -745,15 +842,23 @@ func TestConfigureProfileRefusesWhatIsNotTheRuns(t *testing.T) {
 	}
 }
 
-func TestConfigureInferenceFailsClosed(t *testing.T) {
+func TestConfigureModelsFailsClosed(t *testing.T) {
 	for name, input := range map[string]string{
-		"not json":   "providers",
-		"trailing":   `{"providers":{}} extra`,
-		"oversize":   `{"pad":"` + strings.Repeat("x", int(modelsConfigSizeLimit)) + `"}`,
-		"non-object": `["providers"]`,
+		"not json":      "providers",
+		"trailing":      `{"models":{"providers":{"pisafe":{}}}} extra`,
+		"oversize":      `{"models":{"providers":{"pisafe":{"apiKey":"` + strings.Repeat("x", int(documentSizeLimit)) + `"}}}}`,
+		"unknown field": `{"models":{"providers":{"pisafe":{}}},"transport":"auto"}`,
+		"non-object":    `{"models":["providers"]}`,
+		"no provider":   `{"models":{"providers":{}}}`,
+		"default elsewhere": `{"models":{"providers":{"pisafe":{}}},` +
+			`"default":{"provider":"other","model":"gpt-5.6-sol","thinking":"high"}}`,
+		"default without a model": `{"models":{"providers":{"pisafe":{}}},` +
+			`"default":{"provider":"pisafe","thinking":"high"}}`,
+		"unknown effort": `{"models":{"providers":{"pisafe":{}}},` +
+			`"default":{"provider":"pisafe","model":"gpt-5.6-sol","thinking":"deep"}}`,
 	} {
 		home := t.TempDir()
-		if err := configureInference(home, strings.NewReader(input)); err == nil {
+		if err := configureModels(home, strings.NewReader(input)); err == nil {
 			t.Errorf("%s was accepted", name)
 		}
 		if _, err := os.Stat(filepath.Join(home, ".pi", "agent", "models.json")); err == nil {

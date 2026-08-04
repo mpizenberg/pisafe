@@ -168,7 +168,7 @@ func (controller Controller) Resume(
 		err = controller.configureProfile(ctx, spec, manifest.Workspace)
 	}
 	if err == nil {
-		err = controller.configureInference(ctx, spec, capability)
+		err = controller.configureModels(ctx, spec, capability)
 	}
 	if err != nil {
 		cleanupContext, cancelCleanup := lifecycleCleanupContext(ctx)

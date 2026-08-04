@@ -83,11 +83,13 @@ func runConnect(ctx context.Context, args []string, out io.Writer) error {
 // words are joined and parsed by the run's own shell, the way ssh itself passes
 // a command along, so a redirect or a pipe written on the pisafe command line
 // means in the run what it would mean here. Only the workspace path is quoted,
-// because it is the one word pisafe supplies.
+// because it is the one word pisafe supplies. A shell replaces the shell that
+// started it; a command does not, because exec would run the first command of
+// a list and silently drop the rest.
 func connectArgv(manifest runstate.Manifest, command []string, interactive bool) []string {
-	remote := "cd " + shellQuote(manifest.Workspace) + " && exec "
+	remote := "cd " + shellQuote(manifest.Workspace) + " && "
 	if len(command) == 0 {
-		remote += `"$SHELL" -l`
+		remote += `exec "$SHELL" -l`
 	} else {
 		remote += strings.Join(command, " ")
 	}

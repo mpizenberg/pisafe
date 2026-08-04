@@ -294,10 +294,19 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   dedicated `ssh -N -R` child with `ExitOnForwardFailure` and multiplexing
   disabled, confirming reachability from inside the VM. The listener dies with
   the process and a second broker fails loudly.
-- Run creation and resume exec `pisafe-guest configure-inference`, which
-  atomically installs a validated mode-0600 `~/.pi/agent/models.json` whose
-  `apiKey` is the current capability, and merges `transport: "sse"` into the
-  run's Pi settings. Base URLs were fixed against the pinned clients:
+- Run creation and resume exec `pisafe-guest configure-models`, which atomically
+  installs a validated mode-0600 `~/.pi/agent/models.json` whose `apiKey` is the
+  current capability, and merges `transport: "sse"` into the run's Pi settings.
+  It also names the model the run opens on — `gpt-5.6-sol` at `high` effort,
+  from the first configured upstream offering it — as `defaultProvider`,
+  `defaultModel`, and `defaultThinkingLevel`, filling in only what the run has
+  not answered so a model chosen inside a run survives resume. Pi's own
+  per-provider defaults are keyed by its provider names, which are not pisafe's,
+  so without this a subscription run opened on whatever its catalog listed
+  first. The document is `internal/piagent.Configuration`, shared by the
+  controller and the guest; a run image predating it fails the unknown verb
+  loudly rather than writing a `models.json` Pi cannot read. Base URLs were
+  fixed against the pinned clients:
   `http://192.0.2.1:18080` for anthropic-messages and Codex,
   `http://192.0.2.1:18080/v1` for the standard OpenAI APIs. The capability is
   accepted as `x-api-key`, a Bearer token, or the JWT-wrapped Bearer token the
@@ -504,7 +513,10 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   `exec pi` ends the session Pi was started in, so a shell reaches Pi for free
   while Pi reaches a shell only by reconnecting. Command words are joined and
   parsed by the run's own shell, the way ssh passes a command along, so a
-  redirect or a pipe means in the run what it means on the Mac. A pty is asked
+  redirect, a pipe, a command list, or a variable assignment means in the run
+  what it means on the Mac. Only the shell replaces the shell that started it: a
+  command is left in it, because an `exec` would run the first command of a list
+  and drop the rest. A pty is asked
   for only when stdin and stdout are both terminals, which is what lets an
   interactive Pi and a redirected stream share one command. It replaces its own
   process with `ssh`, so signals, window resizes, and the exit status are the
@@ -632,8 +644,9 @@ with a fake VM boundary:
   The store's test covers activation filling submodule baselines in and
   refusing a snapshot that renames or moves one.
 - **connect**: the exact SSH argument vector for a shell and for a command, with
-  a workspace path that needs quoting for the remote shell and a redirect that
-  must survive as syntax rather than become a program name; a pty asked for only
+  a workspace path that needs quoting for the remote shell, a redirect that must
+  survive as syntax rather than become a program name, and a command list whose
+  every command has to reach the run; a pty asked for only
   when both ends are terminals; everything after `--` kept for the run including
   words pisafe would otherwise read as its own; and every inactive run refused
   before anything launches, whether asked through `connect` or `zed`, with a

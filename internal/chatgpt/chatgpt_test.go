@@ -16,6 +16,8 @@ import (
 
 	"github.com/mpizenberg/pisafe/internal/broker"
 	"github.com/mpizenberg/pisafe/internal/keychain"
+	"github.com/mpizenberg/pisafe/internal/piagent"
+	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
 func testAccessToken(accountID string) string {
@@ -332,5 +334,30 @@ func TestProviderUsesEmbeddedCatalogWithoutRoutingOverrides(t *testing.T) {
 				t.Errorf("model %v carries %q, which could route around the broker", model["id"], forbidden)
 			}
 		}
+	}
+}
+
+// pisafe names the model a run opens on, which holds only while the embedded
+// catalog still offers it: a re-sync that dropped the id would hand the choice
+// back to Pi, whose own table does not know this provider by pisafe's name.
+func TestASubscriptionRunOpensOnAModelPisafeNames(t *testing.T) {
+	provider, err := Provider(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capability, err := runstate.NewInferenceCapability()
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := (broker.Catalog{*provider}).RunConfiguration(capability)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var configuration piagent.Configuration
+	if err := json.Unmarshal(content, &configuration); err != nil {
+		t.Fatal(err)
+	}
+	if configuration.Default.Provider != Name || !configuration.Default.Named() {
+		t.Fatalf("a run opens on %#v", configuration.Default)
 	}
 }

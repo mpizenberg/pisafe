@@ -70,17 +70,25 @@ history holds them. New entries are appended in full.
   is that `connect` can print nothing afterwards.
 - `connect` refuses a stopped run and names `pisafe resume` instead of resuming
   it. Resuming spends the run's wall-clock budget, which stays an explicit act.
+- A command given to `connect` is left in the remote shell rather than `exec`ed
+  by it. The `exec` was an optimization — one process fewer, signals reaching
+  the command directly — but it silently truncated `pisafe connect -- 'a; b'`
+  to its first command and refused a variable assignment outright, both of
+  which the documented promise that the run's own shell parses the words says
+  should work. An interactive shell is still `exec`ed, because it is one
+  command and it is the whole session.
 - `connect` opens a shell by default and takes an optional `-- COMMAND`, where
   it used to start Pi by default and open a shell under `--shell`. Keeping Pi
   as the default and adding a `--pi` flag was the alternative. The two are not
-  symmetric: the remote command is `exec`ed, so quitting Pi ends the SSH session
-  and reaching a shell costs a reconnection, while from a shell Pi is a child
-  and quitting it returns to the run's prompt. The shell default reaches both
-  states and the Pi default reaches one. It also matches what every other
-  command treats a run as — a machine that is worked in, whose ports `forward`
-  exposes and whose files `cp` moves — rather than a wrapper around one
-  program. The cost is that a bare prompt does not announce the agent, paid
-  with one printed line naming `pi`. Reversible: one function and its help text.
+  symmetric: the remote command is the whole session, so quitting Pi ends the
+  SSH session and reaching a shell costs a reconnection, while from a shell Pi
+  is a child and quitting it returns to the run's prompt. The shell default
+  reaches both states and the Pi default reaches one. It also matches what
+  every other command treats a run as — a machine that is worked in, whose
+  ports `forward` exposes and whose files `cp` moves — rather than a wrapper
+  around one program. The cost is that a bare prompt does not announce the
+  agent, paid with one printed line naming `pi`. Reversible: one function and
+  its help text.
 - A command after `--` is joined with spaces and parsed by the run's own shell,
   not quoted word by word. Quoting each word is safer against surprise splitting
   but would send the run a program named `cat > file`, and redirects and pipes
@@ -957,6 +965,37 @@ history holds them. New entries are appended in full.
 - A key is read only when a request is relayed. Starting a run renders
   models.json, which contains no upstream credential, so run creation touches no
   secret at all.
+- pisafe names the model a run opens on, rather than leaving it to Pi. Pi picks
+  from a table keyed by its own provider names, which do not include pisafe's,
+  so a subscription run opened on whatever the embedded catalog happened to list
+  first. Reordering the catalog so the wanted model leads it was the cheaper
+  alternative and was not taken: it is invisible, it says nothing about
+  reasoning effort, and a catalog re-sync would undo it. Renaming the provider
+  to `openai-codex` so Pi's table applies was refused outright — that name is
+  also a relay path segment and a Keychain account, and it collides with a
+  provider Pi already defines.
+- The preference is one model id and one effort held in the broker and matched
+  against each configured catalog, not a default recorded per provider. The
+  first upstream offering the model decides, which makes "the default exists"
+  intrinsic rather than an invariant to check, and leaves a Mac whose logins
+  offer nothing preferred with Pi's own choice instead of a broken name.
+- The run-side defaults are filled in only where the run has not answered. Pi
+  writes the same keys when a model is chosen inside a run, and resume
+  configures the same file again, so overwriting them would undo a choice the
+  run made. The cost is that changing the preferred model does not reach a run
+  that already recorded one.
+- What the controller pipes into a run is a document holding both the models and
+  the model to open on — `internal/piagent.Configuration` — rather than
+  `models.json` alone with the default carried some other way. It is a leaf
+  package because the guest binary must not link the Mac's VM manager, which
+  the broker does.
+- The guest verb was renamed from `configure-inference` to `configure-models`
+  in the same change. A run keeps the image it was created with, so a run
+  created before this change is resumed by the old helper, which would accept
+  the new document as a JSON object and write it whole into `models.json` —
+  leaving Pi with no providers and nothing to report. An unknown verb fails
+  loudly instead. Reversibility note: runs created before this change cannot be
+  resumed after it; they can still be diffed, applied, and discarded.
 
 ## Documentation
 

@@ -515,7 +515,7 @@ func TestStartPreparedActivatesOnlyAfterMaterialization(t *testing.T) {
 		"rm -rf /work/stage",
 		"remove-stage",
 		"pisafe-guest configure-identity",
-		"pisafe-guest configure-inference",
+		"pisafe-guest configure-models",
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Errorf("calls lack %q:\n%s", expected, joined)
@@ -534,7 +534,7 @@ func TestStartPreparedActivatesOnlyAfterMaterialization(t *testing.T) {
 	if !runstate.ValidInferenceCapability(manifest.InferenceCapability) {
 		t.Fatalf("manifest capability = %q", manifest.InferenceCapability)
 	}
-	if stdin := stdinFor(backend.calls, "configure-inference"); !strings.Contains(
+	if stdin := stdinFor(backend.calls, "configure-models"); !strings.Contains(
 		stdin,
 		manifest.InferenceCapability,
 	) {
@@ -653,7 +653,7 @@ func TestLifecycleStopsAndResumesWithRemainingBudget(t *testing.T) {
 		resumed.InferenceCapability == manifest.InferenceCapability {
 		t.Fatalf("resume did not rotate the capability: %q", resumed.InferenceCapability)
 	}
-	if stdin := stdinFor(backend.calls, "configure-inference"); !strings.Contains(
+	if stdin := stdinFor(backend.calls, "configure-models"); !strings.Contains(
 		stdin,
 		resumed.InferenceCapability,
 	) {
@@ -788,8 +788,8 @@ func TestLifecycleRefusesMismatchedContainerBeforeDeletion(t *testing.T) {
 // only needs to be recognizable in the recorded podman exec stdin.
 type testInference struct{}
 
-func (testInference) ModelsJSON(capability string) ([]byte, error) {
-	return []byte(`{"providers":{"pisafe":{"apiKey":"` + capability + `"}}}`), nil
+func (testInference) RunConfiguration(capability string) ([]byte, error) {
+	return []byte(`{"models":{"providers":{"pisafe":{"apiKey":"` + capability + `"}}}}`), nil
 }
 
 func testPrepared() gitstage.PreparedStage {

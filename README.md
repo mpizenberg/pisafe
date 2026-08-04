@@ -99,6 +99,10 @@ pisafe login                 # what is logged in; runs are offered all of it
 pisafe broker                # foreground; runs have no inference without it
 ```
 
+A run opens Pi on GPT-5.6 Sol at high reasoning effort, from the first login
+that offers that model, and on Pi's own choice when none does. Pick another with
+`/model` inside the run and that run keeps it, across stop and resume.
+
 ```sh
 pisafe run [--include PATH]... [--include-unsafe PATH]...
 pisafe list

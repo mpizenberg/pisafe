@@ -10,6 +10,8 @@ import (
 
 	"github.com/mpizenberg/pisafe/internal/broker"
 	"github.com/mpizenberg/pisafe/internal/keychain"
+	"github.com/mpizenberg/pisafe/internal/piagent"
+	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
 // fakeSecrets stands in for the Keychain and counts reads, because when a key
@@ -410,5 +412,30 @@ func TestAnUnreadableRecordNamesItself(t *testing.T) {
 	}
 	if _, err := store.List(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The model pisafe opens runs on is offered by the keyed OpenAI catalog too, so
+// which login a Mac holds does not decide what its runs start on.
+func TestAKeyedOpenAIRunOpensOnAModelPisafeNames(t *testing.T) {
+	store, _ := testStore(t)
+	provider, err := store.provider(Record{Version: recordVersion, Name: "openai"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	capability, err := runstate.NewInferenceCapability()
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := (broker.Catalog{provider}).RunConfiguration(capability)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var configuration piagent.Configuration
+	if err := json.Unmarshal(content, &configuration); err != nil {
+		t.Fatal(err)
+	}
+	if configuration.Default.Provider != "openai" || !configuration.Default.Named() {
+		t.Fatalf("a run opens on %#v", configuration.Default)
 	}
 }
