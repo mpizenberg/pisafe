@@ -166,7 +166,7 @@ func printRunResult(out io.Writer, result runstart.Result, inferenceConfigured b
 	if len(result.Excluded.Untracked) != 0 || len(result.Excluded.Ignored) != 0 {
 		fmt.Fprintf(
 			out,
-			"Excluded:  %d untracked, %d ignored file(s); none were copied\n",
+			"Excluded:  %d untracked, %d ignored path(s) stayed behind\n",
 			len(result.Excluded.Untracked),
 			len(result.Excluded.Ignored),
 		)

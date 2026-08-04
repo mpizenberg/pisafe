@@ -2,7 +2,6 @@ package gitstage
 
 import (
 	"archive/tar"
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -32,70 +32,35 @@ func (selection InputSelection) empty() bool {
 	return len(selection.Include) == 0 && len(selection.Unsafe) == 0
 }
 
-// inputEntry is one selected path with the metadata the archive preserves.
+// SelectedInput is one selected path with the metadata the archive preserves.
 // Modes are normalized: only the executable bit survives.
-type inputEntry struct {
-	path       string
-	executable bool
-	link       string
-	size       int64
+type SelectedInput struct {
+	Path       string
+	Executable bool
+	Link       string
+	Size       int64
 }
 
-// SelectInputs resolves user-supplied paths against the repository, rejecting
-// anything Git already tracks, anything that leaves the repository, special
-// files, and credential-shaped names not explicitly marked unsafe.
-func SelectInputs(
-	ctx context.Context,
-	sourcePath string,
+// Select resolves user-supplied paths against what the run would otherwise not
+// receive, rejecting anything Git already tracks, anything that leaves the
+// repository, special files, and credential-shaped names not explicitly marked
+// unsafe. It also reports what stays behind once the selection is taken out, so
+// the two lists a run prints are decided together and cannot disagree.
+func (excluded ExcludedInputs) Select(
 	selection InputSelection,
-) ([]string, error) {
+) ([]SelectedInput, ExcludedInputs, error) {
 	if selection.empty() {
-		return nil, nil
+		return nil, excluded, nil
 	}
-	root, err := RepositoryRoot(ctx, sourcePath)
-	if err != nil {
-		return nil, err
-	}
-	entries, err := selectInputEntries(ctx, root, selection)
-	if err != nil {
-		return nil, err
-	}
-	paths := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		paths = append(paths, entry.path)
-	}
-	return paths, nil
-}
-
-func selectInputEntries(
-	ctx context.Context,
-	root string,
-	selection InputSelection,
-) ([]inputEntry, error) {
-	if selection.empty() {
-		return nil, nil
-	}
-	excluded, err := ListExcludedInputs(ctx, root)
-	if err != nil {
-		return nil, err
-	}
-	selectable := make(map[string]bool, len(excluded.Untracked)+len(excluded.Ignored))
-	for _, name := range excluded.Untracked {
-		selectable[name] = true
-	}
-	for _, name := range excluded.Ignored {
-		selectable[name] = true
-	}
-
-	chosen := map[string]bool{}
+	chosen, taken := map[string]bool{}, map[string]bool{}
 	for _, request := range selection.Include {
-		if err := chooseInput(root, request, selectable, chosen, false); err != nil {
-			return nil, err
+		if err := excluded.choose(request, chosen, taken, false); err != nil {
+			return nil, ExcludedInputs{}, err
 		}
 	}
 	for _, request := range selection.Unsafe {
-		if err := chooseInput(root, request, selectable, chosen, true); err != nil {
-			return nil, err
+		if err := excluded.choose(request, chosen, taken, true); err != nil {
+			return nil, ExcludedInputs{}, err
 		}
 	}
 
@@ -104,30 +69,27 @@ func selectInputEntries(
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	return describeInputs(root, names)
+	inputs, err := describeInputs(excluded.Root, names)
+	if err != nil {
+		return nil, ExcludedInputs{}, err
+	}
+	return inputs, excluded.remaining(chosen, taken), nil
 }
 
-// chooseInput expands one request into concrete selectable paths. A directory
-// contributes every selectable path beneath it.
-func chooseInput(
-	root, request string,
-	selectable, chosen map[string]bool,
+// choose expands one request into concrete files and records which excluded
+// entries it emptied.
+func (excluded ExcludedInputs) choose(
+	request string,
+	chosen, taken map[string]bool,
 	unsafe bool,
 ) error {
-	name, err := repositoryRelative(root, request)
+	name, err := repositoryRelative(excluded.Root, request)
 	if err != nil {
 		return err
 	}
-	matches := []string{}
-	if selectable[name] {
-		matches = append(matches, name)
-	} else {
-		prefix := name + "/"
-		for candidate := range selectable {
-			if strings.HasPrefix(candidate, prefix) {
-				matches = append(matches, candidate)
-			}
-		}
+	matches, err := excluded.expand(name, taken)
+	if err != nil {
+		return err
 	}
 	if len(matches) == 0 {
 		return fmt.Errorf(
@@ -147,6 +109,106 @@ func chooseInput(
 		chosen[match] = true
 	}
 	return nil
+}
+
+// expand names the files one request stands for. An entry Git collapsed into a
+// directory is read from the filesystem instead of from the listing, so a
+// request can be an entry, an ancestor of one, or a path inside one, and a
+// directory always contributes its files one by one — which is what the
+// credential check and the per-file limits need to see.
+func (excluded ExcludedInputs) expand(name string, taken map[string]bool) ([]string, error) {
+	matches := []string{}
+	for _, entry := range slices.Concat(excluded.Untracked, excluded.Ignored) {
+		directory := strings.TrimSuffix(entry, "/")
+		if directory == entry {
+			if entry == name || strings.HasPrefix(entry, name+"/") {
+				matches = append(matches, entry)
+			}
+			continue
+		}
+		requested := directory
+		if !strings.HasPrefix(directory, name+"/") && directory != name {
+			if !strings.HasPrefix(name, directory+"/") {
+				continue
+			}
+			// Only part of the directory was asked for, so it keeps the rest.
+			requested = name
+		} else {
+			taken[entry] = true
+		}
+		files, err := walkInput(excluded.Root, requested)
+		if err != nil {
+			return nil, err
+		}
+		matches = append(matches, files...)
+	}
+	return matches, nil
+}
+
+// walkInput lists what one selectable path contributes: itself when it is not a
+// directory, every file beneath it when it is. Nothing is followed through a
+// symlink, and a path that is not there contributes nothing, which leaves a
+// request naming it unselectable rather than failing over a missing file.
+func walkInput(root, name string) ([]string, error) {
+	base := filepath.Join(root, filepath.FromSlash(name))
+	info, err := os.Lstat(base)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect input %q: %w", name, err)
+	}
+	if !info.IsDir() {
+		return []string{name}, nil
+	}
+	files := []string{}
+	walkErr := filepath.WalkDir(base, func(current string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return fmt.Errorf("read input %q: %w", name, err)
+		}
+		relative, err := filepath.Rel(root, current)
+		if err != nil {
+			return err
+		}
+		relative = filepath.ToSlash(relative)
+		if entry.Name() == ".git" {
+			return fmt.Errorf(
+				"input %q contains the Git repository %q; name paths inside it instead",
+				name,
+				path.Dir(relative),
+			)
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		files = append(files, relative)
+		return nil
+	})
+	if walkErr != nil {
+		return nil, walkErr
+	}
+	return files, nil
+}
+
+// remaining reports what stays behind once a selection is taken out. A
+// collapsed directory survives unless the selection took the whole of it:
+// naming one file inside it leaves the rest excluded.
+func (excluded ExcludedInputs) remaining(chosen, taken map[string]bool) ExcludedInputs {
+	keep := func(names []string) []string {
+		kept := make([]string, 0, len(names))
+		for _, name := range names {
+			if chosen[name] || taken[name] {
+				continue
+			}
+			kept = append(kept, name)
+		}
+		return kept
+	}
+	return ExcludedInputs{
+		Root:      excluded.Root,
+		Untracked: keep(excluded.Untracked),
+		Ignored:   keep(excluded.Ignored),
+	}
 }
 
 // repositoryRelative resolves a user-supplied path to a repository-relative
@@ -180,7 +242,7 @@ func repositoryRelative(root, request string) (string, error) {
 	return relative, nil
 }
 
-func describeInputs(root string, names []string) ([]inputEntry, error) {
+func describeInputs(root string, names []string) ([]SelectedInput, error) {
 	if len(names) > maxInputFiles {
 		return nil, fmt.Errorf(
 			"selected %d input files, more than the %d-file limit",
@@ -188,7 +250,7 @@ func describeInputs(root string, names []string) ([]inputEntry, error) {
 			maxInputFiles,
 		)
 	}
-	entries := make([]inputEntry, 0, len(names))
+	entries := make([]SelectedInput, 0, len(names))
 	total := int64(0)
 	for _, name := range names {
 		absolute := filepath.Join(root, filepath.FromSlash(name))
@@ -205,7 +267,7 @@ func describeInputs(root string, names []string) ([]inputEntry, error) {
 			if err := checkLinkStaysInside(root, name, link); err != nil {
 				return nil, err
 			}
-			entries = append(entries, inputEntry{path: name, link: link})
+			entries = append(entries, SelectedInput{Path: name, Link: link})
 		case info.Mode().IsRegular():
 			if info.Size() > maxInputFileBytes {
 				return nil, fmt.Errorf(
@@ -222,10 +284,10 @@ func describeInputs(root string, names []string) ([]inputEntry, error) {
 					maxInputBytes,
 				)
 			}
-			entries = append(entries, inputEntry{
-				path:       name,
-				executable: info.Mode().Perm()&0o100 != 0,
-				size:       info.Size(),
+			entries = append(entries, SelectedInput{
+				Path:       name,
+				Executable: info.Mode().Perm()&0o100 != 0,
+				Size:       info.Size(),
 			})
 		default:
 			return nil, fmt.Errorf("input %q is not a regular file or symlink", name)
@@ -247,7 +309,7 @@ func checkLinkStaysInside(root, name, link string) error {
 	return nil
 }
 
-func writeInputsArchive(root, archivePath string, entries []inputEntry) error {
+func writeInputsArchive(root, archivePath string, entries []SelectedInput) error {
 	file, err := os.OpenFile(archivePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("create input archive: %w", err)
@@ -257,30 +319,30 @@ func writeInputsArchive(root, archivePath string, entries []inputEntry) error {
 	writer := tar.NewWriter(file)
 	for _, entry := range entries {
 		header := &tar.Header{
-			Name:     entry.path,
+			Name:     entry.Path,
 			Typeflag: tar.TypeReg,
 			Mode:     0o600,
-			Size:     entry.size,
+			Size:     entry.Size,
 		}
-		if entry.executable {
+		if entry.Executable {
 			header.Mode = 0o700
 		}
-		if entry.link != "" {
+		if entry.Link != "" {
 			header.Typeflag = tar.TypeSymlink
-			header.Linkname = entry.link
+			header.Linkname = entry.Link
 			header.Mode = 0o777
 			header.Size = 0
 		}
 		if err := writer.WriteHeader(header); err != nil {
-			return fmt.Errorf("write input header %q: %w", entry.path, err)
+			return fmt.Errorf("write input header %q: %w", entry.Path, err)
 		}
-		if entry.link != "" {
+		if entry.Link != "" {
 			continue
 		}
 		if err := copyInputContent(
 			writer,
-			filepath.Join(root, filepath.FromSlash(entry.path)),
-			entry.size,
+			filepath.Join(root, filepath.FromSlash(entry.Path)),
+			entry.Size,
 		); err != nil {
 			return err
 		}

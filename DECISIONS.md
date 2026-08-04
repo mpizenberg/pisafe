@@ -731,6 +731,22 @@ history holds them. New entries are appended in full.
   separate flag, so approving one can never be a slip of the finger. An
   interactive selector can be added later without changing the staging
   contract.
+- What a run leaves behind is listed with `--directory`, so a directory nobody
+  tracks arrives as one name instead of one name per file in it, and a request
+  naming such a directory is expanded by walking the filesystem. Enumerating
+  every file was not kept: a repository of 21 127 ignored files spent 0.4 s of
+  each run start being walked three times, and the report it produced named
+  twelve database shards and "21 115 more" instead of `node_modules/`. The
+  expansion is what keeps the credential check and the per-file limits looking
+  at one file at a time, and it refuses a nested repository rather than copying
+  a checkout in as loose files. Two consequences worth knowing: naming one file
+  inside a collapsed directory leaves the directory in the report, because the
+  rest of it did stay behind; and a file inside a nested repository, which the
+  old exact-match listing could not select, can now be included on its own.
+- Selection resolves against that listing once, and what it resolves is what the
+  stage archives, rather than each of the two being derived from its own call to
+  Git. Re-deriving them cost a third walk and let the report and the archive
+  describe different states of a repository that changed in between.
 - Credential-shaped names are matched on whole words plus a fixed name and
   extension list, so `tokenizer.json` is not flagged while `api_token.json` is.
   Substring matching produced false positives that would have trained the user

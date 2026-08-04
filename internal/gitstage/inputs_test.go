@@ -10,6 +10,29 @@ import (
 	"testing"
 )
 
+// selectInputs is the two steps a run start performs: list what the run would
+// not receive, then resolve the paths the user named against that listing.
+func selectInputs(
+	t *testing.T,
+	source string,
+	selection InputSelection,
+) ([]SelectedInput, ExcludedInputs, error) {
+	t.Helper()
+	excluded, err := ListExcludedInputs(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return excluded.Select(selection)
+}
+
+func inputPaths(inputs []SelectedInput) string {
+	paths := make([]string, 0, len(inputs))
+	for _, input := range inputs {
+		paths = append(paths, input.Path)
+	}
+	return strings.Join(paths, ",")
+}
+
 // newInputRepository adds the untracked and ignored files the selection tests
 // choose between.
 func newInputRepository(t *testing.T) string {
@@ -39,18 +62,22 @@ func TestStageIncludesSelectedInputsInBaselineCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	inputs, _, err := selectInputs(t, source, InputSelection{
+		Include: []string{
+			filepath.Join(source, "notes.txt"),
+			filepath.Join(source, "build"),
+			filepath.Join(source, "link.txt"),
+			filepath.Join(source, "tool.sh"),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	workspace := filepath.Join(t.TempDir(), "workspace")
 	snapshot, err := Stage(ctx, PrepareRequest{
 		SourcePath: source,
 		RunID:      "inputs-run",
-		Inputs: InputSelection{
-			Include: []string{
-				filepath.Join(source, "notes.txt"),
-				filepath.Join(source, "build"),
-				filepath.Join(source, "link.txt"),
-				filepath.Join(source, "tool.sh"),
-			},
-		},
+		Inputs:     inputs,
 	}, workspace)
 	if err != nil {
 		t.Fatal(err)
@@ -84,38 +111,105 @@ func TestStageIncludesSelectedInputsInBaselineCommit(t *testing.T) {
 	assertFile(t, filepath.Join(source, "notes.txt"), "untracked note\n")
 }
 
-func TestSelectInputsRequiresUnsafeFlagForCredentialNames(t *testing.T) {
-	ctx := context.Background()
+func TestSelectRequiresUnsafeFlagForCredentialNames(t *testing.T) {
 	source := newInputRepository(t)
 
-	_, err := SelectInputs(ctx, source, InputSelection{
+	_, _, err := selectInputs(t, source, InputSelection{
 		Include: []string{filepath.Join(source, ".env")},
 	})
 	if err == nil || !strings.Contains(err.Error(), "--include-unsafe") {
 		t.Fatalf("err = %v", err)
 	}
 	// A directory holding a credential-shaped file is refused as a whole, so a
-	// broad selection cannot smuggle one in.
+	// broad selection cannot smuggle one in — including when Git reported that
+	// directory as one name rather than as the files under it.
 	mustWrite(t, filepath.Join(source, "build", "id_rsa"), "key\n")
-	if _, err := SelectInputs(ctx, source, InputSelection{
+	if _, _, err := selectInputs(t, source, InputSelection{
 		Include: []string{filepath.Join(source, "build")},
 	}); err == nil {
 		t.Fatal("directory containing a credential was accepted")
 	}
 
-	included, err := SelectInputs(ctx, source, InputSelection{
+	included, _, err := selectInputs(t, source, InputSelection{
 		Unsafe: []string{filepath.Join(source, ".env")},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(included, ",") != ".env" {
+	if inputPaths(included) != ".env" {
 		t.Fatalf("included = %#v", included)
 	}
 }
 
-func TestSelectInputsRejectsUnusableSelections(t *testing.T) {
-	ctx := context.Background()
+// TestSelectExpandsAndSubtractsCollapsedDirectories covers what Git's own
+// listing leaves implicit: a directory nobody tracks arrives as a single name,
+// so selecting it must reach the files under it, and the report must lose the
+// directory only when the whole of it was taken.
+func TestSelectExpandsAndSubtractsCollapsedDirectories(t *testing.T) {
+	source := newInputRepository(t)
+
+	excluded, err := ListExcludedInputs(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(excluded.Ignored, ",") != ".env,build/" {
+		t.Fatalf("ignored = %#v", excluded.Ignored)
+	}
+
+	whole, remaining, err := excluded.Select(InputSelection{
+		Include: []string{filepath.Join(source, "build")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inputPaths(whole) != "build/artifact.bin,build/nested.log" {
+		t.Fatalf("whole = %#v", whole)
+	}
+	if strings.Join(remaining.Ignored, ",") != ".env" {
+		t.Fatalf("remaining = %#v", remaining.Ignored)
+	}
+
+	part, remaining, err := excluded.Select(InputSelection{
+		Include: []string{filepath.Join(source, "build", "nested.log")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inputPaths(part) != "build/nested.log" {
+		t.Fatalf("part = %#v", part)
+	}
+	if strings.Join(remaining.Ignored, ",") != ".env,build/" {
+		t.Fatalf("remaining = %#v", remaining.Ignored)
+	}
+}
+
+// TestSelectRefusesARepositoryInsideASelectedDirectory keeps a nested checkout
+// from being copied in as loose files: a repository crosses into a run as
+// history or not at all.
+func TestSelectRefusesARepositoryInsideASelectedDirectory(t *testing.T) {
+	source := newInputRepository(t)
+	nested := filepath.Join(source, "build", "vendor")
+	runGit(t, source, "init", "-q", filepath.Join("build", "vendor"))
+	mustWrite(t, filepath.Join(nested, "vendored.txt"), "content\n")
+
+	_, _, err := selectInputs(t, source, InputSelection{
+		Include: []string{filepath.Join(source, "build")},
+	})
+	if err == nil || !strings.Contains(err.Error(), "build/vendor") {
+		t.Fatalf("err = %v", err)
+	}
+	inputs, _, err := selectInputs(t, source, InputSelection{
+		Include: []string{filepath.Join(nested, "vendored.txt")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inputPaths(inputs) != "build/vendor/vendored.txt" {
+		t.Fatalf("inputs = %#v", inputs)
+	}
+}
+
+func TestSelectRejectsUnusableSelections(t *testing.T) {
 	source := newInputRepository(t)
 	outside := filepath.Join(t.TempDir(), "outside.txt")
 	mustWrite(t, outside, "host content\n")
@@ -138,7 +232,7 @@ func TestSelectInputsRejectsUnusableSelections(t *testing.T) {
 		"special file":      filepath.Join(source, "pipe"),
 		"repository itself": source,
 	} {
-		if _, err := SelectInputs(ctx, source, InputSelection{
+		if _, _, err := selectInputs(t, source, InputSelection{
 			Include: []string{request},
 		}); err == nil {
 			t.Errorf("%s was accepted", name)
@@ -146,14 +240,13 @@ func TestSelectInputsRejectsUnusableSelections(t *testing.T) {
 	}
 }
 
-func TestSelectInputsEnforcesSizeLimits(t *testing.T) {
-	ctx := context.Background()
+func TestSelectEnforcesSizeLimits(t *testing.T) {
 	source := newInputRepository(t)
 	large := filepath.Join(source, "large.bin")
 	if err := os.WriteFile(large, make([]byte, maxInputFileBytes+1), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := SelectInputs(ctx, source, InputSelection{
+	if _, _, err := selectInputs(t, source, InputSelection{
 		Include: []string{large},
 	}); err == nil || !strings.Contains(err.Error(), "per-file limit") {
 		t.Fatalf("err = %v", err)
@@ -205,12 +298,18 @@ func TestExtractInputsRejectsUnsafeArchiveEntries(t *testing.T) {
 func TestMaterializeRejectsInputArchiveDisagreeingWithSnapshot(t *testing.T) {
 	ctx := context.Background()
 	source := newInputRepository(t)
+	inputs, _, err := selectInputs(t, source, InputSelection{
+		Include: []string{filepath.Join(source, "notes.txt")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	packageDir := filepath.Join(t.TempDir(), "package")
 	prepared, err := Prepare(ctx, PrepareRequest{
 		SourcePath: source,
 		PackageDir: packageDir,
 		RunID:      "mismatch-run",
-		Inputs:     InputSelection{Include: []string{filepath.Join(source, "notes.txt")}},
+		Inputs:     inputs,
 	})
 	if err != nil {
 		t.Fatal(err)

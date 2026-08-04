@@ -54,7 +54,6 @@ type Service struct {
 	repositoryRoot  func(context.Context, string) (string, error)
 	resolveIdentity func(context.Context, string) (gitstage.Identity, error)
 	listExcluded    func(context.Context, string) (gitstage.ExcludedInputs, error)
-	selectInputs    func(context.Context, string, gitstage.InputSelection) ([]string, error)
 	prepare         func(context.Context, gitstage.PrepareRequest) (gitstage.PreparedStage, error)
 }
 
@@ -74,7 +73,6 @@ func New(
 		repositoryRoot:  gitstage.RepositoryRoot,
 		resolveIdentity: gitstage.ResolveIdentity,
 		listExcluded:    gitstage.ListExcludedInputs,
-		selectInputs:    gitstage.SelectInputs,
 		prepare:         gitstage.Prepare,
 	}
 }
@@ -117,8 +115,9 @@ func (service Service) Start(
 		return Result{}, err
 	}
 	// Reject an unselectable or credential-shaped input before the slow
-	// boundary and image work, not after it.
-	included, err := service.selectInputs(ctx, root, inputs)
+	// boundary and image work, not after it. What this resolves is what the
+	// stage later archives, so the repository is asked once.
+	selected, remaining, err := excluded.Select(inputs)
 	if err != nil {
 		return Result{}, err
 	}
@@ -143,7 +142,7 @@ func (service Service) Start(
 		SourcePath: root,
 		PackageDir: filepath.Join(temporary, "package"),
 		RunID:      runID,
-		Inputs:     inputs,
+		Inputs:     selected,
 	})
 	if err != nil {
 		return Result{}, err
@@ -161,33 +160,8 @@ func (service Service) Start(
 	}
 	return Result{
 		Manifest: manifest,
-		Excluded: withoutIncluded(excluded, included),
-		Included: included,
+		Excluded: remaining,
+		Included: prepared.Snapshot.Inputs,
 		Image:    image,
 	}, nil
-}
-
-// withoutIncluded keeps the excluded report honest: a selected input is no
-// longer excluded from the run.
-func withoutIncluded(excluded gitstage.ExcludedInputs, included []string) gitstage.ExcludedInputs {
-	if len(included) == 0 {
-		return excluded
-	}
-	selected := make(map[string]bool, len(included))
-	for _, name := range included {
-		selected[name] = true
-	}
-	remaining := func(names []string) []string {
-		kept := make([]string, 0, len(names))
-		for _, name := range names {
-			if !selected[name] {
-				kept = append(kept, name)
-			}
-		}
-		return kept
-	}
-	return gitstage.ExcludedInputs{
-		Untracked: remaining(excluded.Untracked),
-		Ignored:   remaining(excluded.Ignored),
-	}
 }

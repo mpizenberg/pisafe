@@ -82,14 +82,20 @@ func (controller *fakeController) StartPrepared(
 }
 
 // testRoot creates a real repository root, because the configuration a
-// repository declares for itself is read from the checkout.
+// repository declares for itself is read from the checkout. The path is
+// resolved as gitstage resolves one, so a selected input under it is recognized
+// as being inside the repository.
 func testRoot(t *testing.T, name string) string {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), name)
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	return root
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
 }
 
 func TestStartComposesBoundaryImageStageAndController(t *testing.T) {
@@ -193,6 +199,15 @@ func TestStartRefusesAnUnattributableRunBeforeTouchingTheBoundary(t *testing.T) 
 }
 
 func TestStartReportsSelectedInputsAndDropsThemFromExclusions(t *testing.T) {
+	root := testRoot(t, "project")
+	if err := os.MkdirAll(filepath.Join(root, "build"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"notes.txt", "keep-out.txt", "build/artifact.bin"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("content\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	boundary := &fakeBoundary{}
 	installer := &fakeInstaller{}
 	controller := &fakeController{}
@@ -201,49 +216,42 @@ func TestStartReportsSelectedInputsAndDropsThemFromExclusions(t *testing.T) {
 		return project + "-run", nil
 	}
 	service.repositoryRoot = func(context.Context, string) (string, error) {
-		return testRoot(t, "project"), nil
+		return root, nil
 	}
 	service.resolveIdentity = func(context.Context, string) (gitstage.Identity, error) {
 		return testIdentity, nil
 	}
 	service.listExcluded = func(context.Context, string) (gitstage.ExcludedInputs, error) {
 		return gitstage.ExcludedInputs{
+			Root:      root,
 			Untracked: []string{"notes.txt", "keep-out.txt"},
-			Ignored:   []string{"build/artifact.bin"},
+			Ignored:   []string{"build/"},
 		}, nil
 	}
-	var selected gitstage.InputSelection
-	service.selectInputs = func(
-		_ context.Context,
-		_ string,
-		selection gitstage.InputSelection,
-	) ([]string, error) {
-		selected = selection
-		return []string{"build/artifact.bin", "notes.txt"}, nil
-	}
+	// The stage archives what the report names, so the fake echoes back what it
+	// was handed rather than inventing a second list.
 	service.prepare = func(
 		_ context.Context,
 		request gitstage.PrepareRequest,
 	) (gitstage.PreparedStage, error) {
-		if len(request.Inputs.Include) != 1 {
-			t.Fatalf("prepare inputs = %#v", request.Inputs)
+		snapshot := gitstage.Snapshot{RunID: request.RunID}
+		for _, input := range request.Inputs {
+			snapshot.Inputs = append(snapshot.Inputs, input.Path)
 		}
-		return gitstage.PreparedStage{
-			Snapshot: gitstage.Snapshot{RunID: request.RunID},
-		}, nil
+		return gitstage.PreparedStage{Snapshot: snapshot}, nil
 	}
 
 	result, err := service.Start(
 		context.Background(),
 		".",
 		nil,
-		gitstage.InputSelection{Include: []string{"notes.txt"}},
+		gitstage.InputSelection{Include: []string{
+			filepath.Join(root, "notes.txt"),
+			filepath.Join(root, "build"),
+		}},
 	)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if strings.Join(selected.Include, ",") != "notes.txt" {
-		t.Fatalf("selection = %#v", selected)
 	}
 	if strings.Join(result.Included, ",") != "build/artifact.bin,notes.txt" {
 		t.Fatalf("included = %#v", result.Included)
@@ -255,6 +263,7 @@ func TestStartReportsSelectedInputsAndDropsThemFromExclusions(t *testing.T) {
 }
 
 func TestStartRejectsBadSelectionBeforeTouchingTheBoundary(t *testing.T) {
+	root := testRoot(t, "project")
 	boundary := &fakeBoundary{}
 	installer := &fakeInstaller{}
 	service := New(boundary, installer, &fakeController{}, runimage.Artifacts{})
@@ -262,27 +271,20 @@ func TestStartRejectsBadSelectionBeforeTouchingTheBoundary(t *testing.T) {
 		return project + "-run", nil
 	}
 	service.repositoryRoot = func(context.Context, string) (string, error) {
-		return testRoot(t, "project"), nil
+		return root, nil
 	}
 	service.resolveIdentity = func(context.Context, string) (gitstage.Identity, error) {
 		return testIdentity, nil
 	}
 	service.listExcluded = func(context.Context, string) (gitstage.ExcludedInputs, error) {
-		return gitstage.ExcludedInputs{}, nil
-	}
-	service.selectInputs = func(
-		context.Context,
-		string,
-		gitstage.InputSelection,
-	) ([]string, error) {
-		return nil, errors.New("looks like a credential")
+		return gitstage.ExcludedInputs{Root: root, Untracked: []string{".env"}}, nil
 	}
 
 	_, err := service.Start(
 		context.Background(),
 		".",
 		nil,
-		gitstage.InputSelection{Include: []string{".env"}},
+		gitstage.InputSelection{Include: []string{filepath.Join(root, ".env")}},
 	)
 	if err == nil || !strings.Contains(err.Error(), "credential") {
 		t.Fatalf("err = %v", err)

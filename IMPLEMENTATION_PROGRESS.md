@@ -48,10 +48,17 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   source path. Dirty tracked state becomes a labelled baseline commit.
 - Untracked and ignored inputs enter only through `--include PATH`. Selection
   refuses tracked files, paths outside the repository, escaping symlinks,
-  special files, and over-limit selections; credential-shaped names need
-  `--include-unsafe`. They travel as a tar beside the bundle, are re-validated
-  on extraction against the names in the staged snapshot, and join the baseline
-  commit.
+  special files, nested repositories, and over-limit selections;
+  credential-shaped names need `--include-unsafe`. They travel as a tar beside
+  the bundle, are re-validated on extraction against the names in the staged
+  snapshot, and join the baseline commit.
+- What a run leaves behind is listed once per run, with a directory nobody
+  tracks standing for what is under it, and a request naming such a directory is
+  expanded from the filesystem so the credential check and the per-file limits
+  still see one file at a time. Selection resolves against that listing and its
+  result is what the stage archives, so the two lists a run prints are decided
+  together. In a repository with 21 127 ignored files this replaced three walks
+  of all of them with one listing of 28 names, 0.4 s of run start with 0.05 s.
 - Initialized submodules each contribute their own bundle and patch, are
   reconstructed and registered from `.gitmodules`, and get their own baseline
   commit; the superproject baseline records the gitlink they actually ended up
@@ -606,7 +613,10 @@ with a fake VM boundary:
   and the source untouched; refusal of credential-shaped, tracked, missing,
   outside, escaping, special, and whole-repository selections; size limits;
   archive entries that climb, are absolute, name `.git`, or are devices; a
-  snapshot/archive mismatch; and the whole-word secret matcher.
+  snapshot/archive mismatch; and the whole-word secret matcher. A collapsed
+  directory is expanded whole and subtracted from the report, one file inside it
+  leaves the rest excluded, a credential inside it is still refused, and a
+  repository inside it is refused while a file beside that repository is not.
 - **Submodules and journaled apply**: reconstruction with dirty state in both
   repositories, an uninitialized submodule left alone, refusal of nested
   submodules and LFS, mismatched artifacts, path-escape refusal, gitlink

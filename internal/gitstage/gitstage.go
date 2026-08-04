@@ -68,15 +68,22 @@ type PreparedStage struct {
 }
 
 // PrepareRequest describes one staging operation. Selected inputs are the only
-// source content that is copied rather than derived from Git history.
+// source content that is copied rather than derived from Git history, and they
+// arrive already resolved: what a run reports having taken and what it actually
+// stages are then one list, decided once.
 type PrepareRequest struct {
 	SourcePath string
 	PackageDir string
 	RunID      string
-	Inputs     InputSelection
+	Inputs     []SelectedInput
 }
 
+// ExcludedInputs is everything in the repository a run does not receive, as Git
+// reports it: a directory whose whole content is excluded stands for what is
+// under it, so a checkout with a hundred thousand ignored files is a few dozen
+// names rather than a walk of all of them.
 type ExcludedInputs struct {
+	Root      string
 	Untracked []string
 	Ignored   []string
 }
@@ -101,7 +108,7 @@ func ListExcludedInputs(ctx context.Context, sourcePath string) (ExcludedInputs,
 	untracked, err := gitOutputBytes(
 		ctx,
 		root,
-		"ls-files", "-z", "--others", "--exclude-standard",
+		"ls-files", "-z", "--others", "--exclude-standard", "--directory",
 	)
 	if err != nil {
 		return ExcludedInputs{}, fmt.Errorf("list untracked inputs: %w", err)
@@ -109,15 +116,41 @@ func ListExcludedInputs(ctx context.Context, sourcePath string) (ExcludedInputs,
 	ignored, err := gitOutputBytes(
 		ctx,
 		root,
-		"ls-files", "-z", "--others", "--ignored", "--exclude-standard",
+		"ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory",
 	)
 	if err != nil {
 		return ExcludedInputs{}, fmt.Errorf("list ignored inputs: %w", err)
 	}
+	ignoredNames := splitNUL(ignored)
 	return ExcludedInputs{
-		Untracked: splitNUL(untracked),
-		Ignored:   splitNUL(ignored),
+		Root:      root,
+		Untracked: withoutCovered(splitNUL(untracked), ignoredNames),
+		Ignored:   withoutCovered(ignoredNames, nil),
 	}, nil
+}
+
+// withoutCovered drops a path another entry already stands for. A directory
+// whose whole content is ignored is untracked and ignored at once, and an
+// ignored file inside a collapsed directory is named twice as well; either way
+// one entry already covers the path, and a run reports it once.
+func withoutCovered(names, others []string) []string {
+	directories := []string{}
+	for _, name := range slices.Concat(names, others) {
+		if strings.HasSuffix(name, "/") {
+			directories = append(directories, name)
+		}
+	}
+	kept := make([]string, 0, len(names))
+	for _, name := range names {
+		covered := slices.Contains(others, name)
+		for _, directory := range directories {
+			covered = covered || (directory != name && strings.HasPrefix(name, directory))
+		}
+		if !covered {
+			kept = append(kept, name)
+		}
+	}
+	return kept
 }
 
 // Prepare creates the source artifacts that cross the VM boundary: a Git
@@ -137,10 +170,6 @@ func Prepare(ctx context.Context, request PrepareRequest) (prepared PreparedStag
 	}
 
 	root, err := RepositoryRoot(ctx, request.SourcePath)
-	if err != nil {
-		return PreparedStage{}, err
-	}
-	inputs, err := selectInputEntries(ctx, root, request.Inputs)
 	if err != nil {
 		return PreparedStage{}, err
 	}
@@ -194,14 +223,14 @@ func Prepare(ctx context.Context, request PrepareRequest) (prepared PreparedStag
 	}
 
 	inputsPath := ""
-	names := make([]string, 0, len(inputs))
-	if len(inputs) != 0 {
+	names := make([]string, 0, len(request.Inputs))
+	if len(request.Inputs) != 0 {
 		inputsPath = filepath.Join(packageDir, inputsArchiveName)
-		if err := writeInputsArchive(root, inputsPath, inputs); err != nil {
+		if err := writeInputsArchive(root, inputsPath, request.Inputs); err != nil {
 			return PreparedStage{}, err
 		}
-		for _, entry := range inputs {
-			names = append(names, entry.path)
+		for _, input := range request.Inputs {
+			names = append(names, input.Path)
 		}
 	}
 

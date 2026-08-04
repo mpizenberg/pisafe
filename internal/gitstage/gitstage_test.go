@@ -223,7 +223,7 @@ func TestFinalizeReportsUnusualUntrackedNames(t *testing.T) {
 func TestListExcludedInputsSeparatesUntrackedAndIgnored(t *testing.T) {
 	ctx := context.Background()
 	source := newRepository(t)
-	mustWrite(t, filepath.Join(source, ".gitignore"), "ignored/\n")
+	mustWrite(t, filepath.Join(source, ".gitignore"), "ignored/\n*.log\n")
 	runGit(t, source, "add", ".gitignore")
 	runGit(t, source, "commit", "-qm", "ignore generated files")
 	mustWrite(t, filepath.Join(source, "untracked.txt"), "excluded\n")
@@ -231,15 +231,30 @@ func TestListExcludedInputsSeparatesUntrackedAndIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustWrite(t, filepath.Join(source, "ignored", "output.txt"), "ignored\n")
+	// A directory holding nothing but ignored files is untracked and ignored at
+	// once, and Git names the file inside it as well.
+	if err := os.Mkdir(filepath.Join(source, "cache"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(source, "cache", "debug.log"), "log\n")
 
 	excluded, err := ListExcludedInputs(ctx, filepath.Join(source, "ignored"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(excluded.Untracked) != 1 || excluded.Untracked[0] != "untracked.txt" {
+	resolved, err := filepath.EvalSymlinks(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if excluded.Root != resolved {
+		t.Fatalf("root = %q", excluded.Root)
+	}
+	if strings.Join(excluded.Untracked, ",") != "untracked.txt" {
 		t.Fatalf("untracked = %#v", excluded.Untracked)
 	}
-	if len(excluded.Ignored) != 1 || excluded.Ignored[0] != "ignored/output.txt" {
+	// A directory nobody tracks is one name, not one name per file in it, and
+	// nothing it covers is named again.
+	if strings.Join(excluded.Ignored, ",") != "cache/,ignored/" {
 		t.Fatalf("ignored = %#v", excluded.Ignored)
 	}
 }
