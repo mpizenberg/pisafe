@@ -145,6 +145,17 @@ history holds them. New entries are appended in full.
   than a usage error from the guest halfway through creating one. A call whose
   meaning changes while its name does not stays invisible to this check, so such
   a change renames the call.
+- The recipe digest reaches its label through a build argument declared after
+  the toolchain layers instead of at the top of the Containerfile. An argument
+  in scope joins the cache key of every instruction after it, and this one
+  changes whenever the helper does, so declaring it first cost a full Debian,
+  npm, and Python refetch — 31.7 s measured, against 0.5 s once the layers are
+  reused — for a change none of them depend on. Rebuilding the whole image on
+  every recipe change was not kept: what the layers install is decided by the
+  Containerfile text and the digest-pinned base image, and Podman already
+  invalidates them when either moves. The cost is that floating Debian packages
+  are refetched only when the Containerfile or the base image changes, rather
+  than incidentally on every helper rebuild. Reversal is one line.
 - Pi's transitive tree is frozen by the `npm-shrinkwrap.json` Pi publishes
   inside its own tarball, which the pinned top-level digest already covers, so
   the build asserts that shrinkwrap is still there rather than shipping a

@@ -1,7 +1,5 @@
 FROM docker.io/library/node@sha256:af01d58b748ec92b1d6e8e11429aad424fd1e68c848185399dca0596a1ab8f5c
 
-ARG PISAFE_RECIPE_DIGEST
-
 # Pi's published npm-shrinkwrap.json freezes its dependency tree, so the build
 # asserts the tarball still carries one. Three sibling packages appear in that
 # shrinkwrap with a resolved URL but no integrity hash, which lets npm re-resolve
@@ -84,6 +82,11 @@ RUN set -eu; \
     install -d -m 0755 /opt/pisafe/tools /opt/pisafe/profile
 
 COPY --chmod=0755 pisafe-guest /usr/local/bin/pisafe-guest
+
+# An argument in scope joins the cache key of every instruction after it, and
+# this one changes whenever the helper does. Declared above the toolchain, it
+# would refetch Debian, npm, and Python for a change none of them depend on.
+ARG PISAFE_RECIPE_DIGEST
 
 LABEL io.pisafe.base.digest="sha256:af01d58b748ec92b1d6e8e11429aad424fd1e68c848185399dca0596a1ab8f5c" \
       io.pisafe.pi.version="0.82.0" \

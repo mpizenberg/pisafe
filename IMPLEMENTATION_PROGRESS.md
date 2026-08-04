@@ -237,7 +237,12 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   and the controller looks for the exact bytes it was built with. The
   controller and the helper are separate binaries, so rebuilding one and not the
   other used to surface as a usage error from the guest halfway through creating
-  a run; it now fails before the run exists, naming what to rebuild.
+  a run; it now fails before the run exists, naming what to rebuild. The digest
+  reaches its label through a build argument declared after the toolchain layers
+  rather than before them: an argument in scope joins the cache key of every
+  later instruction, so declaring it first made a one-byte helper change refetch
+  Debian, npm, and Python. Measured on the run image, a helper-only rebuild went
+  from 31.7 s to 0.5 s.
 - Build-time SSH host keys are removed; a network-disabled one-shot container
   generates each run's host key and installs only its client public key.
 - Run commands require an immutable `sha256:` ID and use UID/GID 1000, read-only
@@ -1201,7 +1206,10 @@ These explain why parts of the code look the way they do:
   the first command to touch the VM fails with an opaque SSH reset.
 - npm resolution inside the run image is frozen, but the `apt-get` layer is not:
   the Debian packages it installs float, so two builds of one recipe digest are
-  equivalent in Pi and its dependencies without being byte-identical images.
+  equivalent in Pi and its dependencies without being byte-identical images. Now
+  that a helper change reuses those layers, they are also refetched less often —
+  what an image carries from Debian is as old as the last change to the
+  Containerfile or the base image, both of which are pinned by digest anyway.
 - The three sibling digests are pinned by hand and must be refreshed whenever
   `PiVersion` moves. A unit test refuses a mismatch, so the failure is loud, but
   regenerating them means packing each tarball and recording its SHA-512.
