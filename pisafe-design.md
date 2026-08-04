@@ -121,11 +121,12 @@ files, tools, dependency cache, Git commits, and network policy.
 
 ```text
 pisafe list
-pisafe connect [run]
+pisafe connect [run] [-- <command>...]
 pisafe forward [run] [<local>:]<port>...
 pisafe zed [run]
 pisafe diff [run]
-pisafe cp [<run>:]<path> [dest]
+pisafe cp [<run>]:<path> [dest]
+pisafe cp <path> [<run>]:[<path>]
 pisafe apply [run]
 pisafe discard <run> --confirm <run>
 pisafe gc [--dry-run]
@@ -151,13 +152,21 @@ pisafe backup <directory>
 pisafe restore <directory>
 ```
 
-`connect` resumes Pi or opens a shell. `zed` prints the path and opens Zed.
-`diff` reports what a run changed without stopping it, and without printing
-file content, which would make the terminal an injection surface. `cp` takes
-build artifacts, logs, or screenshots out of a run; because it writes to the
-Mac from untrusted content, it must treat every archive entry as hostile —
-acceptance test 14 states the requirement. `discard` is destructive, so its
-confirmation argument must repeat the exact run ID before anything is deleted.
+`connect` opens a shell in the run's workspace, from which Pi is one word away;
+a command after `--` runs there instead and the terminal's exit status is its
+own. The shell is the default because it reaches every other state a run can be
+worked in, while Pi replaces the session it was started in and so reaches none.
+`zed` prints the path and opens Zed. `diff` reports what a run changed without
+stopping it, and without printing file content, which would make the terminal
+an injection surface. `cp` takes build artifacts, logs, or screenshots out of a
+run, and puts into one what the run cannot fetch for itself; because the
+outward direction writes to the Mac from untrusted content, it must treat every
+archive entry as hostile — acceptance test 14 states the requirement. The
+inward direction is how data reaches a run already under way, and it carries
+data and never credentials: a credential-shaped name costs an explicit
+override, for the reason `run` makes `--include-unsafe` explicit. `discard` is
+destructive, so its confirmation argument must repeat the exact run ID before
+anything is deleted.
 
 A run may be named or left out. Left out, it is the one run of the checkout the
 user is standing in that has not been imported yet; several are a question
@@ -537,6 +546,8 @@ and errors, and fail-closed behavior when the broker or upstream is down.
     refs.
 14. `pisafe cp` refuses traversal paths, escaping symlinks, and special files,
     enforces size and count limits, and never overwrites without confirmation.
+    Copying into a run lands only inside its workspace, under the name the Mac
+    chose, and reaches a run that was already under way.
 15. Nothing in a run can write the global profile: installing a package inside
     a run succeeds, loads, and leaves the profile the next run mounts
     byte-for-byte what the user installed.

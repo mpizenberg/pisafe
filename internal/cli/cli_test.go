@@ -242,7 +242,7 @@ func TestInactiveRunIsRefusedBeforeAnythingLaunches(t *testing.T) {
 	for _, args := range [][]string{
 		{"zed", "inactive-run"},
 		{"connect", "inactive-run"},
-		{"connect", "inactive-run", "--shell"},
+		{"connect", "inactive-run", "--", "pi"},
 	} {
 		err := Run(context.Background(), args, nil, io.Discard)
 		if err == nil || !strings.Contains(err.Error(), "not active") {
@@ -295,36 +295,40 @@ func TestConnectPointsAStoppedRunAtResume(t *testing.T) {
 	}
 }
 
-func TestParseConnectRequest(t *testing.T) {
+func TestParseConnectRequestSeparatesTheRunFromTheCommand(t *testing.T) {
 	request, err := parseConnectRequest([]string{"run-123"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request.runID != "run-123" || request.shell {
+	if request.runID != "run-123" || len(request.command) != 0 {
 		t.Fatalf("request = %#v", request)
 	}
 
-	shell, err := parseConnectRequest([]string{"--shell", "run-123"})
+	// Everything after -- belongs to the run, including words pisafe would
+	// otherwise have read as its own options.
+	command, err := parseConnectRequest([]string{"run-123", "--", "pi", "--force"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if shell.runID != "run-123" || !shell.shell {
-		t.Fatalf("request = %#v", shell)
+	if command.runID != "run-123" || !slices.Equal(command.command, []string{"pi", "--force"}) {
+		t.Fatalf("request = %#v", command)
 	}
 
 	// A request naming no run is one the checkout has to answer, so parsing
 	// leaves the name empty rather than refusing it.
-	inferred, err := parseConnectRequest([]string{"--shell"})
+	inferred, err := parseConnectRequest([]string{"--", "npm", "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inferred.runID != "" || !inferred.shell {
+	if inferred.runID != "" || !slices.Equal(inferred.command, []string{"npm", "test"}) {
 		t.Fatalf("request = %#v", inferred)
 	}
 
 	for name, args := range map[string][]string{
-		"two runs":       {"run-123", "run-124"},
-		"unknown option": {"run-123", "--root"},
+		"two runs":         {"run-123", "run-124"},
+		"unknown option":   {"run-123", "--root"},
+		"separator alone":  {"run-123", "--"},
+		"run after option": {"--shell", "run-123"},
 	} {
 		if _, err := parseConnectRequest(args); err == nil {
 			t.Errorf("%s was accepted", name)
@@ -333,8 +337,9 @@ func TestParseConnectRequest(t *testing.T) {
 }
 
 // The remote command is executed by a shell inside the run, so the workspace
-// path must reach it as one word whatever the project is called.
-func TestConnectArgvStartsPiOrAShellInTheWorkspace(t *testing.T) {
+// path must reach it as one word whatever the project is called, and the
+// command's own words must reach it as the shell syntax they were written as.
+func TestConnectArgvRunsInTheWorkspaceWithATerminalOnlyWhenInteractive(t *testing.T) {
 	manifest := runstate.Manifest{
 		Workspace: "/work/my project",
 		SSH: &runstate.SSHConnection{
@@ -342,20 +347,26 @@ func TestConnectArgvStartsPiOrAShellInTheWorkspace(t *testing.T) {
 			ConfigFile: "/Users/alice/Library/Application Support/pisafe/ssh.config",
 		},
 	}
-	agent := connectArgv(manifest, false)
+	shell := connectArgv(manifest, nil, true)
 	expected := []string{
 		"ssh",
 		"-F", "/Users/alice/Library/Application Support/pisafe/ssh.config",
 		"-t",
 		"pisafe-run-123",
-		`cd '/work/my project' && exec pi`,
+		`cd '/work/my project' && exec "$SHELL" -l`,
 	}
-	if !slices.Equal(agent, expected) {
-		t.Fatalf("argv = %#v, want %#v", agent, expected)
+	if !slices.Equal(shell, expected) {
+		t.Fatalf("argv = %#v, want %#v", shell, expected)
 	}
-	shell := connectArgv(manifest, true)
-	if shell[len(shell)-1] != `cd '/work/my project' && exec "$SHELL" -l` {
-		t.Fatalf("shell command = %q", shell[len(shell)-1])
+
+	// A redirect written on the pisafe command line has to survive as syntax:
+	// quoting it per word would send the run a program with that name.
+	piped := connectArgv(manifest, []string{"cat > cf-analytics.json"}, false)
+	if piped[len(piped)-1] != `cd '/work/my project' && exec cat > cf-analytics.json` {
+		t.Fatalf("remote command = %q", piped[len(piped)-1])
+	}
+	if !slices.Contains(piped, "-T") || slices.Contains(piped, "-t") {
+		t.Fatalf("a redirected copy asked for a terminal: %#v", piped)
 	}
 }
 
@@ -543,8 +554,8 @@ func TestParseCopyRequestSeparatesRunPathAndDestination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request.runID != "run-123" || request.path != "dist/index.html" ||
-		request.destination != "index.html" || request.force {
+	if request.runID != "run-123" || request.inbound || request.runPath != "dist/index.html" ||
+		request.localPath != "index.html" || request.force {
 		t.Fatalf("request = %#v", request)
 	}
 
@@ -552,32 +563,82 @@ func TestParseCopyRequestSeparatesRunPathAndDestination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if forced.destination != "out" || !forced.force {
+	if forced.localPath != "out" || !forced.force {
 		t.Fatalf("request = %#v", forced)
 	}
 
-	// A source carrying no run leaves the name for the checkout to answer.
-	inferred, err := parseCopyRequest([]string{"dist/index.html"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if inferred.runID != "" || inferred.path != "dist/index.html" ||
-		inferred.destination != "index.html" {
-		t.Fatalf("request = %#v", inferred)
+	// A source carrying no run leaves the name for the checkout to answer,
+	// whether it is a bare path or an empty name before the colon.
+	for _, args := range [][]string{{"dist/index.html"}, {":dist/index.html"}} {
+		inferred, err := parseCopyRequest(args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if inferred.runID != "" || inferred.inbound ||
+			inferred.runPath != "dist/index.html" || inferred.localPath != "index.html" {
+			t.Fatalf("parseCopyRequest(%v) = %#v", args, inferred)
+		}
 	}
 
 	for name, args := range map[string][]string{
 		"absolute path":  {"run-123:/etc/passwd"},
 		"climbing path":  {"run-123:../../secrets"},
 		"whole run":      {"run-123:."},
-		"no run":         {":dist"},
 		"unknown option": {"run-123:dist", "--all"},
 		"too many":       {"run-123:dist", "out", "extra"},
 		"nothing":        {},
+		"neither end":    {"here.json", "there.json"},
+		"both ends":      {"run-123:dist", "run-124:dist"},
 	} {
 		if _, err := parseCopyRequest(args); err == nil {
 			t.Errorf("%s was accepted", name)
 		}
+	}
+}
+
+// The colon marks the end that is in the run, so which side carries it is the
+// whole of what says which way a copy goes.
+func TestParseCopyRequestReadsTheColonAsTheDirection(t *testing.T) {
+	request, err := parseCopyRequest([]string{"cf-analytics.json", "run-123:"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !request.inbound || request.runID != "run-123" ||
+		request.localPath != "cf-analytics.json" || request.runPath != "" {
+		t.Fatalf("request = %#v", request)
+	}
+
+	named, err := parseCopyRequest([]string{"./out/dist", ":public/dist", "--force"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !named.inbound || named.runID != "" || named.localPath != "./out/dist" ||
+		named.runPath != "public/dist" || !named.force {
+		t.Fatalf("request = %#v", named)
+	}
+
+	for name, args := range map[string][]string{
+		"absolute destination": {"cf.json", "run-123:/etc/cron.d/x"},
+		"climbing destination": {"cf.json", "run-123:../../elsewhere"},
+	} {
+		if _, err := parseCopyRequest(args); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+}
+
+// A credential going into a run is the one thing that voids what the run
+// guarantees, so it costs a word rather than nothing.
+func TestRunCopyRefusesACredentialShapedNameWithoutUnsafe(t *testing.T) {
+	err := runCopy(context.Background(), []string{".env", "run-123:"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "--unsafe") {
+		t.Fatalf("error = %v", err)
+	}
+	// The same name coming out of a run is the user reading their own run's
+	// file, which needs no override.
+	request, err := parseCopyRequest([]string{"run-123:.env"})
+	if err != nil || request.inbound {
+		t.Fatalf("request = %#v, err = %v", request, err)
 	}
 }
 
@@ -593,8 +654,8 @@ func TestParseCopyRequestPutsACopyInsideAnExistingDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request.destination != filepath.Join(directory, "note.md") {
-		t.Fatalf("destination = %q", request.destination)
+	if request.localPath != filepath.Join(directory, "note.md") {
+		t.Fatalf("destination = %q", request.localPath)
 	}
 
 	// A name that is not a directory is still taken literally, whether or not
@@ -608,8 +669,8 @@ func TestParseCopyRequestPutsACopyInsideAnExistingDirectory(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if request.destination != destination {
-			t.Fatalf("destination = %q, want %q", request.destination, destination)
+		if request.localPath != destination {
+			t.Fatalf("destination = %q, want %q", request.localPath, destination)
 		}
 	}
 }
@@ -618,7 +679,7 @@ func TestPrintCopyResultQuotesNamesChosenInsideTheRun(t *testing.T) {
 	var output bytes.Buffer
 	printCopyResult(
 		&output,
-		copyRequest{runID: "run-123", path: "dist", destination: "out"},
+		copyRequest{runID: "run-123", runPath: "dist", localPath: "out"},
 		[]runcopy.Entry{
 			{Path: "dist", Directory: true},
 			{Path: "dist/index.html", Size: 2048},

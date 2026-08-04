@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -11,21 +12,25 @@ import (
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
-// connectRequest is one parsed `pisafe connect RUN [--shell]`.
+// connectRequest is one parsed `pisafe connect [RUN] [-- COMMAND...]`. An empty
+// command is an interactive shell, which is what reaches every other state a
+// run can be worked in, including the agent.
 type connectRequest struct {
-	runID string
-	shell bool
+	runID   string
+	command []string
 }
 
-var errConnectUsage = fmt.Errorf("usage: pisafe connect [RUN] [--shell]")
+var errConnectUsage = fmt.Errorf("usage: pisafe connect [RUN] [-- COMMAND...]")
 
 func parseConnectRequest(args []string) (connectRequest, error) {
 	request := connectRequest{}
-	positional := []string{}
-	for _, argument := range args {
-		if argument == "--shell" {
-			request.shell = true
-			continue
+	for index, argument := range args {
+		if argument == "--" {
+			request.command = args[index+1:]
+			if len(request.command) == 0 {
+				return connectRequest{}, errConnectUsage
+			}
+			return request, nil
 		}
 		if strings.HasPrefix(argument, "-") {
 			return connectRequest{}, fmt.Errorf(
@@ -34,18 +39,15 @@ func parseConnectRequest(args []string) (connectRequest, error) {
 				errConnectUsage,
 			)
 		}
-		positional = append(positional, argument)
-	}
-	if len(positional) > 1 {
-		return connectRequest{}, errConnectUsage
-	}
-	if len(positional) == 1 {
-		request.runID = positional[0]
+		if request.runID != "" {
+			return connectRequest{}, errConnectUsage
+		}
+		request.runID = argument
 	}
 	return request, nil
 }
 
-func runConnect(ctx context.Context, args []string) error {
+func runConnect(ctx context.Context, args []string, out io.Writer) error {
 	request, err := parseConnectRequest(args)
 	if err != nil {
 		return err
@@ -58,32 +60,47 @@ func runConnect(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	argv := connectArgv(manifest, request.shell)
+	interactive := isTerminal(os.Stdin) && isTerminal(os.Stdout)
+	argv := connectArgv(manifest, request.command, interactive)
 	binary, err := exec.LookPath(argv[0])
 	if err != nil {
 		return fmt.Errorf("find ssh: %w", err)
 	}
 	argv[0] = binary
+	if len(request.command) == 0 && interactive {
+		// A shell says where it is but not what is installed in it, and the
+		// agent is the reason the run exists.
+		fmt.Fprintf(out, "%s: shell in %s. Run `pi` to start the agent.\n", runID, manifest.Workspace)
+	}
 	// The terminal now belongs to the run, and pisafe has nothing left to do
 	// with it: replacing this process hands over signals, window resizes, and
 	// the exit status without relaying any of them.
 	return syscall.Exec(binary, argv, os.Environ())
 }
 
-// connectArgv renders the SSH invocation that attaches this terminal to a run.
-// The remote side runs it through a shell, so the workspace path is quoted for
-// one; nothing else in the command comes from outside pisafe.
-func connectArgv(manifest runstate.Manifest, shell bool) []string {
+// connectArgv renders the SSH invocation that runs one command in a run's
+// workspace, or an interactive shell there when no command was given. Command
+// words are joined and parsed by the run's own shell, the way ssh itself passes
+// a command along, so a redirect or a pipe written on the pisafe command line
+// means in the run what it would mean here. Only the workspace path is quoted,
+// because it is the one word pisafe supplies.
+func connectArgv(manifest runstate.Manifest, command []string, interactive bool) []string {
 	remote := "cd " + shellQuote(manifest.Workspace) + " && exec "
-	if shell {
+	if len(command) == 0 {
 		remote += `"$SHELL" -l`
 	} else {
-		remote += "pi"
+		remote += strings.Join(command, " ")
+	}
+	// A pty is what an editor or a shell needs and what a redirected stream
+	// cannot survive, so it is asked for exactly when both ends are a terminal.
+	terminal := "-T"
+	if interactive {
+		terminal = "-t"
 	}
 	return []string{
 		"ssh",
 		"-F", manifest.SSH.ConfigFile,
-		"-t",
+		terminal,
 		manifest.SSH.Alias,
 		remote,
 	}

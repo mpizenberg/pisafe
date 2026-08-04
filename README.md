@@ -57,9 +57,9 @@ pisafe run
 The first run creates the VM and builds the run image, which takes a few
 minutes; later ones start in seconds. `run` prints a run ID and a one-time
 `ssh -F` line to paste into Zed's Remote Projects dialog, or reach the same
-container from your terminal with `pisafe connect RUN`. Pi is there with the
-repository staged, and can build, fetch, and run tests without touching your
-checkout.
+container from your terminal with `pisafe connect RUN`, which opens a shell in
+the staged repository — type `pi` there to start the agent. It can build,
+fetch, and run tests without touching your checkout.
 
 When the run has something you want:
 
@@ -102,13 +102,14 @@ pisafe broker                # foreground; runs have no inference without it
 ```sh
 pisafe run [--include PATH]... [--include-unsafe PATH]...
 pisafe list
-pisafe connect [RUN] [--shell]
+pisafe connect [RUN] [-- COMMAND...]
 pisafe forward [RUN] [LOCAL:]PORT...
 pisafe zed [RUN]
 pisafe stop [RUN]
 pisafe resume [RUN]
 pisafe diff [RUN]
-pisafe cp [RUN:]PATH [DEST] [--force]
+pisafe cp [RUN]:PATH [DEST] [--force]
+pisafe cp PATH [RUN]: [--force] [--unsafe]
 pisafe apply [RUN] [--keep-baseline|--drop-baseline]
 pisafe discard RUN --confirm RUN
 pisafe gc [--dry-run]
@@ -127,9 +128,16 @@ changes, as a baseline commit. Untracked and ignored files stay behind unless
 The command prints a one-time `ssh -F` line to paste into Zed's Remote
 Projects dialog — pisafe never edits your global SSH or Zed settings.
 
-`connect` attaches your terminal to a run and starts Pi in its workspace, or
-opens a shell there with `--shell`. It needs no editor, and it reaches the same
-container, files, and network policy the Zed terminal does.
+`connect` attaches your terminal to a shell in the run's workspace, where `pi`
+starts the agent. It needs no editor, and it reaches the same container, files,
+and network policy the Zed terminal does. A command after `--` runs there
+instead and exits with its status; its words are parsed by the run's own shell,
+so redirects and pipes mean there what they mean here:
+
+```sh
+pisafe connect -- npm test
+pisafe connect -- 'cat build.log' > build.log
+```
 
 `forward` is how you look at something a run is serving. `pisafe forward 5173
 8080` starts a backend and frontend dev server's ports on this Mac's loopback,
@@ -140,9 +148,21 @@ ends when you press Ctrl-C. It does put a page the run wrote in your browser, so
 forward the ports you mean to look at rather than leaving one open.
 
 `diff` reports a run's commits, changed paths with line counts, and untracked
-leftovers, without stopping it and without printing file content. `cp` takes a
-single file or directory back out, into a directory you name if that directory
-already exists and under the name you give it otherwise. `apply` stops the run
+leftovers, without stopping it and without printing file content. `cp` moves a
+single file or directory across, in either direction: the colon marks the end
+that is in the run, and naming the run is optional as everywhere else. A
+destination that is already a directory takes the copy inside it, and any other
+existing destination is replaced only with `--force`.
+
+```sh
+pisafe cp RUN:dist ./dist          # out of a run
+pisafe cp cf-analytics.json RUN:   # into one, already under way
+```
+
+Copying in is how a run gets what it cannot fetch for itself — a query result,
+a fixture, a log from somewhere it has no credential to reach. It is data, not
+credentials: a credential-shaped name needs `--unsafe`, because everything in
+the run can then read and exfiltrate it. `apply` stops the run
 and imports its history as `pisafe/RUN`, in the superproject and in each changed
 submodule, leaving your checkout, index, and current branch untouched.
 

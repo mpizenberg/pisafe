@@ -228,7 +228,7 @@ func TestLooksLikeSecretMatchesWholeWordsOnly(t *testing.T) {
 		".env", ".env.local", "config/.npmrc", "deploy/id_rsa", "certs/server.pem",
 		"my-secret.txt", "api_token.json", "PASSWORD.txt", "passwords.csv",
 	} {
-		if !looksLikeSecret(name) {
+		if !LooksLikeSecret(name) {
 			t.Errorf("%q was not flagged", name)
 		}
 	}
@@ -236,7 +236,7 @@ func TestLooksLikeSecretMatchesWholeWordsOnly(t *testing.T) {
 		"tokenizer.json", "environment.md", "notes.txt",
 		"build/artifact.bin", "secretary.md", "keyboard.ts",
 	} {
-		if looksLikeSecret(name) {
+		if LooksLikeSecret(name) {
 			t.Errorf("%q was flagged", name)
 		}
 	}

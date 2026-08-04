@@ -68,6 +68,11 @@ func run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 			return usageError()
 		}
 		return runcopy.Archive(args[1], args[2], out)
+	case "import":
+		if len(args) != 5 {
+			return usageError()
+		}
+		return importCopy(args[1], args[2], args[3], args[4], in, out)
 	case "configure-ssh":
 		if len(args) != 1 {
 			return usageError()
@@ -109,9 +114,42 @@ func usageError() error {
 			"|prepare-apply <keep|drop> <workspace> <package-directory>" +
 			"|diff <workspace>" +
 			"|export <workspace> <path>" +
+			"|import <workspace> <destination> <name> <replace|refuse>" +
 			"|configure-ssh|configure-inference|configure-identity|configure-profile" +
 			"|serve-ssh|proxy-ssh>",
 	)
+}
+
+// importCopy unpacks an archive the Mac sent into the run's workspace. An empty
+// destination is the workspace itself, and a destination that is already a
+// directory takes the copy inside it under the name it arrived with, which is
+// what a copy out of a run does with a destination on the Mac. The archive
+// lands in a staging directory and is renamed into place, so a run watching the
+// destination never sees a half-written copy.
+func importCopy(workspace, destination, name, decision string, in io.Reader, out io.Writer) error {
+	replace := decision == "replace"
+	if !replace && decision != "refuse" {
+		return usageError()
+	}
+	if name == "" || name != filepath.Base(name) || name == "." || name == ".." {
+		return fmt.Errorf("%q is not a name a copy can arrive under", name)
+	}
+	target := filepath.Clean(workspace)
+	if destination != "" {
+		relative, err := runcopy.SafePath(destination)
+		if err != nil {
+			return err
+		}
+		target = filepath.Join(target, filepath.FromSlash(relative))
+	}
+	if info, err := os.Stat(target); err == nil && info.IsDir() {
+		target = filepath.Join(target, name)
+	}
+	entries, err := runcopy.CopyTo(in, name, target, replace)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(out).Encode(entries)
 }
 
 // configureIdentity records the user's Git identity in the run's global Git

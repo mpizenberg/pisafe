@@ -4,6 +4,7 @@ package runcontainer
 
 import (
 	"fmt"
+	"path"
 	"regexp"
 	"slices"
 	"strconv"
@@ -714,6 +715,44 @@ func (spec Spec) ExportArgs(projectDirectory, requestPath string) ([]string, err
 		"pisafe-guest", "export",
 		containerWorkRoot+"/"+projectDirectory,
 		requested,
+	), nil
+}
+
+// ImportArgs unpacks an archive read from standard input into the run's
+// workspace. It is the one inspection whose workspace mount is writable, since
+// putting a file into a run is the whole of what it does; everything else the
+// throwaway container is denied it stays denied, including the network.
+func (spec Spec) ImportArgs(
+	projectDirectory string,
+	destination string,
+	name string,
+	replace bool,
+) ([]string, error) {
+	if destination != "" {
+		cleaned, err := runcopy.SafePath(destination)
+		if err != nil {
+			return nil, err
+		}
+		destination = cleaned
+	}
+	if name == "" || name != path.Base(name) || name == "." || name == ".." {
+		return nil, fmt.Errorf("%q is not a name a copy can arrive under", name)
+	}
+	args, err := spec.inspectionArgs("copy-in", projectDirectory, "")
+	if err != nil {
+		return nil, err
+	}
+	decision := "refuse"
+	if replace {
+		decision = "replace"
+	}
+	return append(
+		args,
+		"pisafe-guest", "import",
+		containerWorkRoot+"/"+projectDirectory,
+		destination,
+		name,
+		decision,
 	), nil
 }
 

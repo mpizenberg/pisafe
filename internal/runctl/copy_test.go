@@ -113,7 +113,7 @@ func TestCopyOutRefusesEscapingPathsAndRunsWithNoWorkspace(t *testing.T) {
 	unfinished := gitstage.Snapshot{RunID: "unfinished-copy-run", WorkRef: "refs/heads/work/unfinished"}
 	creatingRun(t, store, unfinished)
 	for runID, expected := range map[string]string{
-		unfinished.RunID:         "no workspace to copy from",
+		unfinished.RunID:         "no workspace to copy through",
 		snapshot.RunID + "-gone": "does not exist",
 	} {
 		if _, err := controller.CopyOut(ctx, CopyRequest{
@@ -124,6 +124,98 @@ func TestCopyOutRefusesEscapingPathsAndRunsWithNoWorkspace(t *testing.T) {
 		}); err == nil || !strings.Contains(err.Error(), expected) {
 			t.Fatalf("copy out of %s = %v", runID, err)
 		}
+	}
+}
+
+// A live run is reachable from the Mac in one direction already; this is the
+// other one, and it lands where a run standing in its workspace would find it.
+func TestCopyInPutsAFileFromTheMacIntoTheRunsWorkspace(t *testing.T) {
+	ctx := context.Background()
+	_, workspace, snapshot := applyFixture(t, "copy-in-run")
+	backend := &fakeBackend{applyWorkspace: workspace}
+	store := runstate.NewStore(t.TempDir())
+	controller := New(backend, store, &fakeSSHStore{}, testInference{})
+	activeRun(t, store, snapshot)
+
+	source := filepath.Join(t.TempDir(), "cf-analytics.json")
+	writeFile(t, source, "{\"requests\":12}\n")
+
+	entries, err := controller.CopyIn(ctx, CopyIntoRequest{
+		RunID:   snapshot.RunID,
+		ImageID: testImage,
+		Source:  source,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Path != "cf-analytics.json" {
+		t.Fatalf("entries = %#v", entries)
+	}
+	content, err := os.ReadFile(filepath.Join(workspace, "cf-analytics.json"))
+	if err != nil || string(content) != "{\"requests\":12}\n" {
+		t.Fatalf("content = %q, err = %v", content, err)
+	}
+	if joined := callsString(backend.calls); !strings.Contains(joined, "pisafe-guest import") {
+		t.Fatalf("copy calls:\n%s", joined)
+	}
+
+	// A second copy of the same name is the user overwriting their own work,
+	// which costs a flag here exactly as it does coming out.
+	if _, err := controller.CopyIn(ctx, CopyIntoRequest{
+		RunID:   snapshot.RunID,
+		ImageID: testImage,
+		Source:  source,
+	}); err == nil || !strings.Contains(err.Error(), "--force") {
+		t.Fatalf("err = %v", err)
+	}
+	writeFile(t, source, "{\"requests\":34}\n")
+	if _, err := controller.CopyIn(ctx, CopyIntoRequest{
+		RunID:   snapshot.RunID,
+		ImageID: testImage,
+		Source:  source,
+		Replace: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	content, err = os.ReadFile(filepath.Join(workspace, "cf-analytics.json"))
+	if err != nil || string(content) != "{\"requests\":34}\n" {
+		t.Fatalf("replaced content = %q, err = %v", content, err)
+	}
+}
+
+func TestCopyInRefusesWhatItCannotSend(t *testing.T) {
+	ctx := context.Background()
+	_, workspace, snapshot := applyFixture(t, "guarded-copy-in-run")
+	backend := &fakeBackend{applyWorkspace: workspace}
+	store := runstate.NewStore(t.TempDir())
+	controller := New(backend, store, &fakeSSHStore{}, testInference{})
+	activeRun(t, store, snapshot)
+
+	source := filepath.Join(t.TempDir(), "note.md")
+	writeFile(t, source, "hello\n")
+
+	for name, request := range map[string]CopyIntoRequest{
+		"absent source":        {Source: filepath.Join(t.TempDir(), "absent")},
+		"absolute destination": {Source: source, Destination: "/etc/cron.d/pisafe"},
+		"climbing destination": {Source: source, Destination: "../../elsewhere"},
+	} {
+		request.RunID, request.ImageID = snapshot.RunID, testImage
+		if _, err := controller.CopyIn(ctx, request); err == nil {
+			t.Errorf("%s was copied in", name)
+		}
+	}
+	if len(backend.calls) != 0 {
+		t.Fatalf("a refused copy reached the run: %#v", backend.calls)
+	}
+
+	unfinished := gitstage.Snapshot{RunID: "unfinished-in-run", WorkRef: "refs/heads/work/unfinished"}
+	creatingRun(t, store, unfinished)
+	if _, err := controller.CopyIn(ctx, CopyIntoRequest{
+		RunID:   unfinished.RunID,
+		ImageID: testImage,
+		Source:  source,
+	}); err == nil || !strings.Contains(err.Error(), "no workspace to copy through") {
+		t.Fatalf("err = %v", err)
 	}
 }
 

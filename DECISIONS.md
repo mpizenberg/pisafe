@@ -51,6 +51,27 @@ history holds them. New entries are appended in full.
   is that `connect` can print nothing afterwards.
 - `connect` refuses a stopped run and names `pisafe resume` instead of resuming
   it. Resuming spends the run's wall-clock budget, which stays an explicit act.
+- `connect` opens a shell by default and takes an optional `-- COMMAND`, where
+  it used to start Pi by default and open a shell under `--shell`. Keeping Pi
+  as the default and adding a `--pi` flag was the alternative. The two are not
+  symmetric: the remote command is `exec`ed, so quitting Pi ends the SSH session
+  and reaching a shell costs a reconnection, while from a shell Pi is a child
+  and quitting it returns to the run's prompt. The shell default reaches both
+  states and the Pi default reaches one. It also matches what every other
+  command treats a run as — a machine that is worked in, whose ports `forward`
+  exposes and whose files `cp` moves — rather than a wrapper around one
+  program. The cost is that a bare prompt does not announce the agent, paid
+  with one printed line naming `pi`. Reversible: one function and its help text.
+- A command after `--` is joined with spaces and parsed by the run's own shell,
+  not quoted word by word. Quoting each word is safer against surprise splitting
+  but would send the run a program named `cat > file`, and redirects and pipes
+  are most of why the general form is worth having. This is what `ssh` itself
+  does with a remote command, so the surprising behaviour is at least the
+  familiar one. Only the workspace path is quoted, because pisafe supplies it.
+- A pty is requested only when stdin and stdout are both terminals. Always
+  asking corrupts a redirected copy through CRLF translation; never asking with
+  a command, which is `ssh`'s own rule, breaks `-- pi`. Testing both ends serves
+  both without a flag, and is the same test `login` already applies.
 - Reaching a server a run hosts is an `ssh -L` channel on the run's own
   connection, which cost the run's `sshd` its blanket `AllowTcpForwarding no`
   and its key its `no-port-forwarding` option. Both are replaced by the exact
@@ -783,6 +804,37 @@ history holds them. New entries are appended in full.
   be right most of the time, which is the wrong property for `stop` and
   `apply`. `discard` keeps requiring the name twice — its confirmation is the
   point of the command.
+- `pisafe cp` gained an inward direction rather than a second command. The
+  colon already marked which end was in the run, so which side carries it can
+  say which way the copy goes; a `pisafe push` or `put` would have been a
+  second door onto one set of limits, one archive format, and one report.
+  A single bare path still means copying out, because that is the only thing it
+  could have meant before. An empty name before the colon now means the
+  checkout's own run on either side, where it used to be an error — the
+  shorthand every other command has, spelled the one way the direction marker
+  allows. Reversible: it is one parser and its usage string.
+- Copying in unpacks in a throwaway inspection container with the workspace
+  mounted read-write, rather than `podman exec` into the live run container.
+  It reaches stopped runs as well as active ones, keeps the network off, and
+  reuses `runcopy.CopyTo` — staging directory, then rename — exactly as it
+  stands. The archive is produced on the Mac so the run has no say in what
+  arrives, which is the mirror of the outward direction's rule that the Mac
+  re-validates everything the run sends.
+- A credential-shaped name copied *in* needs `--unsafe`; the same name copied
+  *out* needs nothing. Leaving the inward direction unguarded was considered on
+  the grounds that the user names the path explicitly, unlike `run --include`
+  where a glob can sweep one in. It was rejected because this is now the
+  frictionless way to put a reusable credential inside a run, which is the one
+  act that voids what a run guarantees; the guard is a reminder rather than
+  proof, as the design says of every such scan. Coming out is the user reading
+  their own run's file and needs no ceremony.
+- Copying in works on runs created before the command existed, because
+  inspections run the current managed image rather than the one a run was
+  created from. This is the opposite of `pisafe forward`, whose sshd policy is
+  written into the run's home once at creation. Worth knowing when judging
+  whether a new run-side capability will reach existing runs: anything carried
+  by an inspection container will, anything written into the run's home will
+  not.
 
 ## Inference broker
 

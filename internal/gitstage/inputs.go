@@ -136,7 +136,7 @@ func chooseInput(
 		)
 	}
 	for _, match := range matches {
-		if !unsafe && looksLikeSecret(match) {
+		if !unsafe && LooksLikeSecret(match) {
 			return fmt.Errorf(
 				"%q looks like a credential; including it lets everything in the run "+
 					"read and exfiltrate it. Use --include-unsafe %s to override",
@@ -434,9 +434,9 @@ var (
 	}
 )
 
-// looksLikeSecret recognizes credential-shaped names. Whole words are matched
+// LooksLikeSecret recognizes credential-shaped names. Whole words are matched
 // so ordinary names such as tokenizer.json are not flagged.
-func looksLikeSecret(name string) bool {
+func LooksLikeSecret(name string) bool {
 	base := strings.ToLower(path.Base(name))
 	if secretNames[base] || secretExtensions[path.Ext(base)] {
 		return true

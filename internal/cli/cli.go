@@ -30,7 +30,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 	case "run":
 		return runCreate(ctx, args[1:], out)
 	case "connect":
-		return runConnect(ctx, args[1:])
+		return runConnect(ctx, args[1:], out)
 	case "forward":
 		return runForward(ctx, args[1:], out)
 	case "login":
@@ -124,9 +124,11 @@ Usage:
                    Untracked and ignored files stay out unless --include names
                    them; a credential-shaped path needs --include-unsafe,
                    which voids the run's credential isolation.
-  pisafe connect [RUN] [--shell]
-                   Attach this terminal to a run and start Pi, or with
-                   --shell open a shell in the same container.
+  pisafe connect [RUN] [-- COMMAND...]
+                   Open a shell in a run's workspace, where pi starts the
+                   agent. With -- COMMAND, run that instead and exit with
+                   its status: the words are parsed by the run's own shell, so
+                   a redirect or a pipe means there what it means here.
   pisafe forward [RUN] [LOCAL:]PORT...
                    Reach a server a run is hosting, so a web app developed
                    inside one can be opened in your browser. Each port becomes
@@ -143,11 +145,16 @@ Usage:
                    Report what a run changed since it started, without
                    stopping it. Commit subjects and file names come from the
                    run, so they are shown quoted, never as file content.
-  pisafe cp [RUN:]PATH [DEST] [--force]
-                   Copy one file or directory out of a run. Only regular
-                   files and directories are copied. A DEST that is already a
-                   directory takes the copy inside it; any other existing DEST
-                   is replaced only with --force.
+  pisafe cp [RUN]:PATH [DEST] [--force]
+  pisafe cp PATH [RUN]: [--force] [--unsafe]
+                   Copy one file or directory out of a run, or into one. The
+                   colon marks the end that is in the run, and naming the run
+                   is optional as everywhere else. Only regular files and
+                   directories are copied. A destination that is already a
+                   directory takes the copy inside it; any other existing
+                   destination is replaced only with --force. Copying a
+                   credential-shaped name in needs --unsafe, because
+                   everything in the run can then read and exfiltrate it.
   pisafe apply [RUN] [--keep-baseline|--drop-baseline]
                    Import a run's commits as the local branch pisafe/RUN.
                    The run is stopped first and cannot be resumed afterwards;

@@ -188,6 +188,54 @@ func TestExportArgsStreamOneRequestedPathReadOnly(t *testing.T) {
 	}
 }
 
+// Putting a file into a run is the one inspection that writes, so its mount is
+// the one that is not read-only. Everything else the throwaway container is
+// denied has to stay denied, the network above all: an import container that
+// could reach the internet would be a way around the run's own budget.
+func TestImportArgsWriteOnlyToTheWorkspace(t *testing.T) {
+	spec := DefaultSpec("run-123", testProjectKey, testImageID)
+	args, err := spec.ImportArgs("project", "./plans/../plans", "note.md", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, expected := range []string{
+		"--network=none",
+		"--read-only",
+		"--cap-drop=all",
+		"--security-opt=no-new-privileges",
+		"type=bind,src=/var/lib/pisafe/runs/run-123/workspace,dst=/work,nodev,nosuid ",
+		"pisafe-guest import /work/project plans note.md refuse",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Errorf("import args lack %q:\n%s", expected, joined)
+		}
+	}
+	if strings.Contains(joined, "nodev,nosuid,ro") {
+		t.Errorf("import mounted the workspace read-only:\n%s", joined)
+	}
+
+	replacing, err := spec.ImportArgs("project", "", "note.md", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(replacing, " "), "pisafe-guest import /work/project  note.md replace") {
+		t.Errorf("replacing import args:\n%s", strings.Join(replacing, " "))
+	}
+
+	for name, request := range map[string][2]string{
+		"absolute destination":  {"/etc/passwd", "passwd"},
+		"climbing destination":  {"../../etc", "passwd"},
+		"whole workspace":       {".", "passwd"},
+		"name with a directory": {"", "../passwd"},
+		"empty name":            {"", ""},
+	} {
+		if _, err := spec.ImportArgs("project", request[0], request[1], false); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+}
+
 func TestSpecRejectsMutableImageAndUnsafeNames(t *testing.T) {
 	for _, spec := range []Spec{
 		DefaultSpec("../escape", testProjectKey, testImageID),
@@ -239,6 +287,7 @@ func TestSharedLayersKeepTheProjectSideReadOnlyToTheRun(t *testing.T) {
 	for _, inspection := range []func() ([]string, error){
 		func() ([]string, error) { return spec.DiffArgs("project") },
 		func() ([]string, error) { return spec.ExportArgs("project", "file.txt") },
+		func() ([]string, error) { return spec.ImportArgs("project", "", "file.txt", false) },
 		func() ([]string, error) { return spec.PrepareApplyArgs("project", gitstage.KeepBaseline) },
 		spec.ConfigureSSHArgs,
 	} {

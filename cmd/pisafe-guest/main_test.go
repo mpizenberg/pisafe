@@ -196,6 +196,104 @@ func TestExportCommandArchivesOnlyTheRequestedPath(t *testing.T) {
 	}
 }
 
+// The archive comes from the Mac, so what this checks is where it is allowed to
+// land: inside the workspace, under a name the Mac chose, and never over
+// something already there unless the Mac said so.
+func TestImportCommandUnpacksOnlyInsideTheWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "data"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	archived := func(name, content string) io.Reader {
+		var buffer bytes.Buffer
+		writer := tar.NewWriter(&buffer)
+		if err := writer.WriteHeader(&tar.Header{
+			Name:     name,
+			Typeflag: tar.TypeReg,
+			Mode:     0o600,
+			Size:     int64(len(content)),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writer.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return &buffer
+	}
+
+	// An empty destination is the workspace, and the copy keeps its name.
+	if err := run(
+		context.Background(),
+		[]string{"import", workspace, "", "cf.json", "refuse"},
+		archived("cf.json", "{\"requests\":12}\n"),
+		&bytes.Buffer{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(workspace, "cf.json"))
+	if err != nil || string(content) != "{\"requests\":12}\n" {
+		t.Fatalf("content = %q, err = %v", content, err)
+	}
+
+	// A destination that already exists as a directory takes the copy inside
+	// it, which is what the copy in the other direction does on the Mac.
+	if err := run(
+		context.Background(),
+		[]string{"import", workspace, "data", "cf.json", "refuse"},
+		archived("cf.json", "nested\n"),
+		&bytes.Buffer{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, "data", "cf.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	// An occupied name is refused, and the file that is there is untouched.
+	if err := run(
+		context.Background(),
+		[]string{"import", workspace, "", "cf.json", "refuse"},
+		archived("cf.json", "overwritten\n"),
+		&bytes.Buffer{},
+	); err == nil {
+		t.Fatal("an occupied destination was overwritten")
+	}
+	content, err = os.ReadFile(filepath.Join(workspace, "cf.json"))
+	if err != nil || string(content) != "{\"requests\":12}\n" {
+		t.Fatalf("a refused copy changed the file: %q, err = %v", content, err)
+	}
+
+	for name, args := range map[string][]string{
+		"absolute destination": {"import", workspace, "/etc/cron.d/x", "cf.json", "refuse"},
+		"climbing destination": {"import", workspace, "../../elsewhere", "cf.json", "refuse"},
+		"name with a path":     {"import", workspace, "", "../cf.json", "refuse"},
+		"unknown decision":     {"import", workspace, "", "cf.json", "maybe"},
+	} {
+		if err := run(
+			context.Background(),
+			args,
+			archived("cf.json", "escaped\n"),
+			&bytes.Buffer{},
+		); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+
+	// An archive naming something other than what the Mac said is arriving is
+	// refused whatever it holds, so one copy can only ever write one path.
+	if err := run(
+		context.Background(),
+		[]string{"import", workspace, "", "cf.json", "replace"},
+		archived("../../etc/passwd", "escaped\n"),
+		&bytes.Buffer{},
+	); err == nil {
+		t.Fatal("an archive escaping its own name was unpacked")
+	}
+}
+
 func TestDiffCommandRejectsHostPathInSnapshot(t *testing.T) {
 	snapshot, err := json.Marshal(gitstage.Snapshot{
 		RunID:      "unsafe",

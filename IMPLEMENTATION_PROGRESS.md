@@ -122,6 +122,22 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   DEST that is already a directory receives the copy under the copied path's own
   name; any other existing destination is refused before the run is asked for
   anything, and `--force` removes it rather than writing through it.
+- `pisafe cp PATH [RUN]: [--force] [--unsafe]` is the same command inward. The
+  colon marks the end that is in the run, so which side carries it is the whole
+  of what says which way a copy goes, and the name before it is optional exactly
+  as it is everywhere else. The archive is produced on the Mac, so what arrives
+  is held to the limits the Mac would itself have accepted, and the run is given
+  no say in what it receives. It unpacks in a throwaway container like every
+  other inspection, but with the workspace mounted read-write — the one that
+  is — still with no network and nothing else the others are denied.
+  `runcopy`'s staging-and-rename lands the copy, so a run watching it never
+  sees a half-written one, and an occupied name is refused without `--force`.
+  A credential-shaped name needs `--unsafe`, on the reasoning that made
+  `--include-unsafe` explicit: this is the frictionless path that would
+  otherwise void what a run guarantees. Because inspections use the current
+  managed image rather than the one a run was created from, copying in reaches
+  runs that predate the command — unlike `forward`, whose files are written
+  into the run's home once, at creation.
 - `pisafe gc [--dry-run]` applies the seven-day window, measured from
   `imported_at`. An imported run past it is reclaimed — container, storage, VM
   stage, Mac-side SSH key, and record — through the same idempotent path discard
@@ -475,12 +491,18 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   and verifies the VM, installs or reuses the image, starts the run, and prints
   the run, workspace, branch, exact `ssh -F` command, excluded inputs, and
   whether the broker will serve inference.
-- `pisafe connect RUN [--shell]` attaches the terminal to a run: it starts Pi in
-  the run's workspace, or a login shell with `--shell`, over the same per-run
-  SSH config Zed uses. It replaces its own process with `ssh`, so signals,
-  window resizes, and the exit status are the session's. Only an active run
-  within its budget is reachable; a stopped one is refused naming
-  `pisafe resume`. `zed` and `forward` share that check.
+- `pisafe connect [RUN] [-- COMMAND...]` attaches the terminal to a run: a login
+  shell in the run's workspace, or the command after `--` run there instead,
+  over the same per-run SSH config Zed uses. The shell is the default because
+  `exec pi` ends the session Pi was started in, so a shell reaches Pi for free
+  while Pi reaches a shell only by reconnecting. Command words are joined and
+  parsed by the run's own shell, the way ssh passes a command along, so a
+  redirect or a pipe means in the run what it means on the Mac. A pty is asked
+  for only when stdin and stdout are both terminals, which is what lets an
+  interactive Pi and a redirected stream share one command. It replaces its own
+  process with `ssh`, so signals, window resizes, and the exit status are the
+  session's. Only an active run within its budget is reachable; a stopped one is
+  refused naming `pisafe resume`. `zed` and `forward` share that check.
 - `pisafe forward [RUN] [LOCAL:]PORT...` reaches a server a run is hosting. Each
   port becomes an `ssh -L` listener on the Mac's loopback carried to the same
   address inside the container, so nothing binds in the VM and nothing outside
@@ -601,10 +623,20 @@ with a fake VM boundary:
   flags, no question at all when there is nothing to decide, and each refusal.
   The store's test covers activation filling submodule baselines in and
   refusing a snapshot that renames or moves one.
-- **connect**: the exact SSH argument vector for Pi and for a shell, with a
-  workspace path that needs quoting for the remote shell; option parsing;
-  and every inactive run refused before anything launches, whether asked
-  through `connect` or `zed`, with a stopped one told to resume.
+- **connect**: the exact SSH argument vector for a shell and for a command, with
+  a workspace path that needs quoting for the remote shell and a redirect that
+  must survive as syntax rather than become a program name; a pty asked for only
+  when both ends are terminals; everything after `--` kept for the run including
+  words pisafe would otherwise read as its own; and every inactive run refused
+  before anything launches, whether asked through `connect` or `zed`, with a
+  stopped one told to resume.
+- **cp inward**: the colon read as the direction on either side and both ends in
+  a run refused; a credential-shaped name refused without `--unsafe` going in
+  and untouched coming out; the destination resolved against the workspace, an
+  existing directory taking the copy inside it, an occupied name refused and
+  then replaced under `--force`; escaping destinations and names refused before
+  the run is reached at all; and an archive naming something other than what the
+  Mac said is arriving refused by the guest whatever it holds.
 - **Git identity**: repository config preferred over global, an unconfigured Mac
   refused, an installed identity proven by reading back a commit's author,
   empty/oversized/newline values refused, unknown guest fields refused, and run
@@ -764,6 +796,16 @@ Verified against a real ARM64 VM:
   whole-workspace requests were refused Mac-side; a directory holding a symlink
   to `/etc/passwd` was refused naming `"linked/escape"`. The run stayed active
   and unchanged.
+- **cp inward**, against a real run created before the command existed, which is
+  the case it is for: a file landed in the workspace root and came back
+  byte-for-byte; a directory arrived with its tree; a second copy of one name
+  was refused naming `--force` and then replaced with it; a destination naming
+  an existing directory landed inside it while one naming nothing was taken
+  literally; and `../escape` was refused on the Mac before the run was reached.
+  The refusal from inside the run reads through the transport's own framing —
+  `copy into run: execute in Lima VM: limactl shell: pisafe-guest: ... pass
+  --force` — which is how every guest-side error already reads and was left
+  alone rather than special-cased here.
 - **Baseline choice**, on three scratch repositories with isolated Mac state:
   a run carrying an uncommitted edit answered `drop` at the prompt (after one
   unusable answer) imported `initial → agent commit → final capture` with the
@@ -991,8 +1033,8 @@ A persistent Lima instance named `pisafe` was left running with security profile
 holding cached base/test images plus the current managed run image:
 
 ```text
-recipe digest: sha256:13879f2bce86f926a0176d7a935812c46f3e7c25f772028d3bdcd1faafa92c6b
-image ID:      sha256:687de33decb4ad27c8c93ba7614281add17cc440dd101cc5633f7817f1ce8c1e
+recipe digest: sha256:4305e790f9baf24b9b44ee350006192fe166f364ba559b96b71e04b25d3db91d
+image ID:      sha256:2e6d954bbbc57ad81193d03285bd60ca25eebb3a806a5a81803629b7f90925c5
 ```
 
 The instance was recreated during Phase 2: the storage helper gained the project

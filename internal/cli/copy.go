@@ -9,59 +9,103 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/runcopy"
 	"github.com/mpizenberg/pisafe/internal/runctl"
 )
 
-// copyRequest is one parsed `pisafe cp RUN:PATH [DEST] [--force]`.
+// copyRequest is one parsed `pisafe cp`. Exactly one side of a copy carries a
+// colon, and which side it is decides the direction: runPath is what is copied
+// when the run is the source and where the copy lands when it is the
+// destination, and localPath is the other end.
 type copyRequest struct {
-	runID       string
-	path        string
-	destination string
-	force       bool
+	runID     string
+	inbound   bool
+	runPath   string
+	localPath string
+	force     bool
+	unsafe    bool
 }
 
-var errCopyUsage = fmt.Errorf("usage: pisafe cp [RUN:]PATH [DEST] [--force]")
+var errCopyUsage = fmt.Errorf(
+	"usage: pisafe cp [RUN]:PATH [DEST] [--force]        take a copy out of a run\n" +
+		"       pisafe cp PATH [RUN]: [--force] [--unsafe]  put one into a run",
+)
 
-// parseCopyRequest reads the copy arguments. The destination defaults to the
-// copied path's own name in the current directory, and an existing directory
-// means inside it, both of which is what cp does. A source naming no run comes
-// from the checkout's own run; a path that carries a colon has to name one.
+// parseCopyRequest reads the copy arguments. A colon marks the side that is in
+// a run, and the run's name before it is optional exactly as it is everywhere
+// else. Taking a copy out is what a single path means, because that is the
+// direction a path alone can only have meant.
 func parseCopyRequest(args []string) (copyRequest, error) {
 	request := copyRequest{}
 	positional := []string{}
 	for _, argument := range args {
-		if argument == "--force" {
+		switch {
+		case argument == "--force":
 			request.force = true
-			continue
-		}
-		if strings.HasPrefix(argument, "-") {
+		case argument == "--unsafe":
+			request.unsafe = true
+		case strings.HasPrefix(argument, "-"):
 			return copyRequest{}, fmt.Errorf("unknown cp option %q\n%w", argument, errCopyUsage)
+		default:
+			positional = append(positional, argument)
 		}
-		positional = append(positional, argument)
 	}
 	if len(positional) == 0 || len(positional) > 2 {
 		return copyRequest{}, errCopyUsage
 	}
-	sourcePath := positional[0]
-	if runID, rest, found := strings.Cut(sourcePath, ":"); found {
-		if runID == "" {
-			return copyRequest{}, fmt.Errorf(
-				"%q does not name a run and a path\n%w",
-				positional[0],
-				errCopyUsage,
-			)
+	sourceRun, sourcePath, sourceInRun := strings.Cut(positional[0], ":")
+	if len(positional) == 1 {
+		if !sourceInRun {
+			sourceRun, sourcePath = "", positional[0]
 		}
-		request.runID, sourcePath = runID, rest
+		return request.takingOut(sourceRun, sourcePath, "")
 	}
+	destinationRun, destinationPath, destinationInRun := strings.Cut(positional[1], ":")
+	switch {
+	case sourceInRun && destinationInRun:
+		return copyRequest{}, fmt.Errorf(
+			"both %q and %q are in a run; a copy has one end on this Mac\n%w",
+			positional[0],
+			positional[1],
+			errCopyUsage,
+		)
+	case sourceInRun:
+		return request.takingOut(sourceRun, sourcePath, positional[1])
+	case destinationInRun:
+		request.runID = destinationRun
+		request.inbound = true
+		request.localPath = positional[0]
+		if destinationPath != "" {
+			cleaned, err := runcopy.SafePath(destinationPath)
+			if err != nil {
+				return copyRequest{}, err
+			}
+			request.runPath = cleaned
+		}
+		return request, nil
+	}
+	return copyRequest{}, fmt.Errorf(
+		"neither %q nor %q is in a run; mark the one that is with a colon\n%w",
+		positional[0],
+		positional[1],
+		errCopyUsage,
+	)
+}
+
+// takingOut completes a request that reads out of a run. The destination
+// defaults to the copied path's own name in the current directory, and an
+// existing directory means inside it, both of which is what cp does.
+func (request copyRequest) takingOut(runID, sourcePath, destination string) (copyRequest, error) {
 	cleaned, err := runcopy.SafePath(sourcePath)
 	if err != nil {
 		return copyRequest{}, err
 	}
-	request.path = cleaned
-	request.destination = path.Base(cleaned)
-	if len(positional) == 2 {
-		request.destination = destinationFor(positional[1], cleaned)
+	request.runID = runID
+	request.runPath = cleaned
+	request.localPath = path.Base(cleaned)
+	if destination != "" {
+		request.localPath = destinationFor(destination, cleaned)
 	}
 	return request, nil
 }
@@ -81,6 +125,13 @@ func runCopy(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if request.inbound && !request.unsafe && gitstage.LooksLikeSecret(request.localPath) {
+		return fmt.Errorf(
+			"%q looks like a credential; everything in the run could read and "+
+				"exfiltrate it. Pass --unsafe to copy it in anyway",
+			request.localPath,
+		)
+	}
 	request.runID, err = resolveRunID(ctx, request.runID)
 	if err != nil {
 		return err
@@ -89,11 +140,25 @@ func runCopy(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if request.inbound {
+		entries, err := controller.CopyIn(ctx, runctl.CopyIntoRequest{
+			RunID:       request.runID,
+			ImageID:     imageID,
+			Source:      request.localPath,
+			Destination: request.runPath,
+			Replace:     request.force,
+		})
+		if err != nil {
+			return err
+		}
+		printCopyResult(out, request, entries)
+		return nil
+	}
 	entries, err := controller.CopyOut(ctx, runctl.CopyRequest{
 		RunID:       request.runID,
 		ImageID:     imageID,
-		Path:        request.path,
-		Destination: request.destination,
+		Path:        request.runPath,
+		Destination: request.localPath,
 		Replace:     request.force,
 	})
 	if err != nil {
@@ -103,8 +168,9 @@ func runCopy(ctx context.Context, args []string, out io.Writer) error {
 	return nil
 }
 
-// printCopyResult lists what arrived. Every name was chosen inside the run, so
-// it is quoted rather than written to the terminal as it stands.
+// printCopyResult lists what arrived. Coming out of a run every name was chosen
+// inside it, so they are quoted rather than written to the terminal as they
+// stand, and going in they are quoted for the symmetry of reading one report.
 func printCopyResult(out io.Writer, request copyRequest, entries []runcopy.Entry) {
 	const maximumNames = 12
 	files, total := 0, int64(0)
@@ -115,7 +181,11 @@ func printCopyResult(out io.Writer, request copyRequest, entries []runcopy.Entry
 		files++
 		total += entry.Size
 	}
-	fmt.Fprintf(out, "Copied:    %s:%s\n", request.runID, request.path)
+	source, destination := request.runID+":"+request.runPath, filepath.Clean(request.localPath)
+	if request.inbound {
+		source, destination = request.localPath, request.runID+":"+request.runPath
+	}
+	fmt.Fprintf(out, "Copied:    %s\n", source)
 	printed := 0
 	for _, entry := range entries {
 		if entry.Directory {
@@ -133,7 +203,7 @@ func printCopyResult(out io.Writer, request copyRequest, entries []runcopy.Entry
 		"Wrote:     %d file(s), %s to %q\n",
 		files,
 		humanBytes(total),
-		filepath.Clean(request.destination),
+		destination,
 	)
 }
 

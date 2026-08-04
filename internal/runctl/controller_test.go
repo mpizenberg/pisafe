@@ -314,6 +314,31 @@ func (backend *fakeBackend) Execute(
 	if strings.Contains(strings.Join(args, " "), "pisafe-guest configure-ssh") {
 		return []byte("ssh-ed25519 host-key\n"), nil
 	}
+	// Stands in for the run's import container, resolving the destination the
+	// way the guest helper does so the controller sees a real copy land.
+	if index := slices.Index(args, "import"); strings.Contains(
+		strings.Join(args, " "), "pisafe-guest import",
+	) && index+4 < len(args) {
+		destination, name, decision := args[index+2], args[index+3], args[index+4]
+		target := backend.applyWorkspace
+		if destination != "" {
+			target = filepath.Join(target, filepath.FromSlash(destination))
+		}
+		if info, err := os.Stat(target); err == nil && info.IsDir() {
+			target = filepath.Join(target, name)
+		}
+		entries, err := runcopy.CopyTo(
+			strings.NewReader(input),
+			name,
+			target,
+			decision == "replace",
+		)
+		if err != nil {
+			return nil, err
+		}
+		output, err := json.Marshal(entries)
+		return append(output, '\n'), err
+	}
 	if strings.Contains(strings.Join(args, " "), "pisafe-guest prepare-apply") {
 		var snapshot gitstage.Snapshot
 		if err := json.Unmarshal([]byte(input), &snapshot); err != nil {
