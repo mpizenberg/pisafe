@@ -51,6 +51,30 @@ history holds them. New entries are appended in full.
   is that `connect` can print nothing afterwards.
 - `connect` refuses a stopped run and names `pisafe resume` instead of resuming
   it. Resuming spends the run's wall-clock budget, which stays an explicit act.
+- Reaching a server a run hosts is an `ssh -L` channel on the run's own
+  connection, which cost the run's `sshd` its blanket `AllowTcpForwarding no`
+  and its key its `no-port-forwarding` option. Both are replaced by the exact
+  grant: local forwarding only, bounded by `PermitOpen 127.0.0.1:*`. Relaying
+  each connection over a fresh `podman exec`, as the SSH `ProxyCommand` does,
+  was the alternative and would have kept those two settings absolute and worked
+  on runs created before this — but it spawns an ssh client, a `podman exec`,
+  and a helper per TCP connection, and a browser opens many, so a dev server
+  would have paid a process and a container exec for every one. The capability
+  is the same either way: whoever holds the run's key can already open arbitrary
+  stdio into the container, and only this Mac holds it. The cost is that a run
+  created before this change cannot forward, because its `sshd_config` and
+  `authorized_keys` are written once at creation and survive stop and resume.
+- The forward is per-invocation and ends with the command rather than being a
+  property of a run. It is the one thing that puts run-authored content in the
+  user's browser at a loopback origin, where it can reach other services on this
+  Mac's loopback subject only to what the browser enforces. Making it a
+  long-lived per-run setting was not taken: the exposure should last as long as
+  the user is looking, and no longer.
+- A run's SSH config keeps `ClearAllForwardings yes`, and `pisafe forward`
+  overrides it on the command line. Removing it from the config would have been
+  simpler but would let any forwarding request through `connect`, `zed`, or a
+  hand-written `ssh` reach the run silently; leaving it means a forward exists
+  only where one was asked for by name.
 - Lima's default VZ user-mode network remains in the generated profile. Native
   `vzNAT` was tested but exhibited the same stopped-VM SSH recovery failure and
   made its Mac-side interface appear only after the immutable host-network

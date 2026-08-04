@@ -344,7 +344,7 @@ func TestConfigureSSHCreatesRestrictedRunFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := string(authorized); got !=
-		"no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-user-rc "+
+		"no-agent-forwarding,no-X11-forwarding,no-user-rc "+
 			publicKey+"\n" {
 		t.Fatalf("authorized_keys = %q", got)
 	}
@@ -359,7 +359,11 @@ func TestConfigureSSHCreatesRestrictedRunFiles(t *testing.T) {
 		"PermitRootLogin no",
 		"AllowUsers node",
 		"AllowAgentForwarding no",
-		"AllowTcpForwarding no",
+		// The Mac may reach a server the run is hosting, and nothing else: a
+		// forward aimed anywhere but this container's loopback is refused, and
+		// the run gets no listener of the Mac's in return.
+		"AllowTcpForwarding local",
+		"PermitOpen 127.0.0.1:*",
 		// sshd builds a session environment from scratch, so the container's
 		// own environment reaches a terminal only if the daemon restates it.
 		"SetEnv GIT_TERMINAL_PROMPT=0 PI_CODING_AGENT_DIR=" +

@@ -16,7 +16,7 @@ import (
 )
 
 var errUsage = errors.New(
-	"usage: pisafe <run|connect|stop|resume|diff|cp|apply|discard|project|profile" +
+	"usage: pisafe <run|connect|forward|stop|resume|diff|cp|apply|discard|project|profile" +
 		"|extension|tool|backup|restore|gc|list|zed|login|logout|broker|doctor|help>",
 )
 
@@ -31,6 +31,8 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 		return runCreate(ctx, args[1:], out)
 	case "connect":
 		return runConnect(ctx, args[1:])
+	case "forward":
+		return runForward(ctx, args[1:], out)
 	case "login":
 		return runLogin(ctx, args[1:], in, out)
 	case "logout":
@@ -125,6 +127,14 @@ Usage:
   pisafe connect [RUN] [--shell]
                    Attach this terminal to a run and start Pi, or with
                    --shell open a shell in the same container.
+  pisafe forward [RUN] [LOCAL:]PORT...
+                   Reach a server a run is hosting, so a web app developed
+                   inside one can be opened in your browser. Each port becomes
+                   a listener on this Mac's loopback that carries TCP to the
+                   same port inside the run; LOCAL:PORT moves it to another
+                   local port when that one is taken. Nothing is published in
+                   the VM or on this Mac, the run gains no way to reach
+                   anything here, and the forward ends with Ctrl-C.
   pisafe stop [RUN]
                    Stop a run while preserving its workspace
   pisafe resume [RUN]

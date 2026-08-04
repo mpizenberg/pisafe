@@ -238,7 +238,10 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   per-run `known_hosts` and fingerprint before activation. `sshd` runs as UID
   1000 as the container's main process, listening only on container-local
   `127.0.0.1:2222`, public-key only, with password, keyboard-interactive, root,
-  agent, X11, tunnel, user-RC, and TCP forwarding disabled. No port is published.
+  agent, X11, tunnel, user-RC, and remote forwarding disabled. Local forwarding
+  is allowed and bounded by `PermitOpen 127.0.0.1:*`, which is what carries
+  `pisafe forward`; the key's own options no longer refuse it. No port is
+  published.
   `sshd` builds each session's environment from scratch, so its config restates
   what the container declares — `GIT_TERMINAL_PROMPT=0`, `PI_CODING_AGENT_DIR`,
   `PI_SKIP_VERSION_CHECK` — through `SetEnv`.
@@ -477,7 +480,16 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   SSH config Zed uses. It replaces its own process with `ssh`, so signals,
   window resizes, and the exit status are the session's. Only an active run
   within its budget is reachable; a stopped one is refused naming
-  `pisafe resume`. `zed` shares that check.
+  `pisafe resume`. `zed` and `forward` share that check.
+- `pisafe forward [RUN] [LOCAL:]PORT...` reaches a server a run is hosting. Each
+  port becomes an `ssh -L` listener on the Mac's loopback carried to the same
+  address inside the container, so nothing binds in the VM and nothing outside
+  this Mac can connect. A port and a run name cannot be confused for each other,
+  so both are positional in any order. The command replaces itself with `ssh`
+  after printing what it forwarded: the listeners belong to that process and
+  end with it. A run's own SSH config clears every forwarding, so the request is
+  made where it is meant — `ClearAllForwardings=no` appears on this command line
+  and nowhere else.
 - Every path that touches a run's container proves its identity — name, label,
   and image against the manifest. What the container is mounted on is proved
   where pisafe has just started one and is about to hand it over, at run and at
@@ -712,7 +724,13 @@ Verified against a real ARM64 VM:
   were generated and pinned, the generated ProxyCommand connected, and a file
   written over the Zed-compatible session was seen by a Pi executable in the
   same container. The session ran as UID 1000 with no forwarded agent or
-  `/Users`, and `podman port` reported no published port.
+  `/Users`, and `podman port` reported no published port. Over the same
+  endpoint, an HTTP server started on the container's loopback answered a
+  request made on this Mac's loopback through an `ssh -L` channel, while the
+  same client asking for one address over — `127.0.0.2` — was refused
+  "administratively prohibited". Run against the previous image, whose runs were
+  configured before local forwarding existed, that first assertion fails with
+  the same refusal, so the test is measuring the policy rather than the wiring.
 - **Lifecycle**: the real CLI completed `run → stop → resume → SSH → discard`
   with isolated Mac state — the manifest carried the real dirty baseline commit,
   untracked files were reported as excluded, stop preserved the workspace,
@@ -973,8 +991,8 @@ A persistent Lima instance named `pisafe` was left running with security profile
 holding cached base/test images plus the current managed run image:
 
 ```text
-recipe digest: sha256:91a234aed75f42506f7da4ba2179e4a8e5b9001b4b6db4da176ad1df07ca9559
-image ID:      sha256:2853c0a1906dbffe11f9306877b6112a73e3d444c9614bbc21bce4d75996f757
+recipe digest: sha256:13879f2bce86f926a0176d7a935812c46f3e7c25f772028d3bdcd1faafa92c6b
+image ID:      sha256:687de33decb4ad27c8c93ba7614281add17cc440dd101cc5633f7817f1ce8c1e
 ```
 
 The instance was recreated during Phase 2: the storage helper gained the project

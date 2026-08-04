@@ -103,6 +103,7 @@ pisafe broker                # foreground; runs have no inference without it
 pisafe run [--include PATH]... [--include-unsafe PATH]...
 pisafe list
 pisafe connect [RUN] [--shell]
+pisafe forward [RUN] [LOCAL:]PORT...
 pisafe zed [RUN]
 pisafe stop [RUN]
 pisafe resume [RUN]
@@ -129,6 +130,14 @@ Projects dialog — pisafe never edits your global SSH or Zed settings.
 `connect` attaches your terminal to a run and starts Pi in its workspace, or
 opens a shell there with `--shell`. It needs no editor, and it reaches the same
 container, files, and network policy the Zed terminal does.
+
+`forward` is how you look at something a run is serving. `pisafe forward 5173
+8080` starts a backend and frontend dev server's ports on this Mac's loopback,
+so `http://127.0.0.1:5173` in your browser reaches the one inside the run; use
+`3000:8080` when the local port is already taken. Nothing is published in the VM
+or beyond this Mac, the run gets no way to reach anything here, and the forward
+ends when you press Ctrl-C. It does put a page the run wrote in your browser, so
+forward the ports you mean to look at rather than leaving one open.
 
 `diff` reports a run's commits, changed paths with line counts, and untracked
 leftovers, without stopping it and without printing file content. `cp` takes a

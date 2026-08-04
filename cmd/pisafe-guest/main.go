@@ -493,7 +493,7 @@ func configureSSH(
 	}
 
 	authorized := filepath.Join(directory, "authorized_keys")
-	authorizedKey := "no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-user-rc " +
+	authorizedKey := "no-agent-forwarding,no-X11-forwarding,no-user-rc " +
 		publicKey + "\n"
 	if err := writeNewFile(authorized, []byte(authorizedKey), 0o600); err != nil {
 		return fmt.Errorf("write SSH authorized key: %w", err)
@@ -597,6 +597,12 @@ func relaySSH(connection net.Conn, in io.Reader, out io.Writer) error {
 // environment from scratch rather than from its own, so the variables the
 // container declares are restated here; otherwise a terminal session would run
 // under a different environment than the container contract states.
+//
+// Local forwarding is how the Mac reaches a server the run is hosting, and is
+// the only direction allowed. Only the holder of the run's private key can ask
+// for one, and bounding it to this container's loopback keeps the Mac from
+// asking the run to reach anything else on its behalf. Remote forwarding stays
+// off, so nothing can put a Mac-side service in front of the run either.
 func sshdConfig(home string) string {
 	directory := filepath.Join(home, ".ssh")
 	return "Port 2222\n" +
@@ -618,7 +624,8 @@ func sshdConfig(home string) string {
 		"StrictModes yes\n" +
 		"X11Forwarding no\n" +
 		"AllowAgentForwarding no\n" +
-		"AllowTcpForwarding no\n" +
+		"AllowTcpForwarding local\n" +
+		"PermitOpen 127.0.0.1:*\n" +
 		"PermitTunnel no\n" +
 		"GatewayPorts no\n" +
 		"PermitUserEnvironment no\n" +

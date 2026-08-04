@@ -122,6 +122,7 @@ files, tools, dependency cache, Git commits, and network policy.
 ```text
 pisafe list
 pisafe connect [run]
+pisafe forward [run] [<local>:]<port>...
 pisafe zed [run]
 pisafe diff [run]
 pisafe cp [<run>:]<path> [dest]
@@ -435,6 +436,17 @@ machine, which keeps executable project tooling in the sandbox. The local UI
 still sees source text, parses it, and stores unsaved state; Zed is therefore
 trusted as a local editor, but project build tools do not execute on macOS.
 
+A run may also host a server the user needs to look at, and `pisafe forward`
+carries one to a listener on the Mac's loopback. That is a channel on the run's
+own SSH connection, not a published port: nothing binds in the VM, whose
+firewall drops inbound traffic that is not SSH, and only the holder of the run's
+key can open one. Forwarding is local-only and bounded to the container's
+loopback, so a run gains no listener of the Mac's and the Mac cannot ask a run
+to reach anything else on its behalf. It is per-invocation and dies with the
+command, because it does hand run-authored content to a browser at a loopback
+origin, which the user chooses one port at a time rather than pisafe granting
+for the life of a run.
+
 ## Lifecycle, cleanup, and the run record
 
 ```text
@@ -539,6 +551,10 @@ and errors, and fail-closed behavior when the broker or upstream is down.
     backup twice or restoring twice loses and changes nothing.
 19. Emptying a project's caches, or losing them with the VM, changes only how
     long the next run takes.
+20. A forwarded port reaches a server inside the run and nothing else: a forward
+    aimed anywhere but the container's loopback is refused, no listener binds in
+    the VM or outside this Mac's loopback, and every forward ends with the
+    command that asked for it.
 
 ## Residual risks
 

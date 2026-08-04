@@ -3,10 +3,15 @@ package lima
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -207,6 +212,8 @@ pi --version >/dev/null`,
 	); err != nil {
 		t.Fatal(err)
 	}
+	assertLiveForward(t, ctx, transport, spec, endpoint)
+
 	if _, err := transport.Execute(
 		ctx,
 		nil,
@@ -225,6 +232,174 @@ pi --version >/dev/null`,
 	if string(hostContent) != "changed\n" {
 		t.Fatalf("original checkout changed: %q", hostContent)
 	}
+}
+
+// assertLiveForward proves the one way into a run from this Mac. Nothing is
+// published in the VM or on macOS and the VM firewall drops inbound traffic
+// that is not SSH, so a server the run hosts is reachable only as a channel on
+// the run's own SSH connection — and only at the run's loopback, because a
+// forward pointed anywhere else would make this Mac's loopback a way to ask the
+// run to reach things on its behalf.
+func assertLiveForward(
+	t *testing.T,
+	ctx context.Context,
+	transport Transport,
+	spec runcontainer.Spec,
+	endpoint runssh.Endpoint,
+) {
+	t.Helper()
+	const remotePort = 8099
+	const payload = "pisafe-forwarded"
+	if _, err := transport.Execute(
+		ctx,
+		nil,
+		"podman", "exec", "--detach", "--user", "1000:1000",
+		spec.ContainerName(),
+		"node", "-e", fmt.Sprintf(
+			`require("http").createServer((_, r) => r.end(%q)).listen(%d, "127.0.0.1")`,
+			payload,
+			remotePort,
+		),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	local := freeLocalPort(t)
+	forward, stderr := startLiveForward(t, ctx, endpoint, fmt.Sprintf(
+		"127.0.0.1:%d:127.0.0.1:%d",
+		local,
+		remotePort,
+	))
+	served := ""
+	for attempt := 0; attempt < 20 && served != payload; attempt++ {
+		if body, err := fetchLocal(ctx, local); err == nil {
+			served = body
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	if served != payload {
+		t.Fatalf("forwarded port served %q, want %q\nssh: %s", served, payload, stderr)
+	}
+	forward()
+
+	// The same run, the same key, one address over: sshd refuses to open it.
+	denied := freeLocalPort(t)
+	forward, stderr = startLiveForward(t, ctx, endpoint, fmt.Sprintf(
+		"127.0.0.1:%d:127.0.0.2:%d",
+		denied,
+		remotePort,
+	))
+	for attempt := 0; attempt < 20; attempt++ {
+		if _, err := fetchLocal(ctx, denied); err != nil &&
+			strings.Contains(stderr.String(), "administratively prohibited") {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+	forward()
+	if !strings.Contains(stderr.String(), "administratively prohibited") {
+		t.Errorf("a forward off the run's loopback was not refused: %s", stderr)
+	}
+}
+
+// startLiveForward runs the client that holds one forward and returns the call
+// that ends it. Its standard error is what sshd's refusals come back on, so it
+// is collected rather than discarded.
+func startLiveForward(
+	t *testing.T,
+	ctx context.Context,
+	endpoint runssh.Endpoint,
+	forward string,
+) (func(), *safeBuffer) {
+	t.Helper()
+	command := exec.CommandContext(
+		ctx,
+		"ssh",
+		"-F", endpoint.ConfigFile,
+		"-N", "-T",
+		"-o", "ClearAllForwardings=no",
+		"-o", "ExitOnForwardFailure=yes",
+		"-L", forward,
+		endpoint.Alias,
+	)
+	stderr := &safeBuffer{}
+	command.Stderr = stderr
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	stop := func() {
+		if stopped {
+			return
+		}
+		stopped = true
+		_ = command.Process.Kill()
+		_ = command.Wait()
+	}
+	t.Cleanup(stop)
+	return stop, stderr
+}
+
+// safeBuffer collects a running child's standard error while the test reads it.
+type safeBuffer struct {
+	mutex   sync.Mutex
+	content strings.Builder
+}
+
+func (buffer *safeBuffer) Write(content []byte) (int, error) {
+	buffer.mutex.Lock()
+	defer buffer.mutex.Unlock()
+	return buffer.content.Write(content)
+}
+
+func (buffer *safeBuffer) String() string {
+	buffer.mutex.Lock()
+	defer buffer.mutex.Unlock()
+	return buffer.content.String()
+}
+
+func freeLocalPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return port
+}
+
+func fetchLocal(ctx context.Context, port int) (string, error) {
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodGet,
+		fmt.Sprintf("http://127.0.0.1:%d/", port),
+		nil,
+	)
+	if err != nil {
+		return "", err
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 1024))
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
 }
 
 func waitForLiveSSH(
