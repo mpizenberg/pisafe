@@ -20,7 +20,7 @@ import (
 )
 
 func runStop(ctx context.Context, runID string, out io.Writer) error {
-	controller, err := prepareLifecycle(ctx)
+	controller, err := prepareUnverified(ctx)
 	if err != nil {
 		return err
 	}
@@ -184,7 +184,7 @@ func printMore(out io.Writer, shown, total int) {
 }
 
 func runDiscard(ctx context.Context, runID string, out io.Writer) error {
-	controller, err := prepareLifecycle(ctx)
+	controller, err := prepareUnverified(ctx)
 	if err != nil {
 		return err
 	}
@@ -200,11 +200,26 @@ func runDiscard(ctx context.Context, runID string, out io.Writer) error {
 	return nil
 }
 
-// prepareInspection adds the current managed run image to the lifecycle
-// controller. Every command that reads a run's workspace from outside it needs
-// that image, because the guest helper inside it must match this controller.
+// prepareUnverified builds the controller for a command that starts no run:
+// one that reads or writes a run's workspace from outside it, or one that only
+// ends or removes what a run already holds. Such a command is not held to the
+// VM's boundary records, for the reasons on lima.Manager.StartUnverified.
+func prepareUnverified(ctx context.Context) (runctl.Controller, error) {
+	controller, err := newController(ctx)
+	if err != nil {
+		return runctl.Controller{}, err
+	}
+	if err := lima.NewManager().StartUnverified(ctx); err != nil {
+		return runctl.Controller{}, err
+	}
+	return controller, nil
+}
+
+// prepareInspection adds the current managed run image to that controller.
+// Every command that reads a run's workspace from outside it needs that image,
+// because the guest helper inside it must match this controller.
 func prepareInspection(ctx context.Context) (runctl.Controller, string, error) {
-	controller, err := prepareLifecycle(ctx)
+	controller, err := prepareUnverified(ctx)
 	if err != nil {
 		return runctl.Controller{}, "", err
 	}
@@ -220,14 +235,25 @@ func prepareInspection(ctx context.Context) (runctl.Controller, string, error) {
 }
 
 func prepareLifecycle(ctx context.Context) (runctl.Controller, error) {
+	controller, err := newController(ctx)
+	if err != nil {
+		return runctl.Controller{}, err
+	}
+	if err := startBoundary(ctx); err != nil {
+		return runctl.Controller{}, err
+	}
+	return controller, nil
+}
+
+// newController builds what every command drives the VM through. It reaches
+// nothing itself, so the boundary a command is held to stays its caller's
+// decision.
+func newController(ctx context.Context) (runctl.Controller, error) {
 	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
 		return runctl.Controller{}, fmt.Errorf("pisafe lifecycle commands require macOS on ARM64")
 	}
 	catalog, err := providers.Load(ctx)
 	if err != nil {
-		return runctl.Controller{}, err
-	}
-	if err := startBoundary(ctx); err != nil {
 		return runctl.Controller{}, err
 	}
 	root, err := runstate.DefaultRoot()
@@ -242,9 +268,10 @@ func prepareLifecycle(ctx context.Context) (runctl.Controller, error) {
 	), nil
 }
 
-// startBoundary brings the VM up for a command that needs to reach it. The
-// networks the firewall is built around are discovered every time, because the
-// Mac may have joined a different one since the VM was last started.
+// startBoundary brings the VM up for a command that may start a run, and holds
+// it to the boundary that run would get. The networks the firewall is built
+// around are discovered every time, because the Mac may have joined a different
+// one since the VM was last started.
 func startBoundary(ctx context.Context) error {
 	prefixes, err := hostnet.OnLinkIPv4(ctx)
 	if err != nil {

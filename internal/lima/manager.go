@@ -125,6 +125,37 @@ func (manager Manager) Start(ctx context.Context, hostPrefixes []string) error {
 	if _, err := renderPrefixInput(hostPrefixes); err != nil {
 		return err
 	}
+	if err := manager.bringUp(ctx); err != nil {
+		return err
+	}
+	if err := manager.VerifySecurityProfile(ctx, hostPrefixes); err != nil {
+		return err
+	}
+	if err := manager.SyncClock(ctx); err != nil {
+		return err
+	}
+	return manager.VerifyFirewall(ctx, hostPrefixes)
+}
+
+// StartUnverified starts (or reuses) the VM without holding it to the boundary
+// records, for a command that starts no run: one that reads or writes a run's
+// own workspace through a container with no network, no home, and none of the
+// shared profile, or one that only ends or removes what a run already holds.
+// Neither record bears on what such a command reaches, and a VM that fails
+// either has one cure — recreating it — which destroys every run's storage. A
+// command held to the records on a VM that has already failed them can only
+// tell the user to throw away the work it was asked to hand back.
+func (manager Manager) StartUnverified(ctx context.Context) error {
+	if err := manager.bringUp(ctx); err != nil {
+		return err
+	}
+	return manager.SyncClock(ctx)
+}
+
+// bringUp starts the VM unless it is already running. It proves nothing about
+// the boundary: what a command must have proved before it reaches a run is its
+// caller's to decide.
+func (manager Manager) bringUp(ctx context.Context) error {
 	status, err := manager.Status(ctx)
 	if err != nil {
 		return err
@@ -133,7 +164,7 @@ func (manager Manager) Start(ctx context.Context, hostPrefixes []string) error {
 	case StatusAbsent:
 		return fmt.Errorf("Lima instance %q has not been created", manager.instance)
 	case StatusRunning:
-		// Refresh below: a running VM may have crossed a host network change.
+		return nil
 	case StatusStopped:
 		if _, err := manager.runner.Run(
 			ctx,
@@ -144,16 +175,10 @@ func (manager Manager) Start(ctx context.Context, hostPrefixes []string) error {
 		); err != nil {
 			return fmt.Errorf("start Lima instance: %w", err)
 		}
+		return nil
 	default:
 		return fmt.Errorf("unsupported Lima status %q", status)
 	}
-	if err := manager.VerifySecurityProfile(ctx, hostPrefixes); err != nil {
-		return err
-	}
-	if err := manager.SyncClock(ctx); err != nil {
-		return err
-	}
-	return manager.VerifyFirewall(ctx, hostPrefixes)
 }
 
 // VerifySecurityProfile detects an instance provisioned by an older or locally

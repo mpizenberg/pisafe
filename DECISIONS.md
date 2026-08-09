@@ -185,6 +185,31 @@ history holds them. New entries are appended in full.
   on `192.0.2.1` refused, and the relay test shows `18080` served. Binding a
   stand-in listener inside the one test was not taken, because it would race a
   real broker for the port and fail for a reason unrelated to the boundary.
+- The security-profile and firewall records are verified before a command that
+  may start a run, and not before one that reaches a run already there. `diff`,
+  `cp`, and `apply` read or write a run's workspace through a container with no
+  network, no home, and none of the shared profile; `stop` and `discard` take a
+  run's claim on the VM away. Neither record bears on any of them, while a VM
+  that fails either check has one cure — recreating it — that deletes every
+  run's storage. Verifying everywhere was the safer-looking option and is the
+  one rejected: it destroyed exactly the work it was asked to protect, since a
+  stale VM could not hand a run's commits back and the instruction it printed
+  was the one that would lose them, and it refused to stop a run left alive
+  under the very boundary the failed check called untrustworthy.
+- `backup` is exempt and `restore` is not, although they are one pair. Backup is
+  the only half that ever runs against a stale VM: restore's target is the VM
+  that has just replaced it, so the exemption would buy it nothing. What restore
+  would give up is real — it is the one command that installs packages over the
+  network, in a `--network=pasta` container the deny set governs, and the one
+  that rewrites the profile every later run mounts. Exempting both was rejected
+  for that; exempting neither was rejected because it left recreation, the only
+  cure a stale VM has, with no way to save the transcripts nothing can refetch.
+- Backing up mounts each project's filesystem before archiving it. Reusing
+  `EnsureProjectStorage` can create a store for a record whose filesystem is
+  gone, which a verify-only helper call would instead refuse; creating was
+  taken because the empty store is what the project's next run makes anyway,
+  while refusing would fail a whole backup over one project that has nothing
+  to back up.
 
 ## Storage and lifecycle
 

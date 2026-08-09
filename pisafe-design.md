@@ -500,6 +500,17 @@ creating → active → stopped → imported → reclaimed
   run twice changes nothing.
 - Never reclaim a run with unimported commits merely because it is old. Warn and
   require explicit discard.
+- A VM that fails its boundary checks still hands work back, still lets go of
+  it, and still exports what nothing can refetch. `diff`, `cp`, and `apply`
+  reach a run's workspace through a container with no network, no home, and
+  none of the shared profile; `stop` and `discard` only end what a run holds;
+  `backup` reads the VM and writes to the Mac. Neither the host-network deny set
+  nor the security profile bears on those, and neither is verified before them.
+  Only a command that may start a run is held to the records — and what a failed
+  check tells the user to do, recreate the VM, is what deletes every run's
+  storage and every project's transcripts. `restore` stays verified: it installs
+  over the network and rewrites the profile every run mounts, and the VM it puts
+  a backup into is the new one, never the VM that failed.
 
 While a run exists, its record holds the run ID, project identity, captured
 source HEAD, timestamps, exact image and tool versions, baseline and final

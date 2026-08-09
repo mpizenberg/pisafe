@@ -23,7 +23,10 @@ func runBackup(ctx context.Context, args []string, out io.Writer) error {
 	if len(args) != 1 {
 		return errBackupUsage
 	}
-	if err := startBoundary(ctx); err != nil {
+	// Backing up reads the VM and writes only here, and it is what a VM whose
+	// boundary records no longer hold has left to give: the cure for one is
+	// recreating it, which destroys the transcripts this is copying out.
+	if err := lima.NewManager().StartUnverified(ctx); err != nil {
 		return err
 	}
 	return writeBackup(ctx, lima.NewTransport(), args[0], out)
@@ -83,6 +86,13 @@ func writeBackup(
 	for _, record := range recorded {
 		project, err := runid.NewProject(record.Root)
 		if err != nil {
+			return err
+		}
+		// A project's filesystem is mounted per VM boot, and archiving one that
+		// is not mounted finds no session directory and reports no transcripts.
+		// Nothing else here would fail, so the backup would claim to hold a
+		// store it had not read.
+		if err := transport.EnsureProjectStorage(ctx, project.Key); err != nil {
 			return err
 		}
 		refused, err := backupSessions(ctx, transport, directory, project.Key)

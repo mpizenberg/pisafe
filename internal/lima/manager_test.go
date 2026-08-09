@@ -153,6 +153,53 @@ func TestManagerStartRefreshesAfterResume(t *testing.T) {
 	)
 }
 
+// Handing a run's work back, and letting go of the run, are what is left on a
+// VM that can no longer start one, so neither boundary record may be read here:
+// a drifted one would refuse exactly the commands that rescue the work.
+func TestManagerStartUnverifiedSkipsBoundaryVerification(t *testing.T) {
+	runner := &fakeRunner{outputs: [][]byte{
+		[]byte("pisafe\tRunning\n"),
+		nil,
+	}}
+	manager := Manager{instance: InstanceName, runner: runner}
+
+	if err := manager.StartUnverified(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("calls = %#v", runner.calls)
+	}
+	assertArgs(t, runner.calls[1], "shell", "pisafe", "sudo", "/usr/local/sbin/pisafe-clock-step")
+}
+
+func TestManagerStartUnverifiedStartsStoppedInstance(t *testing.T) {
+	runner := &fakeRunner{outputs: [][]byte{
+		[]byte("pisafe\tStopped\n"),
+		nil,
+		nil,
+	}}
+	manager := Manager{instance: InstanceName, runner: runner}
+
+	if err := manager.StartUnverified(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 3 {
+		t.Fatalf("calls = %#v", runner.calls)
+	}
+	assertArgs(t, runner.calls[1], "--tty=false", "start", "pisafe")
+	assertArgs(t, runner.calls[2], "shell", "pisafe", "sudo", "/usr/local/sbin/pisafe-clock-step")
+}
+
+func TestManagerStartUnverifiedRefusesAbsentInstance(t *testing.T) {
+	runner := &fakeRunner{outputs: [][]byte{nil}}
+	manager := Manager{instance: InstanceName, runner: runner}
+
+	err := manager.StartUnverified(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "has not been created") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestManagerStartFailsClosedOnSecurityProfileDrift(t *testing.T) {
 	runner := &fakeRunner{outputs: [][]byte{
 		[]byte("pisafe\tRunning\n"),
