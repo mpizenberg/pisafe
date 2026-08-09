@@ -98,7 +98,11 @@ rather than by the instance: every run's filesystem, every project's transcripts
 and caches, and the shared profile. The instance's own disk carries only the
 distribution, Podman, and the run image, each of which provisioning reproduces.
 Recreating the VM is therefore the cure for every drift the boundary checks
-detect without also being what destroys the work they protect. The disk is
+detect without also being what destroys the work they protect, and `pisafe vm
+rebuild` is that cure as a command: it reports what the rebuild costs, stops
+every active run so the stretch is charged from its container's own account,
+replaces the instance, and verifies the boundary the new one was built to. The
+disk is
 identified by the filesystem label it is given the first time it is seen; a
 device carrying neither a partition table nor a filesystem is the only thing
 provisioning will ever format, and finding anything but exactly one of those
@@ -143,6 +147,7 @@ pisafe cp <path> [<run>]:[<path>]
 pisafe apply [run]
 pisafe discard <run> --confirm <run>
 pisafe gc [--dry-run]
+pisafe vm rebuild [--confirm] [--discard-state]
 pisafe doctor
 
 pisafe login [chatgpt|anthropic|openai|<name> --url --api --models]
@@ -540,6 +545,15 @@ creating → active → stopped → imported → reclaimed
   verified: it installs over the network and rewrites the profile every run
   mounts, and the VM it puts a backup into is the new one, never the VM that
   failed.
+- `pisafe vm rebuild` is what a failed boundary check names, so the cure is a
+  command rather than a sequence the user assembles. Nothing an unreachable VM
+  does can refuse it: a run it cannot stop is settled by the next command that
+  reaches for that run, charged nothing, and an instance too broken to shut down
+  is killed rather than waited on — with the lock it leaves on the state disk
+  released, or the replacement would be refused the work it exists to keep. Only
+  a VM predating that disk holds the work on the disk being deleted; that one is
+  refused outright until the loss is acknowledged, because the command a user
+  reaches for after reading an error must not be the one that destroys the work.
 
 While a run exists, its record holds the run ID, project identity, captured
 source HEAD, timestamps, exact image and tool versions, baseline and final

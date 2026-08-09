@@ -17,7 +17,7 @@ import (
 
 var errUsage = errors.New(
 	"usage: pisafe <run|connect|forward|stop|resume|diff|cp|apply|discard|project|profile" +
-		"|extension|tool|backup|restore|gc|list|zed|login|logout|broker|doctor|help>",
+		"|extension|tool|backup|restore|gc|list|zed|login|logout|broker|vm|doctor|help>",
 )
 
 func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
@@ -107,6 +107,8 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 		return runTool(ctx, args[1:], out)
 	case "gc":
 		return runGC(ctx, args[1:], out)
+	case "vm":
+		return runVM(ctx, args[1:], out)
 	case "help", "-h", "--help":
 		printHelp(out)
 		return nil
@@ -255,6 +257,18 @@ Usage:
   pisafe logout NAME
                    Take one login away
   pisafe broker    Relay brokered inference to active runs (foreground)
+  pisafe vm rebuild [--confirm] [--discard-state]
+                   Replace the VM with one built from the current definition.
+                   This is the cure for every drift the boundary checks report,
+                   and it takes no work with it: every run's files, every
+                   project's transcripts, and the profile sit on a disk owned by
+                   Lima rather than by the instance, which the new VM mounts
+                   back. Active runs are stopped first, so each is charged only
+                   for the time its container recorded, and resume as they were.
+                   Named no flag, it reports what the rebuild would cost and
+                   changes nothing. A VM predating that disk holds all of it on
+                   the disk being deleted, and only then does --discard-state
+                   apply: back up first, because nothing else saves it.
   pisafe doctor    Check Phase 1 host prerequisites
   pisafe list      Show every run's record against what the VM has. A run
                    recorded active with no container is named as one, because
@@ -274,11 +288,7 @@ configuration is never touched.`)
 }
 
 func runList(ctx context.Context, out io.Writer) error {
-	root, err := runstate.DefaultRoot()
-	if err != nil {
-		return err
-	}
-	runs, err := runstate.NewStore(root).List()
+	runs, err := recordedRuns()
 	if err != nil {
 		return err
 	}
@@ -343,16 +353,20 @@ func listedState(run runstate.Manifest, running map[string]bool, asked bool) str
 }
 
 // runningRuns names every run the VM still has a container for, and reports
-// whether it could be asked at all. A VM that is not running holds no
-// containers, so that is an answer rather than a failure; only a VM that could
-// not be reached leaves the question open, and nothing then acts on a guess.
+// whether it could be asked at all. A VM that is stopped or absent holds no
+// container, so that is an answer rather than a failure; a VM that could not be
+// reached, or one in a state Lima cannot classify, may hold any of them, and
+// nothing acts on a guess about that.
 func runningRuns(ctx context.Context) (map[string]bool, bool) {
 	status, err := lima.NewManager().Status(ctx)
 	if err != nil {
 		return nil, false
 	}
-	if status != lima.StatusRunning {
+	if status == lima.StatusStopped || status == lima.StatusAbsent {
 		return map[string]bool{}, true
+	}
+	if status != lima.StatusRunning {
+		return nil, false
 	}
 	running, err := lima.NewTransport().RunningRuns(ctx)
 	if err != nil {
@@ -361,12 +375,28 @@ func runningRuns(ctx context.Context) (map[string]bool, bool) {
 	return running, true
 }
 
+func recordedRuns() ([]runstate.Manifest, error) {
+	store, err := runStore()
+	if err != nil {
+		return nil, err
+	}
+	return store.List()
+}
+
 func runRecord(runID string) (runstate.Manifest, error) {
-	root, err := runstate.DefaultRoot()
+	store, err := runStore()
 	if err != nil {
 		return runstate.Manifest{}, err
 	}
-	return runstate.NewStore(root).Get(runID)
+	return store.Get(runID)
+}
+
+func runStore() (runstate.Store, error) {
+	root, err := runstate.DefaultRoot()
+	if err != nil {
+		return runstate.Store{}, err
+	}
+	return runstate.NewStore(root), nil
 }
 
 // resolveRunID names the run a command was given, or the one live run of the
@@ -386,11 +416,7 @@ func resolveRunID(ctx context.Context, runID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	stateRoot, err := runstate.DefaultRoot()
-	if err != nil {
-		return "", err
-	}
-	runs, err := runstate.NewStore(stateRoot).List()
+	runs, err := recordedRuns()
 	if err != nil {
 		return "", err
 	}

@@ -293,12 +293,50 @@ history holds them. New entries are appended in full.
   vanished with a rebooted or recreated VM and one that exited at its own
   deadline are deliberately the same case, differing only in how much of the
   stretch was observed; a container that is still running keeps the refusal,
-  because resuming would restart an agent mid-work. Left alone: `connect`,
-  `zed`, and `forward`, which reach a run without contacting the VM at all and
-  so fail through ssh when the record is stale. Giving them the same
-  reconciliation means letting a command that enters a container boot a VM,
-  which raises which boundary that VM should come up under, and that is its own
-  decision rather than a detail of this one.
+  because resuming would restart an agent mid-work.
+- `pisafe vm rebuild` replaces the instance, and the boundary checks name it
+  instead of telling the user to recreate the VM. Leaving it as prose was
+  rejected because the sequence is not one to assemble under pressure: an active
+  run has to be stopped before the container carrying its only account of the
+  stretch goes, a broken instance has to be killed rather than waited on, and
+  the lock that kill leaves on the state disk has to be released or the
+  replacement is refused the work it exists to keep.
+- Nothing an unreachable VM does can refuse the rebuild. Stopping active runs is
+  best-effort and reports what it could not do, because a VM too broken to
+  answer is exactly why a rebuild was asked for; a run left active is settled by
+  the next command that reaches for it, charged nothing. Failing the rebuild on
+  an unstoppable run was rejected as withholding the cure from the only VM that
+  needs it.
+- Named no flag, the command reports what the rebuild costs and changes nothing,
+  following `extension update`. A VM that predates the state disk is refused
+  outright until `--discard-state` acknowledges the loss, rather than being
+  covered by `--confirm` alone: the command a user reaches for straight out of
+  an error message must not be the one that destroys every run's files, every
+  project's transcripts, and the profile.
+- Migrating that VM's `/var/lib/pisafe` onto a new state disk was considered and
+  not built. Lima cannot attach a disk to a running instance, so it would mean
+  streaming the whole tree — including sparse multi-gigabyte run images — out to
+  the Mac and back. `pisafe backup` and `restore` already carry what nothing can
+  refetch, and this case ends the first time anyone rebuilds.
+- `--discard-state` also discards the run records, through the same `Discard`
+  every run takes. Leaving them was rejected as reintroducing exactly the
+  dishonesty `pisafe list` was just fixed for: after that rebuild every record
+  names a workspace, an SSH key, and a saved Zed connection that are gone.
+  Imported runs keep their `pisafe/RUN` branches, which discard never touches.
+- The rebuild builds the run image before returning. Leaving it to the next
+  `pisafe run` was rejected because the image lives on the instance's disk and
+  so goes with it every time: deferring it only moves several minutes into a
+  command that did not ask for them.
+- A state Lima will call neither running nor stopped is now `StatusBroken`
+  rather than an error out of `Status`. As an error it refused the rebuild on
+  the instance most likely to need one. Nothing gained a reason to start such an
+  instance: `bringUp` still refuses it and now names the rebuild, and
+  `runningRuns` treats it as unanswerable rather than as holding no container,
+  so a stale `active` record is never settled against a VM that may still be
+  running the container.
+- The test double `errorRunner` was folded into `fakeRunner`, which gained the
+  same positional `errors` slice. Two runners differing only in whether they
+  record calls is one idea under two names, and the rebuild path needs both.
 - The state disk is found by filesystem label, and formatted only when no device
   carries one. Identifying it by device path was rejected outright — the cidata
   ISO takes a virtio slot too, and boot decides the order. The candidate for a

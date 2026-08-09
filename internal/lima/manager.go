@@ -20,6 +20,10 @@ const (
 	StatusAbsent  Status = "absent"
 	StatusRunning Status = "running"
 	StatusStopped Status = "stopped"
+	// StatusBroken is any state Lima will call neither running nor stopped. The
+	// instance is there, so a rebuild has something to replace, but nothing may
+	// be concluded about what is inside it.
+	StatusBroken Status = "broken"
 )
 
 type Runner interface {
@@ -57,7 +61,7 @@ func (manager Manager) Status(ctx context.Context) (Status, error) {
 		case "stopped":
 			return StatusStopped, nil
 		default:
-			return "", fmt.Errorf("Lima instance %q is %s", manager.instance, status)
+			return StatusBroken, nil
 		}
 	}
 	return StatusAbsent, nil
@@ -127,23 +131,12 @@ func (manager Manager) Ensure(ctx context.Context, prefixes []netip.Prefix) erro
 // an instance that has to be recreated leaves every run, every project store,
 // and the profile where they are, and the new instance mounts them back.
 func (manager Manager) ensureStateDisk(ctx context.Context) error {
-	output, err := manager.runner.Run(ctx, nil, "disk", "list", "--json")
+	disk, err := manager.stateDisk(ctx)
 	if err != nil {
-		return fmt.Errorf("list Lima disks: %w", err)
+		return err
 	}
-	for _, line := range strings.Split(string(output), "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		var disk struct {
-			Name string `json:"name"`
-		}
-		if err := json.Unmarshal([]byte(line), &disk); err != nil {
-			return fmt.Errorf("read Lima disk list: %w", err)
-		}
-		if disk.Name == StateDiskName {
-			return nil
-		}
+	if disk != nil {
+		return nil
 	}
 	if _, err := manager.runner.Run(
 		ctx,
@@ -155,6 +148,113 @@ func (manager Manager) ensureStateDisk(ctx context.Context) error {
 		StateDiskSize,
 	); err != nil {
 		return fmt.Errorf("create Lima state disk: %w", err)
+	}
+	return nil
+}
+
+// HasStateDisk reports whether Lima holds the disk that carries every run's
+// filesystem, every project's transcripts, and the profile. An instance
+// provisioned before the disk existed keeps all of it on its own disk instead,
+// where deleting the instance takes it too.
+func (manager Manager) HasStateDisk(ctx context.Context) (bool, error) {
+	disk, err := manager.stateDisk(ctx)
+	if err != nil {
+		return false, err
+	}
+	return disk != nil, nil
+}
+
+type limaDisk struct {
+	Name string `json:"name"`
+	// Instance names whichever instance holds the disk's lock. One that was
+	// killed rather than shut down leaves its name here and the disk refused to
+	// its replacement.
+	Instance string `json:"instance"`
+}
+
+// stateDisk finds the disk carrying /var/lib/pisafe, or reports that Lima has
+// none.
+func (manager Manager) stateDisk(ctx context.Context) (*limaDisk, error) {
+	output, err := manager.runner.Run(ctx, nil, "disk", "list", "--json")
+	if err != nil {
+		return nil, fmt.Errorf("list Lima disks: %w", err)
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var disk limaDisk
+		if err := json.Unmarshal([]byte(line), &disk); err != nil {
+			return nil, fmt.Errorf("read Lima disk list: %w", err)
+		}
+		if disk.Name == StateDiskName {
+			return &disk, nil
+		}
+	}
+	return nil, nil
+}
+
+// Delete takes the instance away and leaves the state disk for the next one to
+// mount. The VM is asked to shut down first because that disk carries every
+// run's filesystem and an instance killed outright never flushes its writes to
+// it. One too broken to shut down never flushes them either, so that one is
+// killed rather than waited on — refusing to delete it would withhold the
+// rebuild from the VM that most needs one — and the lock it leaves on the disk
+// is released here.
+func (manager Manager) Delete(ctx context.Context) error {
+	status, err := manager.Status(ctx)
+	if err != nil {
+		return err
+	}
+	if status == StatusAbsent {
+		return nil
+	}
+	// A stopped instance has nothing to shut down. Anything else may, including
+	// one Lima cannot classify, which is the case where only the kill gets
+	// through.
+	if status != StatusStopped {
+		if _, err := manager.runner.Run(
+			ctx,
+			nil,
+			"--tty=false",
+			"stop",
+			manager.instance,
+		); err != nil {
+			if _, err := manager.runner.Run(
+				ctx,
+				nil,
+				"--tty=false",
+				"stop",
+				"--force",
+				manager.instance,
+			); err != nil {
+				return fmt.Errorf("stop Lima instance: %w", err)
+			}
+		}
+	}
+	if _, err := manager.runner.Run(
+		ctx,
+		nil,
+		"--tty=false",
+		"delete",
+		"--force",
+		manager.instance,
+	); err != nil {
+		return fmt.Errorf("delete Lima instance: %w", err)
+	}
+	return manager.unlockStateDisk(ctx)
+}
+
+func (manager Manager) unlockStateDisk(ctx context.Context) error {
+	disk, err := manager.stateDisk(ctx)
+	if err != nil {
+		return err
+	}
+	if disk == nil || disk.Instance == "" {
+		return nil
+	}
+	if _, err := manager.runner.Run(ctx, nil, "disk", "unlock", StateDiskName); err != nil {
+		return fmt.Errorf("unlock Lima state disk: %w", err)
 	}
 	return nil
 }
@@ -182,10 +282,10 @@ func (manager Manager) Start(ctx context.Context, hostPrefixes []string) error {
 // records, for a command that starts no run: one that reads or writes a run's
 // own workspace through a container with no network, no home, and none of the
 // shared profile, or one that only ends or removes what a run already holds.
-// Neither record bears on what such a command reaches, and a VM that fails
-// either has one cure — recreating it — which destroys every run's storage. A
-// command held to the records on a VM that has already failed them can only
-// tell the user to throw away the work it was asked to hand back.
+// Neither record bears on what such a command reaches, and the cure for a VM
+// that fails either is a rebuild, which ends every run that is working. Holding
+// these commands to the records would make handing back a finished run's diff
+// cost every other run's session.
 func (manager Manager) StartUnverified(ctx context.Context) error {
 	if err := manager.bringUp(ctx); err != nil {
 		return err
@@ -218,7 +318,11 @@ func (manager Manager) bringUp(ctx context.Context) error {
 		}
 		return nil
 	default:
-		return fmt.Errorf("unsupported Lima status %q", status)
+		return fmt.Errorf(
+			"Lima instance %q is in no state it can be started from; "+
+				"replace it with pisafe vm rebuild",
+			manager.instance,
+		)
 	}
 }
 
@@ -241,13 +345,13 @@ func (manager Manager) VerifySecurityProfile(ctx context.Context, prefixes []str
 	)
 	if err != nil {
 		return fmt.Errorf(
-			"read VM security profile: %w; recreate the pisafe VM before starting a run",
+			"read VM security profile: %w; rebuild the VM with pisafe vm rebuild",
 			err,
 		)
 	}
 	if strings.TrimSpace(string(output)) != expected {
 		return fmt.Errorf(
-			"VM security profile is stale; recreate the pisafe VM before starting a run",
+			"VM security profile is stale; rebuild the VM with pisafe vm rebuild",
 		)
 	}
 	return nil
@@ -295,7 +399,7 @@ func (manager Manager) VerifyFirewall(ctx context.Context, prefixes []string) er
 	}
 	if actual != expected {
 		return fmt.Errorf(
-			"VM firewall networks are stale; recreate the pisafe VM before starting a run",
+			"VM firewall networks are stale; rebuild the VM with pisafe vm rebuild",
 		)
 	}
 	return nil

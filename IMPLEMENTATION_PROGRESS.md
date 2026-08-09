@@ -193,7 +193,25 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
 - Every VM records a root-owned SHA-256 fingerprint of the complete generated
   definition and immutable host-network set. `Manager.Start` checks it before
   clock or firewall verification, so an older or locally modified security
-  definition fails closed.
+  definition fails closed. Both it and the firewall check name `pisafe vm
+  rebuild`, which is the cure they prescribe.
+- `pisafe vm rebuild` reports what a rebuild costs and changes nothing until
+  `--confirm`. Confirmed, it stops every active run — charging each from its own
+  container's account and publishing what it produced — then deletes the
+  instance, recreates it from the current definition, verifies the boundary, and
+  builds the run image. `Manager.Delete` shuts the VM down before removing it so
+  the state disk's ext4 is flushed, kills one that will not shut down, and
+  releases the lock Lima leaves on the disk when it does. Nothing here can
+  refuse the rebuild: a run it could not stop is reported and settled later,
+  charged nothing.
+- An instance provisioned before the state disk existed keeps `/var/lib/pisafe`
+  on the disk being deleted. `Manager.HasStateDisk` detects it, the plan says so,
+  and the rebuild is refused until `--discard-state`, which also discards the
+  run records that would otherwise name storage that is gone.
+- Any state Lima calls neither running nor stopped is `StatusBroken`: the
+  instance exists and can be replaced, but nothing may be concluded about what
+  runs inside it. Starting one is refused, naming the rebuild, and `pisafe list`
+  treats it as a VM it could not ask rather than as one holding no container.
 - A dedicated `192.0.2.1/32` dummy address carries the broker relay; SSH remote
   forwarding is restricted to exactly `192.0.2.1:18080` via `PermitListen`.
 
