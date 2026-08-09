@@ -743,12 +743,6 @@ func validateApplyPlan(runID string, planned gitstage.PlannedApply) error {
 		if !filepath.IsAbs(step.Repository) {
 			return fmt.Errorf("apply step repository must be absolute")
 		}
-		if step.Ref != "refs/heads/"+branch {
-			return fmt.Errorf("apply step names an unexpected ref %q", step.Ref)
-		}
-		if step.TemporaryRef != "" && step.TemporaryRef != "refs/pisafe/incoming/"+runID {
-			return fmt.Errorf("apply step names an unexpected temporary ref %q", step.TemporaryRef)
-		}
 		if !gitObjectPattern.MatchString(step.Commit) {
 			return fmt.Errorf("apply step names an invalid commit")
 		}

@@ -250,14 +250,17 @@ verification, so an interrupted transfer cannot leave a partial branch.
 
 Because superproject and submodule refs live in separate repositories with no
 cross-repository transaction, `apply` is journaled and idempotent: import and
-verify every object set first, record the intended old/new refs in the run
-manifest, then update refs one repository at a time. Every forward and rollback
-update is compare-and-swap (`git update-ref <ref> <new> <expected-old>`): a step
-whose ref already holds the new value is complete, a rollback restores the old
-value only while the ref still holds the recorded new value, and a ref matching
-neither stops recovery for manual reconciliation rather than overwriting a
-change the user made meanwhile. The run is marked imported only when every ref
-matches the manifest.
+verify every object set first, record in the run manifest which commit each
+repository must end up at, then update refs one repository at a time. The
+branch is `pisafe/<run>`, which follows from the run itself, so a stored
+journal names no ref and cannot be tampered into moving one the run never
+earned. Every forward and rollback update is compare-and-swap (`git update-ref
+<ref> <new> <expected-old>`): a step whose ref already holds the recorded
+commit is complete, a rollback deletes the ref only while it still holds that
+commit — apply only ever creates the branch, so no step has a previous value to
+restore — and a ref holding anything else stops recovery for manual
+reconciliation rather than overwriting a change the user made meanwhile. The
+run is marked imported only when every ref matches the manifest.
 
 If a dirty baseline commit exists, prompt to either keep it with all following
 commits, or replay only the later commits onto the original captured HEAD. The

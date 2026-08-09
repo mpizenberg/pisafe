@@ -942,10 +942,13 @@ history holds them. New entries are appended in full.
   artifact, path-safety, and apply-journal surface. Lifting the limit is
   additive.
 - The apply journal records only ref creations, because apply only ever creates
-  `pisafe/<run>`. The compare-and-swap discipline and its recovery rules are
-  implemented in full; the general old-value restore is not, because no code
-  path produces a step with a previous value and an untested branch is worse
-  than an absent one. Submodule refs are committed before the superproject ref,
+  `pisafe/<run>`. It records no ref names either: the branch and the incoming
+  ref both follow from the journal's run ID, so a tampered manifest cannot name
+  a ref the run never earned — an alternative to validating stored ref strings
+  on the way in and out, which is what it replaced. The compare-and-swap
+  discipline and its recovery rules are implemented in full; the general
+  old-value restore is not, because no code path produces a step with a
+  previous value and an untested branch is worse than an absent one. Submodule refs are committed before the superproject ref,
   since the reverse order could leave a superproject branch whose gitlinks name
   commits no ref keeps reachable.
 - Apply stops an active run before capturing it, refuses a second apply, and

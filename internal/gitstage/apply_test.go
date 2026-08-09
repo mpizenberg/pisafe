@@ -174,8 +174,10 @@ func TestRollbackRemovesOnlyTheRefsApplyCreated(t *testing.T) {
 	if err := CommitApply(ctx, planned.Journal); err != nil {
 		t.Fatal(err)
 	}
-	// A ref the user moved after the fact is left for them to reconcile.
+	// A ref the user moved after the fact is left for them to reconcile, and so
+	// is an incoming ref holding a commit this apply never imported.
 	runGit(t, source, "update-ref", "refs/heads/pisafe/rollback-run", snapshot.SourceHead)
+	runGit(t, source, "update-ref", "refs/pisafe/incoming/rollback-run", snapshot.SourceHead)
 
 	if err := RollbackApply(ctx, planned.Journal); err != nil {
 		t.Fatal(err)
@@ -186,6 +188,13 @@ func TestRollbackRemovesOnlyTheRefsApplyCreated(t *testing.T) {
 		"rev-parse", "refs/heads/pisafe/rollback-run",
 	); got != snapshot.SourceHead {
 		t.Fatalf("moved ref was deleted or changed: %s", got)
+	}
+	if got := runGit(
+		t,
+		source,
+		"rev-parse", "refs/pisafe/incoming/rollback-run",
+	); got != snapshot.SourceHead {
+		t.Fatalf("foreign incoming ref was deleted or changed: %s", got)
 	}
 	if _, err := gitOutput(
 		ctx,

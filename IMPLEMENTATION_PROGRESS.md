@@ -71,7 +71,8 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   verifies and fetches every object set into temporary refs before anything
   user-visible changes, `CommitApply` executes the journal one repository at a
   time, `RollbackApply` undoes a partial one. Only `refs/heads/pisafe/<run>` is
-  ever created, with compare-and-swap; a contested ref stops with
+  ever created — a journal derives it and its incoming ref from the run ID
+  rather than storing either — with compare-and-swap; a contested ref stops with
   `ErrApplyNeedsReconciliation` rather than overwriting. Submodule refs are
   created first, so an interruption can leave commits reachable but never a
   branch whose gitlinks are not.

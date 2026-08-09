@@ -79,14 +79,23 @@ type ApplyJournal struct {
 	Steps []ApplyStep `json:"steps"`
 }
 
-// ApplyStep creates one ref in one repository. Apply only ever creates a new
-// pisafe/<run> ref, so a step has no previous value to restore: rolling one
+// Ref is the branch every step of a journal creates, and TemporaryRef the ref
+// its bundles were imported into. Both follow from the run ID, so a stored
+// journal has no way to name a ref its run never earned.
+func (journal ApplyJournal) Ref() string {
+	return "refs/heads/pisafe/" + journal.RunID
+}
+
+func (journal ApplyJournal) TemporaryRef() string {
+	return "refs/pisafe/incoming/" + journal.RunID
+}
+
+// ApplyStep creates the journal's ref in one repository. Apply only ever
+// creates that ref, so a step has no previous value to restore: rolling one
 // back deletes the ref, and only while it still holds the recorded commit.
 type ApplyStep struct {
-	Repository   string `json:"repository"`
-	Ref          string `json:"ref"`
-	Commit       string `json:"commit"`
-	TemporaryRef string `json:"temporary_ref"`
+	Repository string `json:"repository"`
+	Commit     string `json:"commit"`
 }
 
 // PlannedApply pairs the journal to execute with what the user will be told
@@ -326,9 +335,9 @@ func ImportApply(
 		return PlannedApply{}, fmt.Errorf("apply package does not match the staged submodules")
 	}
 
-	targetRef := "refs/heads/pisafe/" + snapshot.RunID
-	temporaryRef := "refs/pisafe/incoming/" + snapshot.RunID
 	journal := ApplyJournal{RunID: snapshot.RunID}
+	targetRef := journal.Ref()
+	temporaryRef := journal.TemporaryRef()
 	result := ApplyResult{
 		Branch:       strings.TrimPrefix(targetRef, "refs/heads/"),
 		Tip:          prepared.Tip,
@@ -371,10 +380,8 @@ func ImportApply(
 		result.Submodules[len(result.Submodules)-1].Branch =
 			strings.TrimPrefix(targetRef, "refs/heads/")
 		journal.Steps = append(journal.Steps, ApplyStep{
-			Repository:   repository,
-			Ref:          targetRef,
-			Commit:       submodule.Tip,
-			TemporaryRef: temporaryRef,
+			Repository: repository,
+			Commit:     submodule.Tip,
 		})
 	}
 
@@ -408,12 +415,8 @@ func ImportApply(
 	}
 	journal.Steps = append(journal.Steps, ApplyStep{
 		Repository: sourceRoot,
-		Ref:        targetRef,
 		Commit:     prepared.Tip,
 	})
-	if prepared.Tip != snapshot.SourceHead {
-		journal.Steps[len(journal.Steps)-1].TemporaryRef = temporaryRef
-	}
 	return PlannedApply{Journal: journal, Result: result}, nil
 }
 
@@ -479,26 +482,31 @@ func CommitApply(ctx context.Context, journal ApplyJournal) error {
 		return err
 	}
 	for _, step := range journal.Steps {
-		done, err := stepIsComplete(ctx, step)
+		done, err := stepIsComplete(ctx, journal, step)
 		if err != nil {
 			return err
 		}
 		if !done {
-			if err := createRef(ctx, step.Repository, step.Ref, step.Commit); err != nil {
+			if err := createRef(ctx, step.Repository, journal.Ref(), step.Commit); err != nil {
 				return err
 			}
 		}
-		if step.TemporaryRef != "" {
-			_ = gitRun(
-				ctx,
-				step.Repository,
-				nil,
-				nil,
-				"update-ref", "-d", step.TemporaryRef, step.Commit,
-			)
-		}
+		discardTemporaryRef(ctx, journal, step)
 	}
 	return nil
+}
+
+// discardTemporaryRef drops the ref a repository's bundle was imported into. A
+// repository that needed no bundle has none, and one holding anything but the
+// imported commit is not ours to delete; both are left as they are.
+func discardTemporaryRef(ctx context.Context, journal ApplyJournal, step ApplyStep) {
+	_ = gitRun(
+		ctx,
+		step.Repository,
+		nil,
+		nil,
+		"update-ref", "-d", journal.TemporaryRef(), step.Commit,
+	)
 }
 
 // RollbackApply removes the refs a partial CommitApply created. A ref that no
@@ -508,16 +516,8 @@ func RollbackApply(ctx context.Context, journal ApplyJournal) error {
 		return err
 	}
 	for _, step := range journal.Steps {
-		if step.TemporaryRef != "" {
-			_ = gitRun(
-				ctx,
-				step.Repository,
-				nil,
-				nil,
-				"update-ref", "-d", step.TemporaryRef,
-			)
-		}
-		done, err := stepIsComplete(ctx, step)
+		discardTemporaryRef(ctx, journal, step)
+		done, err := stepIsComplete(ctx, journal, step)
 		if err != nil || !done {
 			continue
 		}
@@ -526,16 +526,17 @@ func RollbackApply(ctx context.Context, journal ApplyJournal) error {
 			step.Repository,
 			nil,
 			nil,
-			"update-ref", "-d", step.Ref, step.Commit,
+			"update-ref", "-d", journal.Ref(), step.Commit,
 		); err != nil {
-			return fmt.Errorf("roll back %s in %s: %w", step.Ref, step.Repository, err)
+			return fmt.Errorf("roll back %s in %s: %w", journal.Ref(), step.Repository, err)
 		}
 	}
 	return nil
 }
 
-func stepIsComplete(ctx context.Context, step ApplyStep) (bool, error) {
-	current, err := gitOutput(ctx, step.Repository, "rev-parse", "--verify", "--quiet", step.Ref)
+func stepIsComplete(ctx context.Context, journal ApplyJournal, step ApplyStep) (bool, error) {
+	ref := journal.Ref()
+	current, err := gitOutput(ctx, step.Repository, "rev-parse", "--verify", "--quiet", ref)
 	switch {
 	case err == nil && current == step.Commit:
 		return true, nil
@@ -543,14 +544,14 @@ func stepIsComplete(ctx context.Context, step ApplyStep) (bool, error) {
 		return false, fmt.Errorf(
 			"%w: %s in %s holds %s",
 			ErrApplyNeedsReconciliation,
-			step.Ref,
+			ref,
 			step.Repository,
 			current,
 		)
 	case isExitCode(err, 1):
 		return false, nil
 	default:
-		return false, fmt.Errorf("inspect %s: %w", step.Ref, err)
+		return false, fmt.Errorf("inspect %s: %w", ref, err)
 	}
 }
 

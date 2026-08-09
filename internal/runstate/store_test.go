@@ -420,8 +420,6 @@ func TestStoreRejectsApplyPlansItCannotReplaySafely(t *testing.T) {
 		"other branch":   func(plan *gitstage.PlannedApply) { plan.Result.Branch = "main" },
 		"no steps":       func(plan *gitstage.PlannedApply) { plan.Journal.Steps = nil },
 		"relative path":  func(plan *gitstage.PlannedApply) { plan.Journal.Steps[0].Repository = "project" },
-		"foreign ref":    func(plan *gitstage.PlannedApply) { plan.Journal.Steps[0].Ref = "refs/heads/main" },
-		"foreign temp":   func(plan *gitstage.PlannedApply) { plan.Journal.Steps[0].TemporaryRef = "refs/heads/main" },
 		"invalid commit": func(plan *gitstage.PlannedApply) { plan.Journal.Steps[0].Commit = "HEAD" },
 	} {
 		plan := valid
@@ -499,10 +497,8 @@ func testApplyPlan(runID, repository string) gitstage.PlannedApply {
 		Journal: gitstage.ApplyJournal{
 			RunID: runID,
 			Steps: []gitstage.ApplyStep{{
-				Repository:   repository,
-				Ref:          "refs/heads/pisafe/" + runID,
-				Commit:       tip,
-				TemporaryRef: "refs/pisafe/incoming/" + runID,
+				Repository: repository,
+				Commit:     tip,
 			}},
 		},
 		Result: gitstage.ApplyResult{Branch: "pisafe/" + runID, Tip: tip},
