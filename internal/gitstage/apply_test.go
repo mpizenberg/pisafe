@@ -221,6 +221,43 @@ func TestImportApplyRefusesAPackageThatDisagreesWithTheRun(t *testing.T) {
 	}
 }
 
+func TestImportApplyDemandsTheBundleForASubmoduleTheRunAdvanced(t *testing.T) {
+	ctx := context.Background()
+	source, workspace, snapshot := stageWithSubmodule(t, "withholding-run")
+	submoduleWorkspace := filepath.Join(workspace, "dependency")
+	mustWrite(t, filepath.Join(submoduleWorkspace, "tracked.txt"), "submodule work\n")
+	runGit(t, submoduleWorkspace, "add", "tracked.txt")
+	runGit(t, submoduleWorkspace, "commit", "-qm", "submodule change")
+	mustWrite(t, filepath.Join(workspace, "tracked.txt"), "superproject work\n")
+
+	packageDir := t.TempDir()
+	prepared, err := PrepareApply(ctx, snapshot, workspace, packageDir, KeepBaseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Whether a submodule owes history is decided by the staged commit the Mac
+	// holds, so a package naming no bundle for one it advanced is refused
+	// rather than quietly skipped.
+	withheld := prepared
+	withheld.Submodules = []PreparedApplySubmodule{{
+		Path: prepared.Submodules[0].Path,
+		Tip:  prepared.Submodules[0].Tip,
+	}}
+	if _, err := ImportApply(ctx, snapshot, withheld, packageDir, KeepBaseline); err == nil ||
+		!strings.Contains(err.Error(), "no bundle") {
+		t.Fatalf("withheld submodule bundle err = %v", err)
+	}
+	for _, repository := range []string{source, filepath.Join(source, "dependency")} {
+		if _, err := gitOutput(
+			ctx,
+			repository,
+			"rev-parse", "--verify", "refs/heads/pisafe/withholding-run",
+		); err == nil {
+			t.Fatalf("%s gained a branch from a refused package", repository)
+		}
+	}
+}
+
 func TestPreparedApplyNamesOnlyTheBundlesItProduced(t *testing.T) {
 	_, workspace, snapshot := stageWithSubmodule(t, "artifact-run")
 	submoduleWorkspace := filepath.Join(workspace, "dependency")

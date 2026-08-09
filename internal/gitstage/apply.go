@@ -31,11 +31,12 @@ type PreparedApply struct {
 	ReplayConflicts []string `json:"replay_conflicts,omitempty"`
 }
 
-// PreparedApplySubmodule carries one submodule's new history. Base is the
-// commit the Mac already has, which is where the incremental bundle starts.
+// PreparedApplySubmodule carries one submodule's new history. Its bundle starts
+// at the commit the Mac staged, which the Mac reads from its own snapshot: this
+// record crosses the boundary out of the run and cannot be asked where the
+// history it carries begins.
 type PreparedApplySubmodule struct {
 	Path         string `json:"path"`
-	Base         string `json:"base"`
 	Tip          string `json:"tip"`
 	FinalCommit  string `json:"final_commit,omitempty"`
 	BundleSHA256 string `json:"bundle_sha256,omitempty"`
@@ -237,7 +238,6 @@ func prepareApplySubmodules(
 		}
 		entry := PreparedApplySubmodule{
 			Path:        submodule.Path,
-			Base:        submodule.Head,
 			Tip:         tip,
 			FinalCommit: finalCommit,
 		}
@@ -341,7 +341,8 @@ func ImportApply(
 	// interruption can only ever leave commits reachable, never a branch
 	// pointing at gitlinks that are not.
 	for index, submodule := range prepared.Submodules {
-		if submodule.Path != snapshot.Submodules[index].Path {
+		staged := snapshot.Submodules[index]
+		if submodule.Path != staged.Path {
 			return PlannedApply{}, fmt.Errorf("apply package does not match the staged submodules")
 		}
 		if err := safeSubmodulePath(submodule.Path); err != nil {
@@ -352,7 +353,7 @@ func ImportApply(
 			Path: submodule.Path,
 			Tip:  submodule.Tip,
 		})
-		if submodule.Tip == submodule.Base {
+		if submodule.Tip == staged.Head {
 			continue
 		}
 		if err := importBundle(
