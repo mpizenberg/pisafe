@@ -60,6 +60,14 @@ mv "$temporary" "$target"
 trap - EXIT HUP INT TERM
 `
 
+	// The label rather than the container name is what names a run here,
+	// because the label is what every path that acts on a container already
+	// proves against the manifest.
+	runningRunsScript = `set -eu
+exec podman ps --filter label=io.pisafe.run --filter status=running \
+--format '{{index .Labels "io.pisafe.run"}}'
+`
+
 	removeRunScript = `set -eu
 run_root="$HOME/.local/share/pisafe/runs/$1"
 case "$run_root" in
@@ -588,6 +596,33 @@ func (transport Transport) CreateStage(
 		}
 	}
 	return stagePath, nil
+}
+
+// RunningRuns names every run with a container up right now. A record saying a
+// run is active is a claim about the VM, and this is the only thing that
+// settles it: a container goes with a VM that is rebooted or recreated, leaving
+// the claim standing and nothing on the Mac able to notice.
+//
+// It answers whether there is anything to reach, not whether a container is
+// exactly the one a manifest describes. Every route into a run settles that
+// afterwards with the run's own host key, which no other container has.
+func (transport Transport) RunningRuns(ctx context.Context) (map[string]bool, error) {
+	output, err := transport.shellScript(ctx, nil, runningRunsScript)
+	if err != nil {
+		return nil, fmt.Errorf("list running runs: %w", err)
+	}
+	running := map[string]bool{}
+	for _, line := range strings.Split(string(output), "\n") {
+		runID := strings.TrimSpace(line)
+		// A container carrying anything else under that label is not a run this
+		// controller started, and treating it as one would report a run reachable
+		// that pisafe has no record of.
+		if runID == "" || runid.Validate(runID) != nil {
+			continue
+		}
+		running[runID] = true
+	}
+	return running, nil
 }
 
 // RemoveRun removes one exact VM-side run directory. Callers are responsible

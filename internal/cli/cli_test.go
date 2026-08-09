@@ -33,30 +33,57 @@ func TestListWithNoRuns(t *testing.T) {
 	}
 }
 
-func TestListShowsDurableState(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("PISAFE_STATE_DIR", root)
-	store := runstate.NewStore(root)
-	if _, err := store.Create(runstate.Manifest{
-		RunID:              "run-123",
-		Project:            "project",
-		ProjectKey:         "project-3f9c2a1b",
-		ActiveLimitSeconds: 8 * 60 * 60,
-		Snapshot: gitstage.Snapshot{
-			RunID:   "run-123",
-			WorkRef: "refs/heads/work/run-123",
+// What a record says and what the VM shows are two different things, and only
+// their combination is worth printing: a run recorded active that the VM has no
+// container for is neither running nor out of time.
+func TestListShowsDurableStateAgainstWhatTheVMHas(t *testing.T) {
+	started := time.Now().UTC().Add(-9 * time.Hour)
+	deadline := started.Add(8 * time.Hour)
+	runs := []runstate.Manifest{
+		{RunID: "run-123", Project: "project", State: runstate.StateCreating},
+		{
+			RunID: "run-up", Project: "project", State: runstate.StateActive,
+			ActiveLimitSeconds: 8 * 60 * 60,
+			ActiveStartedAt:    &started,
+			ActiveDeadline:     &deadline,
 		},
-	}); err != nil {
+		{
+			RunID: "run-gone", Project: "project", State: runstate.StateActive,
+			ActiveLimitSeconds: 8 * 60 * 60,
+			ActiveStartedAt:    &started,
+			ActiveDeadline:     &deadline,
+		},
+	}
+	// Both active runs are past the deadline they were given. The one the VM
+	// still has spent that time; the one it does not have was not running for it.
+	up := map[string]bool{"run-up": true}
+
+	var asked bytes.Buffer
+	if err := printRuns(&asked, runs, up, true); err != nil {
 		t.Fatal(err)
 	}
-	var output bytes.Buffer
-	if err := Run(context.Background(), []string{"list"}, nil, &output); err != nil {
-		t.Fatal(err)
-	}
-	for _, expected := range []string{"RUN", "run-123", "creating", "project"} {
-		if !strings.Contains(output.String(), expected) {
-			t.Fatalf("output lacks %q:\n%s", expected, output.String())
+	for _, expected := range []string{
+		"RUN", "run-123", "creating", "project",
+		"active (limit reached)",
+		"active (no container)",
+	} {
+		if !strings.Contains(asked.String(), expected) {
+			t.Fatalf("output lacks %q:\n%s", expected, asked.String())
 		}
+	}
+
+	// A VM that could not be asked leaves both readings open, so neither is
+	// printed as though it had been settled.
+	var unasked bytes.Buffer
+	if err := printRuns(&unasked, runs, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(unasked.String(), "no container") ||
+		strings.Contains(unasked.String(), "limit reached") {
+		t.Fatalf("unasked VM was reported as answered:\n%s", unasked.String())
+	}
+	if !strings.Contains(unasked.String(), "could not be asked") {
+		t.Fatalf("output does not say the VM went unasked:\n%s", unasked.String())
 	}
 }
 

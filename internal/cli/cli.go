@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/lima"
 	"github.com/mpizenberg/pisafe/internal/runid"
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
@@ -53,7 +54,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 		if len(args) != 1 {
 			return errUsage
 		}
-		return runList(out)
+		return runList(ctx, out)
 	case "zed":
 		runID, err := runIDArgument(ctx, args[1:])
 		if err != nil {
@@ -127,7 +128,9 @@ Usage:
                    Open a shell in a run's workspace, where pi starts the
                    agent. With -- COMMAND, run that instead and exit with
                    its status: the words are parsed by the run's own shell, so
-                   a redirect or a pipe means there what it means here.
+                   a redirect or a pipe means there what it means here. A run
+                   the VM stopped, by a reboot or a rebuild, is brought back
+                   first; one you stopped waits for pisafe resume.
   pisafe forward [RUN] [LOCAL:]PORT...
                    Reach a server a run is hosting, so a web app developed
                    inside one can be opened in your browser. Each port becomes
@@ -253,7 +256,10 @@ Usage:
                    Take one login away
   pisafe broker    Relay brokered inference to active runs (foreground)
   pisafe doctor    Check Phase 1 host prerequisites
-  pisafe list      Show durable run records
+  pisafe list      Show every run's record against what the VM has. A run
+                   recorded active with no container is named as one, because
+                   the record alone cannot tell a spent budget from a VM that
+                   went down.
   pisafe help      Show this help
 
 A command that takes RUN finds it without being told when the checkout you are
@@ -267,7 +273,7 @@ state it writes, one entry per run and only when you run pisafe zed; your SSH
 configuration is never touched.`)
 }
 
-func runList(out io.Writer) error {
+func runList(ctx context.Context, out io.Writer) error {
 	root, err := runstate.DefaultRoot()
 	if err != nil {
 		return err
@@ -280,22 +286,25 @@ func runList(out io.Writer) error {
 		fmt.Fprintln(out, "No runs.")
 		return nil
 	}
+	running, asked := runningRuns(ctx)
+	return printRuns(out, runs, running, asked)
+}
+
+// printRuns renders the durable records against what the VM shows.
+func printRuns(
+	out io.Writer,
+	runs []runstate.Manifest,
+	running map[string]bool,
+	asked bool,
+) error {
 	table := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(table, "RUN\tSTATE\tPROJECT\tUPDATED")
 	for _, run := range runs {
-		state := string(run.State)
-		if run.State == runstate.StateActive &&
-			runstate.RemainingSeconds(run, time.Now()) == 0 {
-			state += " (limit reached)"
-		}
-		if run.LastError != "" {
-			state += " (error)"
-		}
 		fmt.Fprintf(
 			table,
 			"%s\t%s\t%s\t%s\n",
 			run.RunID,
-			state,
+			listedState(run, running, asked),
 			run.Project,
 			run.UpdatedAt.UTC().Format("2006-01-02 15:04Z"),
 		)
@@ -303,7 +312,53 @@ func runList(out io.Writer) error {
 	if err := table.Flush(); err != nil {
 		return fmt.Errorf("write run list: %w", err)
 	}
+	if !asked {
+		fmt.Fprintln(
+			out,
+			"The VM could not be asked which runs still have a container, "+
+				"so an active one may no longer be running.",
+		)
+	}
 	return nil
+}
+
+// listedState renders a run's record against what the VM shows. Only the VM
+// settles what a record calling a run active means: a container gone with a
+// rebooted VM leaves the claim standing, and a deadline that passed then
+// measures an outage rather than a budget spent.
+func listedState(run runstate.Manifest, running map[string]bool, asked bool) string {
+	state := string(run.State)
+	if run.State == runstate.StateActive && asked {
+		switch {
+		case !running[run.RunID]:
+			state += " (no container)"
+		case runstate.RemainingSeconds(run, time.Now()) == 0:
+			state += " (limit reached)"
+		}
+	}
+	if run.LastError != "" {
+		state += " (error)"
+	}
+	return state
+}
+
+// runningRuns names every run the VM still has a container for, and reports
+// whether it could be asked at all. A VM that is not running holds no
+// containers, so that is an answer rather than a failure; only a VM that could
+// not be reached leaves the question open, and nothing then acts on a guess.
+func runningRuns(ctx context.Context) (map[string]bool, bool) {
+	status, err := lima.NewManager().Status(ctx)
+	if err != nil {
+		return nil, false
+	}
+	if status != lima.StatusRunning {
+		return map[string]bool{}, true
+	}
+	running, err := lima.NewTransport().RunningRuns(ctx)
+	if err != nil {
+		return nil, false
+	}
+	return running, true
 }
 
 func runRecord(runID string) (runstate.Manifest, error) {
@@ -388,10 +443,13 @@ func runIDArgument(ctx context.Context, args []string) (string, error) {
 	}
 }
 
-// activeRun returns a run an editor or terminal can reach right now. Every
-// route into a running container needs the same three facts: the run is
-// active, its wall-clock budget is not spent, and it has an SSH endpoint.
-func activeRun(runID string) (runstate.Manifest, error) {
+// activeRun returns a run an editor or terminal can reach right now, bringing
+// back one the VM stopped rather than reporting that it is gone. Which side
+// stopped it decides that: a run the user stopped stays stopped, because
+// resuming spends a budget and is theirs to ask for, while a run the VM stopped
+// was never anyone's decision — pisafe called it active, and the record is a
+// claim to make true rather than to explain away.
+func activeRun(ctx context.Context, runID string, out io.Writer) (runstate.Manifest, error) {
 	manifest, err := runRecord(runID)
 	if err != nil {
 		return runstate.Manifest{}, err
@@ -408,6 +466,11 @@ func activeRun(runID string) (runstate.Manifest, error) {
 			hint,
 		)
 	}
+	if running, asked := runningRuns(ctx); asked && !running[runID] {
+		return restoreRun(ctx, runID, out)
+	}
+	// A container the VM still has past its deadline is a run that spent its
+	// budget, which is the only reading of a passed deadline the VM confirms.
 	if runstate.RemainingSeconds(manifest, time.Now()) == 0 {
 		return runstate.Manifest{}, fmt.Errorf(
 			"run %q reached its wall-clock limit; use pisafe stop %s to reconcile it",
@@ -418,5 +481,28 @@ func activeRun(runID string) (runstate.Manifest, error) {
 	if manifest.SSH == nil {
 		return runstate.Manifest{}, fmt.Errorf("run %q has no SSH connection", runID)
 	}
+	return manifest, nil
+}
+
+// restoreRun rebuilds a run the VM stopped and hands it back. It says so rather
+// than passing it off as the session that was left: only the run's storage
+// survived a VM going down, so the agent that was working in it is not there,
+// and the wall clock starts again from here.
+func restoreRun(
+	ctx context.Context,
+	runID string,
+	out io.Writer,
+) (runstate.Manifest, error) {
+	fmt.Fprintf(out, "%s lost its container when the VM went down. Bringing it back...\n", runID)
+	manifest, err := resumeRun(ctx, runID)
+	if err != nil {
+		return runstate.Manifest{}, err
+	}
+	fmt.Fprintf(
+		out,
+		"Resumed %s with its workspace as it was and %s of active time.\n",
+		runID,
+		time.Duration(runstate.RemainingSeconds(manifest, time.Now()))*time.Second,
+	)
 	return manifest, nil
 }

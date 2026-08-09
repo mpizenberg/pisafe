@@ -269,6 +269,25 @@ history holds them. New entries are appended in full.
   distinct store transition, `Abandon`, rather than a `Stop` with a chosen end
   time: `Activate`, `Resume`, and `Stop` all read a zero timestamp as "now", and
   giving `Stop` alone a second reading of it would be one name for two ideas.
+- `connect`, `zed`, and `forward` bring back a run the VM stopped rather than
+  reporting it. Which side stopped it is the whole rule: a run the user stopped
+  stays stopped, because resuming spends a budget and is theirs to ask for,
+  while a run the VM stopped was nobody's decision and the record pisafe printed
+  as active is a claim to make true. Reporting it and naming `pisafe resume` was
+  rejected as leaving the user to carry out the fix pisafe had already
+  diagnosed. The three ask the VM without starting it and resume through the
+  same verified boundary `pisafe resume` uses, so a command that enters a
+  container never boots a VM under a weaker profile: booting only happens on the
+  path that is starting a run.
+- The check is ordered so the common case pays for nothing else: a Lima status
+  query and one `podman ps` settle it in about 150 ms measured, and the
+  controller — with the Keychain read every other run-touching command already
+  does — is built only on the path that resumes, where a VM is booting anyway.
+- The wall-clock reading moved behind that check, and `pisafe list` gained the
+  same ordering. A deadline in the past used to mean one thing; since an outage
+  no longer charges a run, it can also mean the Mac was off, and neither the old
+  refusal nor the old `(limit reached)` label could tell those apart. A VM that
+  cannot be asked now prints neither reading rather than guessing.
 - A run is active only while its container runs, so `resume` settles a record
   that claims one the VM no longer has instead of refusing. A container that
   vanished with a rebooted or recreated VM and one that exited at its own

@@ -504,6 +504,13 @@ creating → active → stopped → imported → reclaimed
   would spend a whole budget on an outage the run did not cause. Nothing inside
   a run can bring its own container down, so this is not a budget agent code
   can extend.
+- Every route into a run asks the VM before handing over, and brings back one
+  the VM stopped rather than reporting it gone. A run the user stopped stays
+  stopped — resuming spends a budget and is theirs to ask for — but a run the VM
+  stopped was nobody's decision, and the record pisafe printed as active is a
+  claim to make true. `pisafe list` reads the same answer, so a record no longer
+  asserts on its own that a run is up or that a deadline in the past was a
+  budget spent rather than an outage.
 - Successful `apply` marks a run imported but keeps it recoverable for seven
   days: the workspace still holds untracked leftovers the branch never took.
 - `discard` reclaims at any point, after exact run confirmation.

@@ -556,10 +556,17 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   interactive Pi and a redirected stream share one command. It replaces its own
   process with `ssh`, so signals, window resizes, and the exit status are the
   session's. Only an active run within its budget is reachable; a stopped one is
-  refused naming `pisafe resume`. `zed` and `forward` share that check. All
-  three read the record and never the VM, so a record left claiming a container
-  a rebooted VM no longer has fails through ssh rather than saying so; `stop`
-  and `resume` are what settle it.
+  refused naming `pisafe resume`. `zed` and `forward` share that check. A run
+  the VM stopped is brought back instead of refused: the three ask Lima's status
+  and one `podman ps` before handing over — about 150 ms, no VM started — and on
+  a run with no container they resume it through the same verified boundary
+  `pisafe resume` uses, then connect. The wall-clock reading comes after that
+  question, because since an outage costs a run nothing, a deadline in the past
+  no longer means the budget was spent.
+- `pisafe list` renders each record against that same `podman ps`: a run
+  recorded active with no container is labelled as one, `(limit reached)` is
+  printed only for a container the VM still has, and a VM that could not be
+  asked prints neither label and says so.
 - `pisafe forward [RUN] [LOCAL:]PORT...` reaches a server a run is hosting. Each
   port becomes an `ssh -L` listener on the Mac's loopback carried to the same
   address inside the container, so nothing binds in the VM and nothing outside

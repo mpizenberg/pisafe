@@ -21,6 +21,30 @@ import (
 
 const testRunImage = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+func TestTransportRunningRunsReadsOnlyRunsItCouldHaveStarted(t *testing.T) {
+	runner := &fakeRunner{outputs: [][]byte{
+		[]byte("safe-run\n\nother-run\n../escape\n" + strings.Repeat("x", 65) + "\n"),
+	}}
+	transport := Transport{instance: InstanceName, runner: runner}
+
+	running, err := transport.RunningRuns(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(running) != 2 || !running["safe-run"] || !running["other-run"] {
+		t.Fatalf("running = %#v", running)
+	}
+	// A label is written by whoever started the container, so a value no run
+	// could be named must not become a run pisafe reports as reachable.
+	if running["../escape"] {
+		t.Fatal("an unusable label was read as a run")
+	}
+	command := strings.Join(runner.calls[0].args, " ")
+	if !strings.Contains(command, "--filter status=running") {
+		t.Fatalf("a container that is merely present would count:\n%s", command)
+	}
+}
+
 func TestTransportCreateStageStreamsVerifiedArtifacts(t *testing.T) {
 	root := t.TempDir()
 	bundle := filepath.Join(root, "source.bundle")

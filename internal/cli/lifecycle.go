@@ -84,22 +84,9 @@ func printSelfInstalled(out io.Writer, runID string, installed []profile.SelfIns
 }
 
 func runResume(ctx context.Context, runID string, out io.Writer) error {
-	controller, err := prepareLifecycle(ctx)
+	manifest, err := resumeRun(ctx, runID)
 	if err != nil {
 		return err
-	}
-	// Resume rebuilds the container over storage that survived, from the image
-	// the manifest pinned. A VM recreated since that run started has the
-	// storage but not the image.
-	if _, err := ensureManagedRunImage(ctx); err != nil {
-		return err
-	}
-	manifest, err := controller.Resume(ctx, runID)
-	if err != nil {
-		return err
-	}
-	if manifest.SSH == nil {
-		return fmt.Errorf("resumed run has no SSH connection")
 	}
 	fmt.Fprintf(
 		out,
@@ -110,6 +97,29 @@ func runResume(ctx context.Context, runID string, out io.Writer) error {
 		manifest.SSH.Alias,
 	)
 	return nil
+}
+
+// resumeRun rebuilds a stopped run's container over the storage it left behind,
+// and is shared with the routes into a run that find it stopped by the VM.
+func resumeRun(ctx context.Context, runID string) (runstate.Manifest, error) {
+	controller, err := prepareLifecycle(ctx)
+	if err != nil {
+		return runstate.Manifest{}, err
+	}
+	// Resume rebuilds the container over storage that survived, from the image
+	// the manifest pinned. A VM recreated since that run started has the
+	// storage but not the image.
+	if _, err := ensureManagedRunImage(ctx); err != nil {
+		return runstate.Manifest{}, err
+	}
+	manifest, err := controller.Resume(ctx, runID)
+	if err != nil {
+		return runstate.Manifest{}, err
+	}
+	if manifest.SSH == nil {
+		return runstate.Manifest{}, fmt.Errorf("resumed run has no SSH connection")
+	}
+	return manifest, nil
 }
 
 func runDiff(ctx context.Context, runID string, out io.Writer) error {

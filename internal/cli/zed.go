@@ -20,7 +20,7 @@ import (
 const zedSettleDelay = 500 * time.Millisecond
 
 func runZed(ctx context.Context, runID string, out io.Writer) error {
-	manifest, err := activeRun(runID)
+	manifest, err := activeRun(ctx, runID, out)
 	if err != nil {
 		return err
 	}

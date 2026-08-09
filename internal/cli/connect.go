@@ -56,7 +56,7 @@ func runConnect(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	manifest, err := activeRun(runID)
+	manifest, err := activeRun(ctx, runID, out)
 	if err != nil {
 		return err
 	}
