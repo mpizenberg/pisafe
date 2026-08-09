@@ -14,7 +14,11 @@ import (
 )
 
 const (
-	InstanceName       = "pisafe"
+	InstanceName = "pisafe"
+	// StateDiskName names both the Lima disk and the filesystem on it, because
+	// they are one thing: the storage that outlives the instance.
+	StateDiskName      = "pisafe-state"
+	StateDiskSize      = "64GiB"
 	BrokerAddress      = "192.0.2.1"
 	BrokerPort         = 18080
 	MinimumLimaVersion = "2.2.0"
@@ -62,6 +66,7 @@ func RenderConfig(options ConfigOptions) ([]byte, error) {
 		"@@GLOBAL_NAMESPACES@@", globalNamespaces,
 		"@@BROKER_ADDRESS@@", BrokerAddress,
 		"@@BROKER_PORT@@", strconv.Itoa(BrokerPort),
+		"@@STATE_DISK@@", StateDiskName,
 	)
 	return []byte(replacements.Replace(configTemplate)), nil
 }
@@ -73,10 +78,14 @@ func RenderConfig(options ConfigOptions) ([]byte, error) {
 // deliberately excluded because it does not weaken a run boundary.
 func securityProfileDigest(prefixes []string) string {
 	digest := sha256.New()
-	_, _ = digest.Write([]byte("pisafe-lima-security-profile-v3\x00"))
+	_, _ = digest.Write([]byte("pisafe-lima-security-profile-v4\x00"))
 	_, _ = digest.Write([]byte(configTemplate))
 	_, _ = digest.Write([]byte{0})
 	_, _ = digest.Write([]byte(strings.Join(prefixes, "\n")))
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write([]byte(BrokerAddress + ":" + strconv.Itoa(BrokerPort)))
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write([]byte(StateDiskName))
 	_, _ = digest.Write([]byte{0})
 	_, _ = digest.Write([]byte(strconv.FormatInt(runcontainer.DefaultPersistent, 10)))
 	_, _ = digest.Write([]byte{0})
@@ -147,6 +156,9 @@ cpus: @@CPUS@@
 memory: @@MEMORY@@
 disk: @@DISK@@
 
+additionalDisks:
+- name: "@@STATE_DISK@@"
+
 mounts: []
 containerd:
   system: false
@@ -186,6 +198,37 @@ provision:
     grep -q "^${pisafe_user}:" /etc/subgid ||
       usermod --add-subgids 100000-165535 "${pisafe_user}"
     runuser --login "${pisafe_user}" --command 'podman system migrate'
+
+    # Everything a VM cannot rebuild lives under /var/lib/pisafe: every run's
+    # filesystem, every project's transcripts, and the profile every run
+    # mounts. It is given a disk of its own because recreating the instance is
+    # the cure this boundary prescribes for every drift it detects, and that
+    # cure must not destroy what it was invoked to protect.
+    state_device="$(blkid --label @@STATE_DISK@@ || true)"
+    if [[ -z "$state_device" ]]; then
+      candidates=()
+      while read -r device; do
+        if [[ "$(lsblk --noheadings --output NAME "$device" | wc -l)" -ne 1 ]]; then
+          continue
+        fi
+        if blkid --probe "$device" >/dev/null 2>&1; then
+          continue
+        fi
+        candidates+=("$device")
+      done < <(lsblk --nodeps --noheadings --paths --output NAME,TYPE |
+        awk '$2 == "disk" { print $1 }')
+      # Carrying neither a partition table nor a filesystem is what identifies
+      # the disk Lima just attached. Any other count describes a VM this script
+      # does not recognise, where formatting the wrong device destroys it.
+      [[ "${#candidates[@]}" -eq 1 ]]
+      mkfs.ext4 -q -F -L @@STATE_DISK@@ "${candidates[0]}"
+      state_device="${candidates[0]}"
+    fi
+    install -d -m 0711 -o root -g root /var/lib/pisafe
+    mountpoint -q /var/lib/pisafe ||
+      mount -o nodev,nosuid "$state_device" /var/lib/pisafe
+    chmod 0711 /var/lib/pisafe
+
     install -d -m 0711 -o root -g root \
       /var/lib/pisafe/runs /var/lib/pisafe/projects /var/lib/pisafe/global
     install -d -m 0700 -o root -g root \
@@ -356,6 +399,10 @@ provision:
     [[ "$subuid_start" =~ ^[0-9]+$ && "$subgid_start" =~ ^[0-9]+$ ]]
     storage_uid="$((subuid_start + 999))"
     storage_gid="$((subgid_start + 999))"
+    # Every storage root is a directory on the state disk. A boot that did not
+    # mount it would fill the instance's own disk instead, with filesystems the
+    # next instance cannot inherit and nothing would report missing.
+    mountpoint -q /var/lib/pisafe
     [[ "$(stat -c '%U:%G:%a' "$storage_root")" = "root:root:711" ]]
     [[ "$(stat -c '%U:%G:%a' "$image_root")" = "root:root:700" ]]
 
@@ -498,4 +545,5 @@ probes:
     systemctl is-active --quiet pisafe-firewall.service
     sudo /usr/local/sbin/pisafe-firewall-status >/dev/null
     test "$(sysctl -n net.ipv6.conf.all.disable_ipv6)" = 1
+    mountpoint -q /var/lib/pisafe
 `

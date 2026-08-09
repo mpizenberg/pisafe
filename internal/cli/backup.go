@@ -23,9 +23,9 @@ func runBackup(ctx context.Context, args []string, out io.Writer) error {
 	if len(args) != 1 {
 		return errBackupUsage
 	}
-	// Backing up reads the VM and writes only here, and it is what a VM whose
-	// boundary records no longer hold has left to give: the cure for one is
-	// recreating it, which destroys the transcripts this is copying out.
+	// Backing up reads the VM and writes only here. A VM whose boundary records
+	// no longer hold still holds transcripts nothing can refetch, and refusing
+	// to copy them to the Mac protects nothing either record describes.
 	if err := lima.NewManager().StartUnverified(ctx); err != nil {
 		return err
 	}

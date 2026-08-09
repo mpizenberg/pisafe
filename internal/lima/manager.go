@@ -3,6 +3,7 @@ package lima
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -102,6 +103,9 @@ func (manager Manager) Ensure(ctx context.Context, prefixes []netip.Prefix) erro
 		return err
 	}
 	if status == StatusAbsent {
+		if err := manager.ensureStateDisk(ctx); err != nil {
+			return err
+		}
 		temporary, err := os.MkdirTemp("", "pisafe-lima-config-*")
 		if err != nil {
 			return fmt.Errorf("create temporary Lima config directory: %w", err)
@@ -116,6 +120,43 @@ func (manager Manager) Ensure(ctx context.Context, prefixes []netip.Prefix) erro
 		}
 	}
 	return manager.Start(ctx, prefixStrings)
+}
+
+// ensureStateDisk creates the disk that carries /var/lib/pisafe, unless Lima
+// already holds one. The disk belongs to Lima rather than to the instance, so
+// an instance that has to be recreated leaves every run, every project store,
+// and the profile where they are, and the new instance mounts them back.
+func (manager Manager) ensureStateDisk(ctx context.Context) error {
+	output, err := manager.runner.Run(ctx, nil, "disk", "list", "--json")
+	if err != nil {
+		return fmt.Errorf("list Lima disks: %w", err)
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var disk struct {
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal([]byte(line), &disk); err != nil {
+			return fmt.Errorf("read Lima disk list: %w", err)
+		}
+		if disk.Name == StateDiskName {
+			return nil
+		}
+	}
+	if _, err := manager.runner.Run(
+		ctx,
+		nil,
+		"disk",
+		"create",
+		StateDiskName,
+		"--size",
+		StateDiskSize,
+	); err != nil {
+		return fmt.Errorf("create Lima state disk: %w", err)
+	}
+	return nil
 }
 
 // Start starts (or reuses) the VM and verifies that its immutable host-network

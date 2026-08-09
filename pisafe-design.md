@@ -73,8 +73,10 @@ macOS
 ├── macOS Keychain (provider refresh tokens)
 └── dedicated ARM64 Linux VM (no host filesystem mounts)
     ├── static firewall: internet open; loopback/LAN/metadata denied
-    ├── shared read-only tools/extensions profile
-    ├── per-project session and dependency-cache storage
+    ├── state disk, outliving the instance
+    │   ├── shared read-only tools/extensions profile
+    │   ├── per-project session and dependency-cache storage
+    │   └── per-run quota-backed filesystems
     └── one rootless container per run
         ├── Pi and unreviewed extensions
         ├── staged Git repository
@@ -90,6 +92,17 @@ provisioned with rootless Podman. Never mount `/Users`, the repository, the
 Docker socket, or the host SSH agent. A general-purpose Podman machine will not
 do: it exposes `/Users`, `/private`, and `/var/folders` read-write, so a
 container escape reaches Mac files without a hypervisor escape.
+
+Everything the VM cannot rebuild sits on a second virtual disk owned by Lima
+rather than by the instance: every run's filesystem, every project's transcripts
+and caches, and the shared profile. The instance's own disk carries only the
+distribution, Podman, and the run image, each of which provisioning reproduces.
+Recreating the VM is therefore the cure for every drift the boundary checks
+detect without also being what destroys the work they protect. The disk is
+identified by the filesystem label it is given the first time it is seen; a
+device carrying neither a partition table nor a filesystem is the only thing
+provisioning will ever format, and finding anything but exactly one of those
+fails the boot.
 
 Each run gets its own container, staged repository, quota-backed writable
 storage, SSH endpoint, and broker capability, plus a read-only global profile
@@ -493,11 +506,12 @@ creating → active → stopped → imported → reclaimed
   moved repository claims its own history back rather than starting over.
 - What no scope can refetch — every project's session transcripts, and the pins
   naming what the profile holds — exports to a directory on the Mac and restores
-  into a VM that has just been recreated. Caches are excluded because losing one
-  costs time only; credentials are excluded because a key copied out of the
-  Keychain into a directory is the boundary the broker exists to prevent. Both
-  directions only ever add, so a backup taken twice loses nothing and a restore
-  run twice changes nothing.
+  into a VM whose storage starts empty: another Mac, or a state disk that was
+  lost rather than an instance that was replaced. Caches are excluded because
+  losing one costs time only; credentials are excluded because a key copied out
+  of the Keychain into a directory is the boundary the broker exists to
+  prevent. Both directions only ever add, so a backup taken twice loses nothing
+  and a restore run twice changes nothing.
 - Never reclaim a run with unimported commits merely because it is old. Warn and
   require explicit discard.
 - A VM that fails its boundary checks still hands work back, still lets go of
@@ -506,11 +520,10 @@ creating → active → stopped → imported → reclaimed
   none of the shared profile; `stop` and `discard` only end what a run holds;
   `backup` reads the VM and writes to the Mac. Neither the host-network deny set
   nor the security profile bears on those, and neither is verified before them.
-  Only a command that may start a run is held to the records — and what a failed
-  check tells the user to do, recreate the VM, is what deletes every run's
-  storage and every project's transcripts. `restore` stays verified: it installs
-  over the network and rewrites the profile every run mounts, and the VM it puts
-  a backup into is the new one, never the VM that failed.
+  Only a command that may start a run is held to the records. `restore` stays
+  verified: it installs over the network and rewrites the profile every run
+  mounts, and the VM it puts a backup into is the new one, never the VM that
+  failed.
 
 While a run exists, its record holds the run ID, project identity, captured
 source HEAD, timestamps, exact image and tool versions, baseline and final

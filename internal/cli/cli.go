@@ -192,10 +192,12 @@ Usage:
                    those stay in the macOS Keychain. Backing up again into the
                    same directory adds to it and removes nothing.
   pisafe restore DIRECTORY
-                   Put a backup back into a VM, which is what a recreated one
-                   needs. Every extension and tool is reinstalled from the pin
-                   the backup recorded rather than from what npm resolves the
-                   name to now. Nothing already installed is replaced and no
+                   Put a backup back into a VM whose storage starts empty:
+                   another Mac, or a state disk that was lost. Recreating the
+                   VM alone does not need it, because its state disk outlives
+                   it. Every extension and tool is reinstalled from the pin the
+                   backup recorded rather than from what npm resolves the name
+                   to now. Nothing already installed is replaced and no
                    transcript is overwritten, so restoring twice is harmless.
   pisafe extension install PACKAGE[@VERSION]
                    Install a Pi extension into the profile every run mounts

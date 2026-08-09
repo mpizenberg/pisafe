@@ -57,6 +57,11 @@ func TestRenderConfigContainsSecurityBoundary(t *testing.T) {
 		"/var/lib/pisafe/run-images",
 		"/var/lib/pisafe/projects",
 		"/var/lib/pisafe/project-images",
+		`- name: "pisafe-state"`,
+		"blkid --label pisafe-state",
+		"mkfs.ext4 -q -F -L pisafe-state",
+		`mount -o nodev,nosuid "$state_device" /var/lib/pisafe`,
+		"mountpoint -q /var/lib/pisafe",
 		`sed -i "\|^${pisafe_user} .*NOPASSWD:ALL|d"`,
 		`gpasswd --delete "${pisafe_user}" wheel`,
 	}
@@ -76,6 +81,17 @@ func TestRenderConfigContainsSecurityBoundary(t *testing.T) {
 	}
 	if strings.Contains(text, "@@") {
 		t.Error("config retains an unreplaced template value")
+	}
+	if strings.Contains(text, "/dev/vd") {
+		t.Error("config names a disk by device path, which boot order decides")
+	}
+	if !strings.Contains(text, `[[ "${#candidates[@]}" -eq 1 ]]`) {
+		t.Error("config formats a disk without proving exactly one is unclaimed")
+	}
+	mountIndex := strings.Index(text, `mount -o nodev,nosuid "$state_device" /var/lib/pisafe`)
+	rootsIndex := strings.Index(text, "/var/lib/pisafe/runs /var/lib/pisafe/projects")
+	if mountIndex < 0 || rootsIndex < 0 || mountIndex > rootsIndex {
+		t.Error("storage roots are created before the state disk is mounted")
 	}
 	trapIndex := strings.Index(text, "trap 'cleanup_partial || true' ERR")
 	truncateIndex := strings.Index(text, `truncate -s "$storage_bytes" "$image"`)

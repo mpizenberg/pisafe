@@ -167,6 +167,16 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   forwarding, containerd, guest agent, or agent forwarding), explicitly empty
   mounts, no forwarded X11/proxy/host-resolver/Podman socket, public DNS, IPv6
   disabled. Default resources: 4 CPUs, 8 GiB, 64 GiB sparse disk.
+- A second 64 GiB sparse Lima disk, `pisafe-state`, carries `/var/lib/pisafe`.
+  It belongs to Lima rather than to the instance, so deleting the instance —
+  what every failed boundary check asks for — leaves every run's filesystem,
+  every project store, and the profile for the next instance to mount back.
+  Provisioning finds it by filesystem label and formats it only when no device
+  carries one, choosing among whole devices that hold neither a partition table
+  nor any filesystem signature and refusing the boot unless there is exactly
+  one. `pisafe-storage` and the Lima boundary probe both require
+  `/var/lib/pisafe` to be a mountpoint, so a boot that failed to mount it never
+  reaches the instance's own disk.
 - Pinned Fedora 44 ARM64 cloud image:
 
   ```text
@@ -740,7 +750,12 @@ PISAFE_LIVE_LIMA=1 go test -v ./internal/lima -run TestLiveCreateAndStart
 PISAFE_LIVE_LIMA=1 go test -v ./internal/runimage
 limactl shell pisafe -- podman images --no-trunc --format '{{.Id}} {{.Repository}}'
 PISAFE_LIVE_LIMA=1 PISAFE_LIVE_RUN_IMAGE=sha256:<image-id> go test -v ./...
+PISAFE_LIVE_STATE_DISK=1 go test -v ./internal/lima -run TestLiveStateDisk
 ```
+
+The state-disk test is separate from `PISAFE_LIVE_LIMA` because it proves its
+property by deleting the instance holding it. It drives a throwaway instance and
+a renamed disk, and never touches the dedicated pair.
 
 Everything that mounts a run needs the immutable ID of a locally built run
 image, which is why the image list comes before the last command. Any change to
@@ -757,6 +772,13 @@ Verified against a real ARM64 VM:
   firewall-status, and storage helpers work through their narrow rules; the
   root-owned security-profile record is mode 0444 and matches the generated
   definition.
+- **State disk outliving the instance**: a first instance formats the attached
+  blank device, mounts it at `/var/lib/pisafe`, and creates a run's storage on
+  it. Deleting the instance removes its directory and leaves the disk. A second
+  instance, which has never seen the disk, finds it by label, mounts it, and
+  verifies that same run's storage — while the identical check against storage
+  that was never created fails, so the first result is not the helper being
+  lenient. Both instances report `/var/lib/pisafe` backed by the labelled disk.
 - **Traffic shaped to look permitted**, from a rootless container: a public
   wildcard resolver answering `10.0.0.1` and `169.254.169.254` for names that
   encode them was refused at connect time, with the answer itself required so a

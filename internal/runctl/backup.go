@@ -8,9 +8,10 @@ import (
 )
 
 // RestoreProject puts one project's store back and gives it the transcripts a
-// backup holds. It is what a recreated VM needs: the filesystems are gone while
-// the Mac's records of them may not be, and a run of the checkout would
-// otherwise start against a store with no history in it.
+// backup holds. It is what a VM whose storage starts empty needs — another Mac,
+// or a state disk that was lost rather than an instance that was replaced —
+// since the Mac's records of a store outlive the store itself, and a run of the
+// checkout would otherwise start against a store with no history in it.
 //
 // The record goes in before the filesystem for the reason it does everywhere: a
 // project key is a one-way digest, so a store that exists before anything says

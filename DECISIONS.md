@@ -244,6 +244,44 @@ history holds them. New entries are appended in full.
 
 ## Storage and lifecycle
 
+- `/var/lib/pisafe` sits on a Lima disk of its own rather than on the instance's
+  disk, so deleting the instance leaves every run's filesystem, every project's
+  transcripts, and the profile in place for the next one to mount back. The
+  alternative considered was reducing how often recreation is demanded, by
+  taking the Mac's on-link prefixes out of the boundary records; it was rejected
+  as addressing one trigger out of many, since the config template is hashed too
+  and so every release that touches the VM definition demands the same
+  recreation. Nothing about a run's storage changes: the same loop-mounted
+  images, quotas, ownership, and `nodev,nosuid` mounts, on a different disk.
+  Reversing this after runs exist means copying them back off the disk. It also
+  retires the reason recorded above for exempting `backup` from the boundary
+  checks: the exemption stands because a stale VM should still hand back what it
+  holds, not because recreating it was the only way out. What backup and restore
+  are for narrows to a second Mac, or a state disk lost rather than an instance
+  replaced.
+- The state disk is found by filesystem label, and formatted only when no device
+  carries one. Identifying it by device path was rejected outright — the cidata
+  ISO takes a virtio slot too, and boot decides the order. The candidate for a
+  first-ever format is a whole device carrying neither a partition table nor any
+  filesystem signature, and provisioning fails the boot unless there is exactly
+  one: the cost of formatting the wrong device is the instance, so a VM this
+  rule does not recognise must stop rather than guess.
+- `resume` now installs the managed run image before rebuilding a container,
+  which only `run` and the inspection commands did. The image store is on the
+  instance's disk and a run's storage is not, so the two now have different
+  lifetimes and a recreated VM held storage it could not start anything over. A
+  run still resumes only onto the image its manifest pinned: an image that has
+  changed since fails, which is the pinning working rather than a gap.
+- `pisafe-storage` refuses to act unless `/var/lib/pisafe` is a mountpoint. Boot
+  ordering alone would have been enough in practice, and was rejected as the
+  only guard: a boot that silently failed to mount would otherwise fill the
+  instance's disk with filesystems the next instance cannot inherit, and nothing
+  would report anything missing until the instance was deleted.
+- The digest now covers the broker address and port, which were substituted into
+  the template but never hashed, contradicting the rule stated above the
+  function. Left alone they would let a changed broker exception produce a
+  profile matching an older one. Bundled here because the digest's input shape
+  was already changing, which is what the version tag bump records.
 - Persistent run data uses one fixed-size 10 GiB sparse ext4 filesystem holding
   the workspace and home, mounted and removed by a narrow fixed-policy helper.
   Unbounded rootless Podman volumes and Podman's XFS-only volume quota were not

@@ -88,6 +88,12 @@ func runResume(ctx context.Context, runID string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// Resume rebuilds the container over storage that survived, from the image
+	// the manifest pinned. A VM recreated since that run started has the
+	// storage but not the image.
+	if _, err := ensureManagedRunImage(ctx); err != nil {
+		return err
+	}
 	manifest, err := controller.Resume(ctx, runID)
 	if err != nil {
 		return err
@@ -223,15 +229,27 @@ func prepareInspection(ctx context.Context) (runctl.Controller, string, error) {
 	if err != nil {
 		return runctl.Controller{}, "", err
 	}
-	artifacts, err := packagedRunArtifacts()
+	image, err := ensureManagedRunImage(ctx)
 	if err != nil {
 		return runctl.Controller{}, "", err
 	}
+	return controller, image, nil
+}
+
+// ensureManagedRunImage puts this controller's run image back in the VM. The
+// image store is on the instance's disk while a run's storage is on the state
+// disk, so a run outlives the image it was built from every time the VM is
+// recreated, and nothing can be started over that storage until it is back.
+func ensureManagedRunImage(ctx context.Context) (string, error) {
+	artifacts, err := packagedRunArtifacts()
+	if err != nil {
+		return "", err
+	}
 	image, err := runimage.NewInstaller(lima.NewTransport()).Ensure(ctx, artifacts)
 	if err != nil {
-		return runctl.Controller{}, "", fmt.Errorf("install managed run image: %w", err)
+		return "", fmt.Errorf("install managed run image: %w", err)
 	}
-	return controller, image.ImageID, nil
+	return image.ImageID, nil
 }
 
 func prepareLifecycle(ctx context.Context) (runctl.Controller, error) {

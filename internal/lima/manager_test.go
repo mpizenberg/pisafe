@@ -75,6 +75,8 @@ func TestManagerEnsureCreatesStartsAndVerifiesAbsentVM(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
+		nil,
 		[]byte("pisafe\tRunning\n"),
 		[]byte(securityProfileDigest([]string{prefix.String()}) + "\n"),
 		nil,
@@ -85,16 +87,72 @@ func TestManagerEnsureCreatesStartsAndVerifiesAbsentVM(t *testing.T) {
 	if err := manager.Ensure(context.Background(), []netip.Prefix{prefix}); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 8 {
+	if len(runner.calls) != 10 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
-	assertArgs(t, runner.calls[3],
-		"--tty=false", "create", "--name=pisafe", runner.calls[3].args[3],
+	assertArgs(t, runner.calls[1], "disk", "list", "--json")
+	assertArgs(t, runner.calls[2], "disk", "create", "pisafe-state", "--size", "64GiB")
+	assertArgs(t, runner.calls[5],
+		"--tty=false", "create", "--name=pisafe", runner.calls[5].args[3],
 	)
 	assertArgs(
-		t, runner.calls[5],
+		t, runner.calls[7],
 		"shell", "pisafe", "cat", "/etc/pisafe/security-profile",
 	)
+}
+
+// The disk outlives the instance, so a VM being recreated has to find the one
+// already holding every run's storage rather than ask for a second, empty one.
+func TestManagerEnsureAdoptsAnExistingStateDisk(t *testing.T) {
+	prefix := netip.MustParsePrefix("192.168.2.0/24")
+	runner := &fakeRunner{outputs: [][]byte{
+		nil,
+		[]byte(`{"name":"other","size":1}` + "\n" +
+			`{"name":"pisafe-state","size":68719476736}` + "\n"),
+		nil,
+		nil,
+		nil,
+		[]byte("pisafe\tRunning\n"),
+		[]byte(securityProfileDigest([]string{prefix.String()}) + "\n"),
+		nil,
+		[]byte(prefix.String() + "\n"),
+	}}
+	manager := Manager{instance: InstanceName, runner: runner}
+
+	if err := manager.Ensure(context.Background(), []netip.Prefix{prefix}); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range runner.calls {
+		if len(call.args) > 1 && call.args[0] == "disk" && call.args[1] == "create" {
+			t.Fatalf("Ensure recreated a state disk that already exists: %#v", call)
+		}
+	}
+	if len(runner.calls) != 9 {
+		t.Fatalf("calls = %#v", runner.calls)
+	}
+}
+
+// A VM that is already there keeps the disk it was created with, so nothing
+// asks Lima about disks on the path every run takes.
+func TestManagerEnsureLeavesDisksAloneWhenTheVMExists(t *testing.T) {
+	prefix := netip.MustParsePrefix("192.168.2.0/24")
+	runner := &fakeRunner{outputs: [][]byte{
+		[]byte("pisafe\tRunning\n"),
+		[]byte("pisafe\tRunning\n"),
+		[]byte(securityProfileDigest([]string{prefix.String()}) + "\n"),
+		nil,
+		[]byte(prefix.String() + "\n"),
+	}}
+	manager := Manager{instance: InstanceName, runner: runner}
+
+	if err := manager.Ensure(context.Background(), []netip.Prefix{prefix}); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range runner.calls {
+		if call.args[0] == "disk" {
+			t.Fatalf("Ensure inspected Lima disks for an existing VM: %#v", call)
+		}
+	}
 }
 
 func TestManagerStartIsIdempotent(t *testing.T) {
