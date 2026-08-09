@@ -217,6 +217,18 @@ history holds them. New entries are appended in full.
   to the whole declared list, and to values free of the whitespace one `SetEnv`
   directive cannot carry. `ContainerHome` is exported for the same reason the
   list is shared: the guest was keeping its own copy of that path too.
+- The same declared list is also written into the run's home as `.bash_profile`,
+  because sshd setting a variable does not settle what a shell has: Debian's
+  `/etc/profile` assigns `PATH` outright for every login shell, and an SSH
+  session with a terminal is one, so `pisafe tool install` put a command on a
+  PATH that no prompt ever saw. A `/etc/profile.d` drop-in in the run image was
+  the other candidate and was rejected: the value would have to be baked at
+  build time, which is a second copy of the list again and a build argument that
+  moves whenever the list does. The home is a mount over the image's own, so
+  nothing is displaced, and the file sources `.bashrc` for the same reason
+  Debian's own `.profile` does. It is in writable storage, where a run can edit
+  it — which costs nothing, since a run already chooses its own `PATH`, and what
+  keeps the tools read-only is the mount rather than the variable.
 - Promotion keeps its flat `*.jsonl` glob. Pi nests transcripts one directory
   per working directory only in its default location; a relocated session
   directory is flat, which is what the store is, and reading one back filters by

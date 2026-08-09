@@ -20,25 +20,35 @@ import (
 	"github.com/mpizenberg/pisafe/internal/runcontainer"
 )
 
-// A variable the container declares and sshd does not restate is set on a
-// process nobody types into and unset in every session anybody reaches, which
-// is silent: the run works, and only what reads the variable is quietly wrong.
-func TestSSHDConfigRestatesEveryDeclaredVariable(t *testing.T) {
-	var line string
+// A variable the container declares that a session does not get is set on a
+// process nobody types into and unset everywhere anybody reaches, which is
+// silent: the run works, and only what reads the variable is quietly wrong. It
+// takes both renderings to deliver one — sshd sets a session's environment, and
+// the profile puts back what /etc/profile replaces in a login shell.
+func TestEveryDeclaredVariableReachesASession(t *testing.T) {
+	var setEnv string
 	for _, candidate := range strings.Split(sshdConfig(runHome), "\n") {
 		if strings.HasPrefix(candidate, "SetEnv ") {
-			line = candidate
+			setEnv = candidate
 		}
 	}
-	if line == "" {
+	if setEnv == "" {
 		t.Fatal("sshd config declares no session environment")
 	}
+	profile := loginEnvironment()
 	for _, variable := range runcontainer.Environment() {
-		if strings.ContainsAny(variable[1], " \t\r\n") {
-			t.Fatalf("%s holds whitespace, which one SetEnv directive cannot carry", variable[0])
+		if strings.ContainsAny(variable[1], " \t\r\n'") {
+			t.Fatalf(
+				"%s holds whitespace or a quote, which one SetEnv directive and one "+
+					"quoted shell assignment cannot carry",
+				variable[0],
+			)
 		}
-		if !strings.Contains(line, " "+variable[0]+"="+variable[1]) {
-			t.Fatalf("sshd restates %q, which leaves out %s", line, variable[0])
+		if !strings.Contains(setEnv, " "+variable[0]+"="+variable[1]) {
+			t.Fatalf("sshd restates %q, which leaves out %s", setEnv, variable[0])
+		}
+		if !strings.Contains(profile, "\nexport "+variable[0]+"='"+variable[1]+"'\n") {
+			t.Fatalf("the login profile leaves out %s:\n%s", variable[0], profile)
 		}
 	}
 }
@@ -504,6 +514,15 @@ func TestConfigureSSHCreatesRestrictedRunFiles(t *testing.T) {
 		if info.Mode().Perm() != 0o600 {
 			t.Errorf("%s mode = %#o", name, info.Mode().Perm())
 		}
+	}
+	// The shell profile is the other half of what a session runs under, so the
+	// one-shot that prepares the run's home writes it alongside the daemon.
+	profile, err := os.ReadFile(filepath.Join(home, ".bash_profile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(profile), "export PATH=") {
+		t.Errorf("login profile does not restore PATH:\n%s", profile)
 	}
 }
 

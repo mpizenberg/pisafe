@@ -558,6 +558,13 @@ func configureSSH(
 	); err != nil {
 		return fmt.Errorf("write SSH daemon config: %w", err)
 	}
+	if err := writeNewFile(
+		filepath.Join(home, ".bash_profile"),
+		[]byte(loginEnvironment()),
+		0o600,
+	); err != nil {
+		return fmt.Errorf("write login environment: %w", err)
+	}
 	if _, err := fmt.Fprintln(out, canonicalHostKey); err != nil {
 		return fmt.Errorf("write SSH host public key: %w", err)
 	}
@@ -700,6 +707,26 @@ func sessionEnvironment() string {
 		pairs = append(pairs, variable[0]+"="+variable[1])
 	}
 	return strings.Join(pairs, " ")
+}
+
+// loginEnvironment renders the same declared environment as the shell profile a
+// login shell reads. sshd setting a variable is not enough for one: /etc/profile
+// replaces PATH outright for every login shell, and an SSH session with a
+// terminal is exactly that, so by the time a prompt appears an installed
+// command's directory is off it again. The home this lands in is a mount over
+// the image's own, so there is no dotfile here to displace, and a .bashrc the
+// run writes later is still read.
+func loginEnvironment() string {
+	lines := []string{
+		"# The run's declared environment, which /etc/profile replaces part of.",
+	}
+	for _, variable := range runcontainer.Environment() {
+		lines = append(lines, "export "+variable[0]+"='"+variable[1]+"'")
+	}
+	return strings.Join(append(lines,
+		`if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi`,
+		"",
+	), "\n")
 }
 
 func writeNewFile(path string, content []byte, mode os.FileMode) error {
