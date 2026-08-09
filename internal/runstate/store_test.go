@@ -238,6 +238,49 @@ func TestStoreAccountsCumulativeActiveWallClock(t *testing.T) {
 	}
 }
 
+func TestStoreAbandonsARunWithoutChargingForTheOutage(t *testing.T) {
+	root := t.TempDir()
+	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	store := NewStore(root)
+	store.now = func() time.Time { return now }
+	if _, err := store.Create(testManifest("run-one")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Activate(
+		"run-one",
+		testSSHConnection(root, "run-one"),
+		gitstage.Snapshot{},
+		testCapability(),
+		time.Time{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	// Longer than the whole budget, which is what stopping by the wall clock
+	// would charge and what the run must not be charged.
+	now = now.Add(30 * time.Hour)
+	abandoned, err := store.Abandon("run-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if abandoned.State != StateStopped ||
+		abandoned.ActiveElapsedSeconds != 0 ||
+		abandoned.ActiveStartedAt != nil ||
+		abandoned.ActiveDeadline != nil ||
+		abandoned.InferenceCapability != "" {
+		t.Fatalf("abandoned = %#v", abandoned)
+	}
+	if got := RemainingSeconds(abandoned, now); got != abandoned.ActiveLimitSeconds {
+		t.Fatalf("remaining = %d of %d", got, abandoned.ActiveLimitSeconds)
+	}
+	if _, err := store.Abandon("run-one"); err == nil ||
+		!strings.Contains(err.Error(), "invalid run transition") {
+		t.Fatalf("error = %v", err)
+	}
+	if _, err := store.Resume("run-one", testCapability(), now); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestStoreIssuesRotatesAndRevokesInferenceCapability(t *testing.T) {
 	root := t.TempDir()
 	store := NewStore(root)

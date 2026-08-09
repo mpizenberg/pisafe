@@ -272,6 +272,13 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   Root-owned image storage and the fixed-policy helper prevent the rootless VM
   user from resizing or remounting it. Podman's independent `--timeout` enforces
   the remaining active budget even after the controller exits.
+- A run is active only while its container runs. Rebooting or recreating the VM
+  keeps every run's storage and none of its containers, so `stop` and `resume`
+  settle a record that still claims one: `resume` adopts the run instead of
+  refusing, and the stretch costs the run nothing, because the container carried
+  the only account of how much of it was spent. A container that exited at its
+  own deadline goes the same way but is charged what it recorded. A container
+  still running keeps the refusal.
 
 ### Per-run SSH boundary
 
@@ -549,7 +556,10 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   interactive Pi and a redirected stream share one command. It replaces its own
   process with `ssh`, so signals, window resizes, and the exit status are the
   session's. Only an active run within its budget is reachable; a stopped one is
-  refused naming `pisafe resume`. `zed` and `forward` share that check.
+  refused naming `pisafe resume`. `zed` and `forward` share that check. All
+  three read the record and never the VM, so a record left claiming a container
+  a rebooted VM no longer has fails through ssh rather than saying so; `stop`
+  and `resume` are what settle it.
 - `pisafe forward [RUN] [LOCAL:]PORT...` reaches a server a run is hosting. Each
   port becomes an `ssh -L` listener on the Mac's loopback carried to the same
   address inside the container, so nothing binds in the VM and nothing outside

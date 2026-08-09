@@ -490,11 +490,20 @@ creating → active → stopped → imported → reclaimed
 
 - A run has a record for exactly as long as it owns something. Reclaiming it
   removes the record with the resources, so there is no terminal state.
-- Active and stopped runs are resumable. Resuming issues a fresh short-lived
-  broker capability rather than extending the old one.
+- A stopped run resumes, and so does one whose container is gone. Only a run
+  that is genuinely still running refuses, because resuming would restart an
+  agent mid-work. Resuming issues a fresh short-lived broker capability rather
+  than extending the old one.
 - Stopped time does not consume the eight-hour active budget. A run is killed
   independently when its remaining budget expires; the next lifecycle command
   reconciles the durable record to stopped.
+- A run is active only while its container runs, so rebooting or recreating the
+  VM leaves records claiming containers that are gone. Settling one of those
+  costs it nothing: the container carried the only account of how much of the
+  stretch was spent and went with the VM, and charging the wall clock instead
+  would spend a whole budget on an outage the run did not cause. Nothing inside
+  a run can bring its own container down, so this is not a budget agent code
+  can extend.
 - Successful `apply` marks a run imported but keeps it recoverable for seven
   days: the workspace still holds untracked leftovers the branch never took.
 - `discard` reclaims at any point, after exact run confirmation.

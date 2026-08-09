@@ -201,12 +201,8 @@ func (store Store) Stop(runID string, endedAt time.Time) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, err
 	}
-	if manifest.State != StateActive {
-		return Manifest{}, fmt.Errorf(
-			"invalid run transition %q → %q",
-			manifest.State,
-			StateStopped,
-		)
+	if err := requireActive(manifest); err != nil {
+		return Manifest{}, err
 	}
 	now := store.now().UTC()
 	endedAt = endedAt.UTC()
@@ -228,6 +224,49 @@ func (store Store) Stop(runID string, endedAt time.Time) (Manifest, error) {
 	if elapsedSeconds > remaining {
 		elapsedSeconds = remaining
 	}
+	return store.replace(endActiveStretch(manifest, now, endedAt, elapsedSeconds))
+}
+
+// Abandon records a run whose container went out from under it. Rebooting or
+// recreating the VM keeps every run's storage and leaves none of its
+// containers, so the record saying active is the stale half of the
+// disagreement. The stretch costs the run nothing: the container carried the
+// only account of how much of it was spent and went with the VM, and charging
+// the wall clock instead would spend a whole budget on an outage the run did
+// not cause. Nothing inside a run can bring its own container down, so this is
+// not a budget agent code can extend.
+func (store Store) Abandon(runID string) (Manifest, error) {
+	manifest, err := store.Get(runID)
+	if err != nil {
+		return Manifest{}, err
+	}
+	if err := requireActive(manifest); err != nil {
+		return Manifest{}, err
+	}
+	now := store.now().UTC()
+	return store.replace(endActiveStretch(manifest, now, now, 0))
+}
+
+func requireActive(manifest Manifest) error {
+	if manifest.State != StateActive {
+		return fmt.Errorf(
+			"invalid run transition %q → %q",
+			manifest.State,
+			StateStopped,
+		)
+	}
+	return nil
+}
+
+// endActiveStretch closes the stretch a run spent active and charges
+// elapsedSeconds of its budget for it. Every route out of StateActive comes
+// through here, and they differ only in what the stretch cost.
+func endActiveStretch(
+	manifest Manifest,
+	now time.Time,
+	endedAt time.Time,
+	elapsedSeconds int64,
+) Manifest {
 	manifest.ActiveElapsedSeconds += elapsedSeconds
 	manifest.ActiveStartedAt = nil
 	manifest.ActiveDeadline = nil
@@ -236,7 +275,7 @@ func (store Store) Stop(runID string, endedAt time.Time) (Manifest, error) {
 	manifest.LastError = ""
 	manifest.UpdatedAt = now
 	manifest.StoppedAt = &endedAt
-	return store.replace(manifest)
+	return manifest
 }
 
 func (store Store) Resume(runID string, capability string, startedAt time.Time) (Manifest, error) {

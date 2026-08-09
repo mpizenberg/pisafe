@@ -661,6 +661,86 @@ func TestLifecycleStopsAndResumesWithRemainingBudget(t *testing.T) {
 	}
 }
 
+// A VM that is rebooted or recreated keeps every run's storage and leaves none
+// of its containers, so a record left saying active is the stale half. Charging
+// the wall clock for the outage would spend the whole budget of a run that was
+// not running.
+func TestStopChargesNothingForAContainerTheVMTookWithIt(t *testing.T) {
+	store := runstate.NewStore(t.TempDir())
+	manifest := activeManifest(t, store)
+	backend := &fakeBackend{}
+	controller := New(backend, store, &fakeSSHStore{}, testInference{})
+
+	stopped, err := controller.Stop(context.Background(), manifest.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopped.State != runstate.StateStopped || stopped.ActiveElapsedSeconds != 0 {
+		t.Fatalf("stopped = %#v", stopped)
+	}
+	if got := runstate.RemainingSeconds(stopped, time.Now()); got != manifest.ActiveLimitSeconds {
+		t.Fatalf("remaining = %d of %d", got, manifest.ActiveLimitSeconds)
+	}
+	// What the run produced is the reason to settle the record rather than
+	// leave it: the transcript belongs to the project and nothing refetches it.
+	if !strings.Contains(callsString(backend.calls), "promote-sessions") {
+		t.Fatalf("stop left the run's transcript behind:\n%s", callsString(backend.calls))
+	}
+}
+
+func TestResumeAdoptsARunTheVMLeftBehind(t *testing.T) {
+	store := runstate.NewStore(t.TempDir())
+	manifest := activeManifest(t, store)
+	backend := &fakeBackend{}
+	controller := New(backend, store, &fakeSSHStore{}, testInference{})
+
+	resumed, err := controller.Resume(context.Background(), manifest.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.State != runstate.StateActive ||
+		backend.container == nil ||
+		backend.container.State.Status != "running" {
+		t.Fatalf("resumed = %#v, container = %#v", resumed, backend.container)
+	}
+	if resumed.ActiveElapsedSeconds != 0 {
+		t.Fatalf("resume charged %d seconds for the outage", resumed.ActiveElapsedSeconds)
+	}
+	if !strings.Contains(
+		callsString(backend.calls),
+		"--timeout "+fmt.Sprint(manifest.ActiveLimitSeconds),
+	) {
+		t.Fatalf("resume did not restore the whole budget:\n%s", callsString(backend.calls))
+	}
+}
+
+// The other half of adopting a run the VM left behind: a container that is
+// still running is an agent still working, and resuming would restart it.
+func TestResumeRefusesARunWhoseContainerIsStillRunning(t *testing.T) {
+	store := runstate.NewStore(t.TempDir())
+	manifest := activeManifest(t, store)
+	spec := specForManifest(manifest, manifest.Image)
+	runArgs, err := spec.RunArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &fakeBackend{
+		container: inspectionFromRunArgs(
+			append([]string{"podman"}, runArgs...),
+			spec.ContainerName(),
+		),
+	}
+	controller := New(backend, store, &fakeSSHStore{}, testInference{})
+
+	if _, err := controller.Resume(context.Background(), manifest.RunID); err == nil ||
+		!strings.Contains(err.Error(), "is active, not stopped") {
+		t.Fatalf("error = %v", err)
+	}
+	if backend.container == nil || backend.container.State.Status != "running" {
+		t.Fatalf("refused resume disturbed the container: %#v", backend.container)
+	}
+}
+
 func TestResumeCleansContainerAfterAmbiguousStartFailure(t *testing.T) {
 	store := runstate.NewStore(t.TempDir())
 	manifest := activeManifest(t, store)

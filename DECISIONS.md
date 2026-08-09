@@ -259,6 +259,27 @@ history holds them. New entries are appended in full.
   holds, not because recreating it was the only way out. What backup and restore
   are for narrows to a second Mac, or a state disk lost rather than an instance
   replaced.
+- A run whose container is gone is charged nothing for the stretch it was
+  active. The alternatives were charging the wall clock, which is what the code
+  did and which spends a whole eight-hour budget on an outage the run did not
+  cause, and having the VM leave a heartbeat the record could bill against. The
+  heartbeat was rejected as machinery bought for a limit that exists to stop a
+  runaway agent rather than to bill anyone accurately, and the generosity is
+  safe because nothing inside a run can bring its own container down. This is a
+  distinct store transition, `Abandon`, rather than a `Stop` with a chosen end
+  time: `Activate`, `Resume`, and `Stop` all read a zero timestamp as "now", and
+  giving `Stop` alone a second reading of it would be one name for two ideas.
+- A run is active only while its container runs, so `resume` settles a record
+  that claims one the VM no longer has instead of refusing. A container that
+  vanished with a rebooted or recreated VM and one that exited at its own
+  deadline are deliberately the same case, differing only in how much of the
+  stretch was observed; a container that is still running keeps the refusal,
+  because resuming would restart an agent mid-work. Left alone: `connect`,
+  `zed`, and `forward`, which reach a run without contacting the VM at all and
+  so fail through ssh when the record is stale. Giving them the same
+  reconciliation means letting a command that enters a container boot a VM,
+  which raises which boundary that VM should come up under, and that is its own
+  decision rather than a detail of this one.
 - The state disk is found by filesystem label, and formatted only when no device
   carries one. Identifying it by device path was rejected outright — the cidata
   ISO takes a virtio slot too, and boot decides the order. The candidate for a

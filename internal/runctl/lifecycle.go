@@ -67,7 +67,14 @@ func (controller Controller) Stop(
 	if err != nil {
 		return runstate.Manifest{}, controller.recordLifecycleError(runID, "stop", err)
 	}
-	stopped, err := controller.store.Stop(runID, endedAt)
+	// Nothing to stop means the container went with a rebooted or recreated VM,
+	// taking the only account of how much of the run's budget the stretch spent.
+	var stopped runstate.Manifest
+	if endedAt.IsZero() {
+		stopped, err = controller.store.Abandon(runID)
+	} else {
+		stopped, err = controller.store.Stop(runID, endedAt)
+	}
 	if err != nil {
 		return runstate.Manifest{}, controller.recordLifecycleError(runID, "record stop", err)
 	}
@@ -96,6 +103,10 @@ func (controller Controller) Resume(
 	runID string,
 ) (runstate.Manifest, error) {
 	manifest, err := controller.store.Get(runID)
+	if err != nil {
+		return runstate.Manifest{}, err
+	}
+	manifest, err = controller.endWhatIsNoLongerRunning(ctx, manifest)
 	if err != nil {
 		return runstate.Manifest{}, err
 	}
@@ -197,6 +208,36 @@ func (controller Controller) Resume(
 	return resumed, nil
 }
 
+// endWhatIsNoLongerRunning settles a record that still claims a container the
+// VM no longer runs, so a resume is refused only by a run that is genuinely
+// working. A container that vanished with a rebooted or recreated VM and one
+// that exited at its own deadline are the same condition here: the run is over
+// and its storage is not, and stopping it accounts for as much of the stretch
+// as was observed before publishing what the run produced.
+func (controller Controller) endWhatIsNoLongerRunning(
+	ctx context.Context,
+	manifest runstate.Manifest,
+) (runstate.Manifest, error) {
+	if manifest.State != runstate.StateActive {
+		return manifest, nil
+	}
+	existing, err := controller.inspectContainer(
+		ctx,
+		specForManifest(manifest, manifest.Image),
+	)
+	if err != nil {
+		return runstate.Manifest{}, controller.recordLifecycleError(
+			manifest.RunID,
+			"resume",
+			err,
+		)
+	}
+	if existing != nil && existing.State.Status == "running" {
+		return manifest, nil
+	}
+	return controller.Stop(ctx, manifest.RunID)
+}
+
 // Discard reclaims a run at the user's request. An active run is stopped first
 // so its elapsed time is accounted before the container goes.
 func (controller Controller) Discard(ctx context.Context, runID string) error {
@@ -262,6 +303,10 @@ func specForManifest(manifest runstate.Manifest, imageID string) runcontainer.Sp
 	return spec
 }
 
+// stopAndRemoveContainer takes a run's container down and reports when it
+// ended. A zero time means there was nothing to take down: the container went
+// with a VM that was rebooted or recreated, and the only account of when it
+// ended went with it.
 func (controller Controller) stopAndRemoveContainer(
 	ctx context.Context,
 	spec runcontainer.Spec,
@@ -271,7 +316,7 @@ func (controller Controller) stopAndRemoveContainer(
 		return time.Time{}, err
 	}
 	if inspection == nil {
-		return time.Now().UTC(), nil
+		return time.Time{}, nil
 	}
 	if inspection.State.Status == "running" {
 		if _, err := controller.podman(
