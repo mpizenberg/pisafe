@@ -45,7 +45,10 @@ const (
 	applyPackage      = "apply"
 	containerUser     = "1000:1000"
 	containerWorkRoot = "/work"
-	containerHome     = "/home/node"
+	// ContainerHome is where a run's home is mounted. The guest helper writes
+	// into it from inside the container and must mean the same directory the
+	// mount and the declared environment name, so it reads it from here.
+	ContainerHome = "/home/node"
 	// imagePath is the run image's own search path. pisafe restates it because
 	// naming PATH at all replaces what the image set, and dropping any of it
 	// would take node and git with it.
@@ -382,23 +385,34 @@ func (spec Spec) cacheOverlay(cache CacheMount) ProjectOverlay {
 }
 
 // runEnvironment is what pisafe sets in every run, and so is exactly what a
-// repository may not rebind through a declared cache.
+// repository may not rebind through a declared cache. It is also exactly what
+// the run's sshd restates for the sessions it starts, which is why Environment
+// exists: sshd builds a session environment from scratch, and a second copy of
+// this list kept by hand sets a variable on the container that no session a
+// user can reach ever sees.
 var runEnvironment = [][2]string{
-	{"HOME", containerHome},
+	{"HOME", ContainerHome},
 	// The image's own binaries come first, so an installed tool never decides
 	// what git or node means. What a run puts in its home directory is reachable
 	// but last, which is where uv and pip leave an executable.
 	{"PATH", imagePath + ":" + containerToolRoot + "/" + toolBinDirectory +
-		":" + containerHome + "/.local/bin"},
+		":" + ContainerHome + "/.local/bin"},
 	{"GIT_TERMINAL_PROMPT", "0"},
-	{"PI_CODING_AGENT_DIR", containerHome + "/.pi/agent"},
+	{"PI_CODING_AGENT_DIR", ContainerHome + "/.pi/agent"},
 	{"PI_CODING_AGENT_SESSION_DIR", containerSessionRoot},
 	{"PI_SKIP_VERSION_CHECK", "1"},
 	// npm defaults its logs and update stamp into the cache directory, so a
 	// project sharing an npm cache would publish per-run state that grows
 	// without bound and is useful to no later run.
-	{"npm_config_logs_dir", containerHome + "/.npm/_logs"},
+	{"npm_config_logs_dir", ContainerHome + "/.npm/_logs"},
 	{"npm_config_update_notifier", "false"},
+}
+
+// Environment is the contract every process in a run runs under, for whoever
+// has to reproduce it: the container is given it, and the run's sshd restates
+// it for each session. Both render this, so a variable added here reaches both.
+func Environment() [][2]string {
+	return slices.Clone(runEnvironment)
 }
 
 // volume renders the only spelling Podman accepts for a rootless overlay.
@@ -438,7 +452,7 @@ func (spec Spec) RunArgs() ([]string, error) {
 		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=" + tmpSize,
 		"--mount", "type=tmpfs,dst=/run,tmpfs-size=16777216,tmpfs-mode=0755,U=true",
 		"--mount", "type=bind,src=" + spec.WorkspacePath() + ",dst=" + containerWorkRoot + ",nodev,nosuid",
-		"--mount", "type=bind,src=" + spec.HomePath() + ",dst=" + containerHome + ",nodev,nosuid",
+		"--mount", "type=bind,src=" + spec.HomePath() + ",dst=" + ContainerHome + ",nodev,nosuid",
 		"--mount", "type=bind,src=" + ProfileMount().Source +
 			",dst=" + ProfileMount().Destination + ",ro,nodev,nosuid",
 		"--mount", "type=bind,src=" + ToolsMount().Source +
@@ -607,8 +621,8 @@ func (spec Spec) ConfigureSSHArgs() ([]string, error) {
 		"--security-opt=no-new-privileges",
 		"--network=none",
 		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=16777216",
-		"--mount", "type=bind,src=" + spec.HomePath() + ",dst=" + containerHome + ",nodev,nosuid",
-		"--env", "HOME=" + containerHome,
+		"--mount", "type=bind,src=" + spec.HomePath() + ",dst=" + ContainerHome + ",nodev,nosuid",
+		"--env", "HOME=" + ContainerHome,
 		spec.ImageID,
 		"pisafe-guest", guestcall.ConfigureSSH,
 	}, nil

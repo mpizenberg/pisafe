@@ -17,7 +17,31 @@ import (
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/piagent"
 	"github.com/mpizenberg/pisafe/internal/profile"
+	"github.com/mpizenberg/pisafe/internal/runcontainer"
 )
+
+// A variable the container declares and sshd does not restate is set on a
+// process nobody types into and unset in every session anybody reaches, which
+// is silent: the run works, and only what reads the variable is quietly wrong.
+func TestSSHDConfigRestatesEveryDeclaredVariable(t *testing.T) {
+	var line string
+	for _, candidate := range strings.Split(sshdConfig(runHome), "\n") {
+		if strings.HasPrefix(candidate, "SetEnv ") {
+			line = candidate
+		}
+	}
+	if line == "" {
+		t.Fatal("sshd config declares no session environment")
+	}
+	for _, variable := range runcontainer.Environment() {
+		if strings.ContainsAny(variable[1], " \t\r\n") {
+			t.Fatalf("%s holds whitespace, which one SetEnv directive cannot carry", variable[0])
+		}
+		if !strings.Contains(line, " "+variable[0]+"="+variable[1]) {
+			t.Fatalf("sshd restates %q, which leaves out %s", line, variable[0])
+		}
+	}
+}
 
 func TestMaterializeCommand(t *testing.T) {
 	source := initGuestTestRepository(t)
@@ -465,8 +489,8 @@ func TestConfigureSSHCreatesRestrictedRunFiles(t *testing.T) {
 		"PermitOpen 127.0.0.1:*",
 		// sshd builds a session environment from scratch, so the container's
 		// own environment reaches a terminal only if the daemon restates it.
-		"SetEnv GIT_TERMINAL_PROMPT=0 PI_CODING_AGENT_DIR=" +
-			filepath.Join(home, ".pi", "agent") + " PI_SKIP_VERSION_CHECK=1",
+		// Which variables that covers is held to the declared list on its own.
+		"SetEnv HOME=" + runcontainer.ContainerHome,
 	} {
 		if !strings.Contains(string(config), expected) {
 			t.Errorf("sshd config lacks %q:\n%s", expected, config)

@@ -21,12 +21,13 @@ import (
 	"github.com/mpizenberg/pisafe/internal/guestcall"
 	"github.com/mpizenberg/pisafe/internal/piagent"
 	"github.com/mpizenberg/pisafe/internal/profile"
+	"github.com/mpizenberg/pisafe/internal/runcontainer"
 	"github.com/mpizenberg/pisafe/internal/runcopy"
 	"github.com/mpizenberg/pisafe/internal/runssh"
 )
 
 const (
-	runHome = "/home/node"
+	runHome = runcontainer.ContainerHome
 	// profileRoot is where the read-only profile is mounted and workRoot where
 	// the run's own workspace is. The controller composes what this helper is
 	// told, and the helper still refuses a path outside either, so no
@@ -646,8 +647,10 @@ func relaySSH(connection net.Conn, in io.Reader, out io.Writer) error {
 
 // sshdConfig renders the run's daemon configuration. sshd builds each session's
 // environment from scratch rather than from its own, so the variables the
-// container declares are restated here; otherwise a terminal session would run
-// under a different environment than the container contract states.
+// container declares are restated here — rendered from the one list the
+// container itself is given, never copied into a second one, because a variable
+// missing from the copy is set on a container nobody types into and unset in
+// every session anybody does.
 //
 // Local forwarding is how the Mac reaches a server the run is hosting, and is
 // the only direction allowed. Only the holder of the run's private key can ask
@@ -661,9 +664,7 @@ func sshdConfig(home string) string {
 		"HostKey " + filepath.Join(directory, "ssh_host_ed25519_key") + "\n" +
 		"AuthorizedKeysFile " + filepath.Join(directory, "authorized_keys") + "\n" +
 		"PidFile /run/sshd.pid\n" +
-		"SetEnv GIT_TERMINAL_PROMPT=0" +
-		" PI_CODING_AGENT_DIR=" + filepath.Join(home, ".pi", "agent") +
-		" PI_SKIP_VERSION_CHECK=1\n" +
+		"SetEnv " + sessionEnvironment() + "\n" +
 		"PasswordAuthentication no\n" +
 		"KbdInteractiveAuthentication no\n" +
 		"PermitEmptyPasswords no\n" +
@@ -686,6 +687,19 @@ func sshdConfig(home string) string {
 		"MaxAuthTries 2\n" +
 		"MaxSessions 32\n" +
 		"Subsystem sftp internal-sftp\n"
+}
+
+// sessionEnvironment renders the declared environment as sshd's SetEnv
+// argument. SetEnv separates variables by whitespace and so cannot carry a
+// value holding any; the declared values are constants, and a test holds them
+// to it, because dropping one here is the failure this rendering exists to end.
+func sessionEnvironment() string {
+	declared := runcontainer.Environment()
+	pairs := make([]string, 0, len(declared))
+	for _, variable := range declared {
+		pairs = append(pairs, variable[0]+"="+variable[1])
+	}
+	return strings.Join(pairs, " ")
 }
 
 func writeNewFile(path string, content []byte, mode os.FileMode) error {

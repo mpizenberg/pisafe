@@ -204,6 +204,25 @@ history holds them. New entries are appended in full.
   that rewrites the profile every later run mounts. Exempting both was rejected
   for that; exempting neither was rejected because it left recreation, the only
   cure a stale VM has, with no way to save the transcripts nothing can refetch.
+- The run's sshd renders its `SetEnv` from the same list the container is given
+  rather than from a second one kept by hand. The hand-kept copy carried three
+  of the eight declared variables, and the one it dropped was
+  `PI_CODING_AGENT_SESSION_DIR`: declared on a container whose main process is
+  sshd, and absent from every session a user reaches, since sshd builds a
+  session environment from scratch. Pi therefore never saw the relocation and
+  fell back to its default layout in the run's own home — nested one directory
+  per workspace, where promotion's flat glob would not have matched it either —
+  so `/sessions` stayed empty, no project ever received a transcript, and the
+  only visible symptom was a store that held nothing. A test holds the rendering
+  to the whole declared list, and to values free of the whitespace one `SetEnv`
+  directive cannot carry. `ContainerHome` is exported for the same reason the
+  list is shared: the guest was keeping its own copy of that path too.
+- Promotion keeps its flat `*.jsonl` glob. Pi nests transcripts one directory
+  per working directory only in its default location; a relocated session
+  directory is flat, which is what the store is, and reading one back filters by
+  each transcript's own recorded cwd. Mirroring the nesting was written and
+  rejected on the evidence: it matched what the broken runs had produced, not
+  what a run with the variable set produces.
 - Backing up mounts each project's filesystem before archiving it. Reusing
   `EnsureProjectStorage` can create a store for a record whose filesystem is
   gone, which a verify-only helper call would instead refuse; creating was

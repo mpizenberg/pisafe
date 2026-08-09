@@ -319,7 +319,7 @@ func TestTheProfileMountsOutsideEveryPathARunWrites(t *testing.T) {
 	if !strings.Contains(joined, expected) {
 		t.Errorf("run args lack %q:\n%s", expected, joined)
 	}
-	if strings.Contains(joined, "dst="+containerHome+"/.pi") {
+	if strings.Contains(joined, "dst="+ContainerHome+"/.pi") {
 		t.Errorf("something is mounted inside Pi's own agent directory:\n%s", joined)
 	}
 	// The record of what is pinned is pisafe's, not the run's.
