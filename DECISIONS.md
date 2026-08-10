@@ -1208,9 +1208,16 @@ history holds them. New entries are appended in full.
   which made anything the current rules no longer accept impossible to remove
   through the CLI. Removal now asks only whether something is stored under the
   name.
-- A key is read only when a request is relayed. Starting a run renders
-  models.json, which contains no upstream credential, so run creation touches no
-  secret at all.
+- A stored secret is read only when a request is relayed, whichever kind of
+  login it is. Starting a run renders models.json, which contains no upstream
+  credential, and assembling the catalog asks the keychain only whether an item
+  exists — `security` hands a password over only when it is told to print one —
+  so run creation touches no secret at all. Loading the subscription credential
+  to prove the login was there was the alternative; it made every run creation,
+  every resume, and every `pisafe login` listing read the OAuth token. The cost
+  of dropping it is that a stored credential that no longer parses is now
+  reported when the broker starts, which already forces every login once, rather
+  than by refusing to start a run that would not have used it.
 - pisafe names the model a run opens on, rather than leaving it to Pi. Pi picks
   from a table keyed by its own provider names, which do not include pisafe's,
   so a subscription run opened on whatever the embedded catalog happened to list

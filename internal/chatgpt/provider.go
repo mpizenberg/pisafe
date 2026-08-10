@@ -4,7 +4,6 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/url"
 
@@ -37,15 +36,18 @@ func provider(source *Source) (*broker.Provider, error) {
 	}, nil
 }
 
-// LoadProvider returns the ChatGPT provider backed by the Keychain
-// credential, or nil when no login is stored.
+// LoadProvider returns the ChatGPT provider backed by the Keychain credential,
+// or nil when no login is stored. Whether a login exists is all it asks: the
+// credential itself is read by the Source, the first time a relayed request
+// needs it, which is the only thing pisafe reads a stored secret for.
 func LoadProvider(ctx context.Context) (*broker.Provider, error) {
 	keychain := NewKeychain()
-	if _, err := keychain.Load(ctx); err != nil {
-		if errors.Is(err, ErrNotLoggedIn) {
-			return nil, nil
-		}
+	stored, err := keychain.Has(ctx)
+	if err != nil {
 		return nil, err
+	}
+	if !stored {
+		return nil, nil
 	}
 	return provider(NewSource(keychain, DefaultEndpoints()))
 }

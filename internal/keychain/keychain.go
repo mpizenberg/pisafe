@@ -71,6 +71,23 @@ func (store Store) Load(ctx context.Context, account string) ([]byte, error) {
 	return decoded, nil
 }
 
+// Has reports whether a credential is stored without reading it: security asks
+// the keychain for a secret only when it is told to print one, so this is the
+// question pisafe can answer without touching what it keeps.
+func (store Store) Has(ctx context.Context, account string) (bool, error) {
+	if err := validateAccount(account); err != nil {
+		return false, err
+	}
+	_, err := store.execute(ctx, "", "find-generic-password", "-s", service, "-a", account)
+	if err != nil {
+		if strings.Contains(err.Error(), "could not be found") {
+			return false, nil
+		}
+		return false, fmt.Errorf("look for the %s credential in the keychain: %w", account, err)
+	}
+	return true, nil
+}
+
 // Delete removes one credential. Having nothing to remove is not a failure:
 // deleting a login also deletes what names it, and either order must be able
 // to finish what the other started.

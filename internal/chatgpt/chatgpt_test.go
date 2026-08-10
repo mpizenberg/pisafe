@@ -240,6 +240,12 @@ func (secrets fakeSecrets) Save(_ context.Context, account string, secret []byte
 	return nil
 }
 
+// Has answers without producing the secret, the way the keychain command does.
+func (secrets fakeSecrets) Has(_ context.Context, account string) (bool, error) {
+	_, stored := secrets[account]
+	return stored, nil
+}
+
 func (secrets fakeSecrets) Delete(_ context.Context, account string) error {
 	delete(secrets, account)
 	return nil

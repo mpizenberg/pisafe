@@ -410,9 +410,12 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   `pisafe logout NAME` removes one whether or not it still works. A run is never
   configured with a provider whose API has no canonical path, so an upstream
   pisafe cannot route reaches no run rather than being relayed by guess.
-- A key is read only when the broker relays a request. Starting a run renders
-  `models.json`, which carries no upstream credential, so run creation touches
-  no secret at all.
+- A stored secret is read only when the broker relays a request, whichever kind
+  of login it is. Starting a run renders `models.json`, which carries no
+  upstream credential, and assembling the catalog asks the keychain only whether
+  an item exists, so run creation touches no secret at all. A subscription
+  credential that no longer parses is therefore reported by `pisafe broker`,
+  which forces every login once at startup, rather than by refusing a run.
 
 ### Per-project storage: caches and sessions
 

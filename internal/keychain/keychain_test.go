@@ -111,6 +111,35 @@ func TestSecretsTravelOverStdinAndSurviveTokenization(t *testing.T) {
 	}
 }
 
+// Every command that only has to know whether inference is configured asks this
+// question, and asking it must not read the secret: security hands one over
+// only when it is told to print one.
+func TestHasAnswersWithoutAskingForTheSecret(t *testing.T) {
+	fake := &fakeSecurity{stored: map[string]string{}}
+	store := Store{execute: fake.execute}
+	ctx := context.Background()
+
+	stored, err := store.Has(ctx, "chatgpt")
+	if err != nil || stored {
+		t.Fatalf("stored = %v, err = %v", stored, err)
+	}
+	if err := store.Save(ctx, "chatgpt", []byte("secret")); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = store.Has(ctx, "chatgpt")
+	if err != nil || !stored {
+		t.Fatalf("stored = %v, err = %v", stored, err)
+	}
+	for _, arg := range fake.sawArgs {
+		if arg == "-w" {
+			t.Fatalf("the existence check asked for the secret: %v", fake.sawArgs)
+		}
+	}
+	if _, err := store.Has(ctx, "two words"); err == nil {
+		t.Error("an account that would tokenize into more arguments was accepted")
+	}
+}
+
 // An account name reaches security inside a command written to its stdin, so a
 // name carrying whitespace would be read as further arguments.
 func TestAnAccountThatWouldTokenizeIntoMoreArgumentsIsRefused(t *testing.T) {
