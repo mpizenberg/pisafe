@@ -630,17 +630,18 @@ git diff --check
 Package coverage at this milestone:
 
 ```text
-pisafe         0.0%   profile       93.6%
-pisafe-guest  67.1%   projectconfig 90.7%
-apikey        82.2%   providers      0.0%
-backup        80.7%   runcontainer  84.9%
-broker        94.2%   runcopy       80.0%
-chatgpt       76.4%   runctl        73.4%
-cli           30.8%   runid         90.5%
-gitstage      79.1%   runimage      76.8%
-hostnet       50.0%   runssh        68.0%
-keychain      60.0%   runstart      80.0%
-lima          57.9%   runstate      73.7%
+pisafe         0.0%   projectconfig 90.7%
+pisafe-guest  71.2%   providers      0.0%
+apikey        82.2%   runcontainer  85.1%
+backup        80.7%   runcopy       78.2%
+broker        93.9%   runctl        75.8%
+chatgpt       76.7%   runid         90.5%
+cli           33.1%   runimage      77.7%
+gitstage      80.0%   runssh        68.8%
+hostnet       50.0%   runstart      74.4%
+keychain      60.0%   runstate      74.4%
+lima          61.3%   zedsettings   80.4%
+profile       96.0%
 ```
 
 `lima` and `cli` fell as Phase 2 added VM-side scripts and command surface that

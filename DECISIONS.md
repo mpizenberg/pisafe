@@ -1016,6 +1016,12 @@ history holds them. New entries are appended in full.
   baseline commit exists only inside the run, so a source repository that knows
   it after the fetch learned it from the bundle that just arrived, and apply
   stops.
+- A `merge-base --is-ancestor` that fails for any reason but its exit code 1 is
+  an unanswered question, not a "no". Staging and apply each refuse when the
+  answer is no, so conflating the two was harmless there; the drop verification
+  asks the opposite question, where it meant a git failure read as "the baseline
+  was dropped" and let the apply through. One helper now separates the exit code
+  from the failure, and every caller propagates the failure.
 - Activation records the baseline commit each submodule actually got, not just
   the superproject's. The materialized snapshot always carried them and the
   manifest always had the field; discarding them made `pisafe diff` report a
