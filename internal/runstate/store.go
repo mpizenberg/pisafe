@@ -20,6 +20,7 @@ import (
 	"github.com/mpizenberg/pisafe/internal/runcontainer"
 	"github.com/mpizenberg/pisafe/internal/runid"
 	"github.com/mpizenberg/pisafe/internal/runssh"
+	"github.com/mpizenberg/pisafe/internal/safefile"
 )
 
 const manifestVersion = 6
@@ -335,7 +336,7 @@ func (store Store) Forget(runID string) error {
 	if err := os.Remove(path); err != nil {
 		return fmt.Errorf("remove run manifest: %w", err)
 	}
-	return syncDirectory(store.root)
+	return safefile.SyncDirectory(store.root)
 }
 
 // BeginApply records a verified import plan before any user-visible ref moves.
@@ -539,7 +540,11 @@ func (store Store) writeAtomic(path string, manifest Manifest, replace bool) err
 	if err != nil {
 		return fmt.Errorf("encode run manifest: %w", err)
 	}
-	return writeRecord(store.root, path, append(content, '\n'), replace)
+	content = append(content, '\n')
+	if replace {
+		return safefile.Replace(path, content, 0o600)
+	}
+	return safefile.Create(path, content, 0o600)
 }
 
 func ensureDirectory(path string) error {
@@ -557,68 +562,6 @@ func ensureDirectory(path string) error {
 		if err := os.Chmod(path, 0o700); err != nil {
 			return fmt.Errorf("restrict state directory: %w", err)
 		}
-	}
-	return nil
-}
-
-// writeRecord installs one durable record in directory, replacing what is there
-// only when asked to. Nothing partial is ever visible under the record's own
-// name, and the write is durable once it returns.
-func writeRecord(directory, path string, content []byte, replace bool) error {
-	temporary, err := os.CreateTemp(directory, ".record-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temporary record: %w", err)
-	}
-	temporaryPath := temporary.Name()
-	complete := false
-	defer func() {
-		temporary.Close()
-		if !complete {
-			os.Remove(temporaryPath)
-		}
-	}()
-	if err := temporary.Chmod(0o600); err != nil {
-		return fmt.Errorf("restrict temporary record: %w", err)
-	}
-	if _, err := temporary.Write(content); err != nil {
-		return fmt.Errorf("write record: %w", err)
-	}
-	if err := temporary.Sync(); err != nil {
-		return fmt.Errorf("sync record: %w", err)
-	}
-	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close record: %w", err)
-	}
-	if replace {
-		if err := os.Rename(temporaryPath, path); err != nil {
-			return fmt.Errorf("replace record: %w", err)
-		}
-	} else {
-		// A hard link provides portable no-replace semantics; unlike a
-		// preflight Lstat followed by Rename, concurrent creators cannot
-		// overwrite one another.
-		if err := os.Link(temporaryPath, path); err != nil {
-			if errors.Is(err, fs.ErrExist) {
-				return fmt.Errorf("record %q already exists", filepath.Base(path))
-			}
-			return fmt.Errorf("install record: %w", err)
-		}
-		if err := os.Remove(temporaryPath); err != nil {
-			return fmt.Errorf("remove temporary record link: %w", err)
-		}
-	}
-	complete = true
-	return syncDirectory(directory)
-}
-
-func syncDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open state directory: %w", err)
-	}
-	defer directory.Close()
-	if err := directory.Sync(); err != nil {
-		return fmt.Errorf("sync state directory: %w", err)
 	}
 	return nil
 }

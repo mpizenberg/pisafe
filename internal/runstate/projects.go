@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/runid"
+	"github.com/mpizenberg/pisafe/internal/safefile"
 )
 
 const projectRecordVersion = 1
@@ -73,7 +74,7 @@ func (store Store) RegisterProject(project runid.Project) error {
 	if err != nil {
 		return fmt.Errorf("encode project record: %w", err)
 	}
-	return writeRecord(store.projectRoot(), path, append(content, '\n'), true)
+	return safefile.Replace(path, append(content, '\n'), 0o600)
 }
 
 func (store Store) ListProjects() ([]ProjectRecord, error) {
@@ -138,7 +139,7 @@ func (store Store) MarkProjectMissing(key string, at time.Time) error {
 	if err != nil {
 		return fmt.Errorf("encode project record: %w", err)
 	}
-	return writeRecord(store.projectRoot(), path, append(content, '\n'), true)
+	return safefile.Replace(path, append(content, '\n'), 0o600)
 }
 
 // ForgetProject drops the record of a project whose filesystem is gone. It is
@@ -152,7 +153,7 @@ func (store Store) ForgetProject(key string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("remove project record: %w", err)
 	}
-	return syncDirectory(store.projectRoot())
+	return safefile.SyncDirectory(store.projectRoot())
 }
 
 func (store Store) getProject(key string) (ProjectRecord, error) {

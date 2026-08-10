@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/guestcall"
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
@@ -126,7 +127,7 @@ func (controller Controller) importRun(
 	if err != nil {
 		return gitstage.PlannedApply{}, fmt.Errorf("capture run result: %w", err)
 	}
-	prepared, err := decodeGuestResponse[gitstage.PreparedApply](output, "prepared apply")
+	prepared, err := guestcall.Decode[gitstage.PreparedApply](bytes.NewReader(output), "prepared apply")
 	if err != nil {
 		return gitstage.PlannedApply{}, err
 	}

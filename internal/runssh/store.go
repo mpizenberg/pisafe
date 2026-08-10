@@ -10,7 +10,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -20,6 +19,7 @@ import (
 	"github.com/mpizenberg/pisafe/internal/guestcall"
 	"github.com/mpizenberg/pisafe/internal/runcontainer"
 	"github.com/mpizenberg/pisafe/internal/runid"
+	"github.com/mpizenberg/pisafe/internal/safefile"
 )
 
 const (
@@ -106,7 +106,7 @@ func (store Store) Prepare(ctx context.Context, runID string) (_ Prepared, retur
 	if err := restrictRegularFile(publicPath, 0o600); err != nil {
 		return Prepared{}, fmt.Errorf("validate run SSH public key: %w", err)
 	}
-	content, err := readLimitedRegularFile(publicPath, publicKeyLimit)
+	content, err := safefile.Read(publicPath, publicKeyLimit)
 	if err != nil {
 		return Prepared{}, fmt.Errorf("read run SSH public key: %w", err)
 	}
@@ -145,7 +145,7 @@ func (store Store) Finalize(
 	if !safeConfigPath(gateway.ConfigFile) {
 		return Endpoint{}, errors.New("invalid Lima SSH config path")
 	}
-	if _, err := readLimitedRegularFile(gateway.ConfigFile, 1<<20); err != nil {
+	if _, err := safefile.Read(gateway.ConfigFile, 1<<20); err != nil {
 		return Endpoint{}, fmt.Errorf("validate Lima SSH config: %w", err)
 	}
 	if containerName != runcontainer.ContainerName(prepared.RunID) {
@@ -166,11 +166,7 @@ func (store Store) Finalize(
 			os.Remove(configFile)
 		}
 	}()
-	if err := writeExclusive(
-		knownHosts,
-		[]byte(alias+" "+hostKey+"\n"),
-		0o600,
-	); err != nil {
+	if err := safefile.Create(knownHosts, []byte(alias+" "+hostKey+"\n"), 0o600); err != nil {
 		return Endpoint{}, fmt.Errorf("write run known-hosts file: %w", err)
 	}
 	wroteKnownHosts = true
@@ -181,7 +177,7 @@ func (store Store) Finalize(
 		gateway,
 		containerName,
 	)
-	if err := writeExclusive(configFile, []byte(config), 0o600); err != nil {
+	if err := safefile.Create(configFile, []byte(config), 0o600); err != nil {
 		return Endpoint{}, fmt.Errorf("write run SSH config: %w", err)
 	}
 
@@ -270,36 +266,6 @@ func (store Store) runRoot(runID string) string {
 	return filepath.Join(store.root, runID)
 }
 
-func readLimitedRegularFile(path string, limit int64) ([]byte, error) {
-	before, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !before.Mode().IsRegular() || before.Size() > limit {
-		return nil, errors.New("file is not a bounded regular file")
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() || info.Size() > limit || !os.SameFile(before, info) {
-		return nil, errors.New("file is not a bounded regular file")
-	}
-	content, err := io.ReadAll(io.LimitReader(file, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(content)) > limit {
-		return nil, errors.New("file exceeds size limit")
-	}
-	return content, nil
-}
-
 func restrictRegularFile(path string, mode fs.FileMode) error {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -311,31 +277,6 @@ func restrictRegularFile(path string, mode fs.FileMode) error {
 	if err := os.Chmod(path, mode); err != nil {
 		return err
 	}
-	return nil
-}
-
-func writeExclusive(path string, content []byte, mode fs.FileMode) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
-	if err != nil {
-		return err
-	}
-	complete := false
-	defer func() {
-		file.Close()
-		if !complete {
-			os.Remove(path)
-		}
-	}()
-	if _, err := file.Write(content); err != nil {
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	complete = true
 	return nil
 }
 

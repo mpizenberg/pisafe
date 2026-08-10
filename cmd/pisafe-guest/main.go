@@ -24,6 +24,7 @@ import (
 	"github.com/mpizenberg/pisafe/internal/runcontainer"
 	"github.com/mpizenberg/pisafe/internal/runcopy"
 	"github.com/mpizenberg/pisafe/internal/runssh"
+	"github.com/mpizenberg/pisafe/internal/safefile"
 )
 
 const (
@@ -32,10 +33,9 @@ const (
 	// refuses a path outside the profile or the workspace, so no configuration
 	// can point Pi at something that is not the run's. Sharing the constants is
 	// what keeps the two sides refusing the same paths; it shares no trust.
-	profileRoot       = runcontainer.ContainerProfileRoot
-	workRoot          = runcontainer.ContainerWorkRoot
-	sshPublicKeySize  = 4096
-	documentSizeLimit = int64(1 << 20)
+	profileRoot      = runcontainer.ContainerProfileRoot
+	workRoot         = runcontainer.ContainerWorkRoot
+	sshPublicKeySize = 4096
 )
 
 func main() {
@@ -150,7 +150,7 @@ func importCopy(workspace, destination, name, decision string, in io.Reader, out
 // configuration, so an agent commits as the person whose work it is instead of
 // failing with an unknown author.
 func configureIdentity(ctx context.Context, home string, in io.Reader) error {
-	identity, err := decodeControllerDocument[gitstage.Identity](in, "Git identity")
+	identity, err := guestcall.Decode[gitstage.Identity](in, "Git identity")
 	if err != nil {
 		return err
 	}
@@ -168,7 +168,7 @@ func configureIdentity(ctx context.Context, home string, in io.Reader) error {
 // transport first dials a WebSocket, which the broker's HTTP relay cannot
 // speak.
 func configureModels(home string, in io.Reader) error {
-	configuration, err := decodeControllerDocument[piagent.Configuration](
+	configuration, err := guestcall.Decode[piagent.Configuration](
 		in,
 		"inference configuration",
 	)
@@ -187,7 +187,7 @@ func configureModels(home string, in io.Reader) error {
 	if err := os.MkdirAll(agentDirectory, 0o700); err != nil {
 		return fmt.Errorf("create Pi agent directory: %w", err)
 	}
-	if err := writeAgentFile(agentDirectory, "models.json", models); err != nil {
+	if err := safefile.Replace(filepath.Join(agentDirectory, "models.json"), models, 0o600); err != nil {
 		return err
 	}
 	settings, err := updateAgentSettings(
@@ -203,7 +203,7 @@ func configureModels(home string, in io.Reader) error {
 	if settings == nil {
 		return nil
 	}
-	return writeAgentFile(agentDirectory, "settings.json", settings)
+	return safefile.Replace(filepath.Join(agentDirectory, "settings.json"), settings, 0o600)
 }
 
 // openOn names the model a run starts on, leaving alone anything the run has
@@ -229,7 +229,7 @@ func openOn(settings map[string]any, selection piagent.Selection) {
 // ones Pi writes too, so they are copied into the run rather than mounted, and
 // whatever Pi then makes of them dies with the run.
 func configureProfile(home string, in io.Reader) error {
-	configuration, err := decodeControllerDocument[profile.Configuration](
+	configuration, err := guestcall.Decode[profile.Configuration](
 		in,
 		"profile configuration",
 	)
@@ -262,7 +262,7 @@ func configureProfile(home string, in io.Reader) error {
 		return err
 	}
 	if settings != nil {
-		if err := writeAgentFile(agentDirectory, "settings.json", settings); err != nil {
+		if err := safefile.Replace(filepath.Join(agentDirectory, "settings.json"), settings, 0o600); err != nil {
 			return err
 		}
 	}
@@ -303,7 +303,11 @@ func trustWorkspace(agentDirectory, workspace string) error {
 	if err != nil {
 		return fmt.Errorf("encode project trust: %w", err)
 	}
-	return writeAgentFile(agentDirectory, "trust.json", append(content, '\n'))
+	return safefile.Replace(
+		filepath.Join(agentDirectory, "trust.json"),
+		append(content, '\n'),
+		0o600,
+	)
 }
 
 // updateAgentSettings applies update to the run's Pi settings and returns the
@@ -336,7 +340,7 @@ func updateAgentSettings(path string, update func(map[string]any)) ([]byte, erro
 // that loses a setting the agent corrupted.
 func readAgentDocument(path string) map[string]any {
 	existing, err := os.ReadFile(path)
-	if err != nil || int64(len(existing)) > documentSizeLimit {
+	if err != nil || int64(len(existing)) > guestcall.DocumentLimit {
 		return map[string]any{}
 	}
 	var parsed map[string]any
@@ -344,39 +348,6 @@ func readAgentDocument(path string) map[string]any {
 		return map[string]any{}
 	}
 	return parsed
-}
-
-func writeAgentFile(agentDirectory, name string, content []byte) error {
-	target := filepath.Join(agentDirectory, name)
-	temporary, err := os.CreateTemp(agentDirectory, "."+name+"-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temporary %s: %w", name, err)
-	}
-	temporaryPath := temporary.Name()
-	complete := false
-	defer func() {
-		temporary.Close()
-		if !complete {
-			os.Remove(temporaryPath)
-		}
-	}()
-	if err := temporary.Chmod(0o600); err != nil {
-		return fmt.Errorf("restrict %s: %w", name, err)
-	}
-	if _, err := temporary.Write(content); err != nil {
-		return fmt.Errorf("write %s: %w", name, err)
-	}
-	if err := temporary.Sync(); err != nil {
-		return fmt.Errorf("sync %s: %w", name, err)
-	}
-	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close %s: %w", name, err)
-	}
-	if err := os.Rename(temporaryPath, target); err != nil {
-		return fmt.Errorf("install %s: %w", name, err)
-	}
-	complete = true
-	return nil
 }
 
 func materialize(
@@ -462,7 +433,7 @@ func diffRun(ctx context.Context, workspacePath string, in io.Reader, out io.Wri
 // decodeSnapshot reads the run description the controller sends across the
 // boundary. A snapshot that names a Mac path is refused rather than used.
 func decodeSnapshot(in io.Reader) (gitstage.Snapshot, error) {
-	snapshot, err := decodeControllerDocument[gitstage.Snapshot](in, "stage snapshot")
+	snapshot, err := guestcall.Decode[gitstage.Snapshot](in, "stage snapshot")
 	if err != nil {
 		return gitstage.Snapshot{}, err
 	}
@@ -472,26 +443,6 @@ func decodeSnapshot(in io.Reader) (gitstage.Snapshot, error) {
 		)
 	}
 	return snapshot, nil
-}
-
-// decodeControllerDocument reads one bounded JSON document piped in from the
-// Mac controller, refusing unknown fields and trailing data so the run acts
-// only on what this helper's version understands.
-func decodeControllerDocument[Document any](in io.Reader, subject string) (Document, error) {
-	var document Document
-	decoder := json.NewDecoder(io.LimitReader(in, documentSizeLimit))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&document); err != nil {
-		return document, fmt.Errorf("decode %s: %w", subject, err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return document, fmt.Errorf("%s contains trailing data", subject)
-		}
-		return document, fmt.Errorf("decode %s trailer: %w", subject, err)
-	}
-	return document, nil
 }
 
 func configureSSH(
@@ -537,18 +488,18 @@ func configureSSH(
 	authorized := filepath.Join(directory, "authorized_keys")
 	authorizedKey := "no-agent-forwarding,no-X11-forwarding,no-user-rc " +
 		publicKey + "\n"
-	if err := writeNewFile(authorized, []byte(authorizedKey), 0o600); err != nil {
+	if err := safefile.Create(authorized, []byte(authorizedKey), 0o600); err != nil {
 		return fmt.Errorf("write SSH authorized key: %w", err)
 	}
 	config := sshdConfig(home)
-	if err := writeNewFile(
+	if err := safefile.Create(
 		filepath.Join(directory, "sshd_config"),
 		[]byte(config),
 		0o600,
 	); err != nil {
 		return fmt.Errorf("write SSH daemon config: %w", err)
 	}
-	if err := writeNewFile(
+	if err := safefile.Create(
 		filepath.Join(home, ".bash_profile"),
 		[]byte(loginEnvironment()),
 		0o600,
@@ -717,29 +668,4 @@ func loginEnvironment() string {
 		`if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi`,
 		"",
 	), "\n")
-}
-
-func writeNewFile(path string, content []byte, mode os.FileMode) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
-	if err != nil {
-		return err
-	}
-	complete := false
-	defer func() {
-		file.Close()
-		if !complete {
-			os.Remove(path)
-		}
-	}()
-	if _, err := file.Write(content); err != nil {
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	complete = true
-	return nil
 }

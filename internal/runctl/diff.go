@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/guestcall"
 )
 
 // Diff reports what a run changed since it began. It neither stops nor resumes
@@ -38,7 +39,7 @@ func (controller Controller) Diff(
 	if err != nil {
 		return gitstage.RunDiff{}, fmt.Errorf("compare run workspace: %w", err)
 	}
-	diff, err := decodeGuestResponse[gitstage.RunDiff](output, "run diff")
+	diff, err := guestcall.Decode[gitstage.RunDiff](bytes.NewReader(output), "run diff")
 	if err != nil {
 		return gitstage.RunDiff{}, err
 	}

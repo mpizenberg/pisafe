@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/guestcall"
 	"github.com/mpizenberg/pisafe/internal/piagent"
 	"github.com/mpizenberg/pisafe/internal/profile"
 	"github.com/mpizenberg/pisafe/internal/runcontainer"
@@ -889,7 +890,7 @@ func TestConfigureModelsFailsClosed(t *testing.T) {
 	for name, input := range map[string]string{
 		"not json":      "providers",
 		"trailing":      `{"models":{"providers":{"pisafe":{}}}} extra`,
-		"oversize":      `{"models":{"providers":{"pisafe":{"apiKey":"` + strings.Repeat("x", int(documentSizeLimit)) + `"}}}}`,
+		"oversize":      `{"models":{"providers":{"pisafe":{"apiKey":"` + strings.Repeat("x", int(guestcall.DocumentLimit)) + `"}}}}`,
 		"unknown field": `{"models":{"providers":{"pisafe":{}}},"transport":"auto"}`,
 		"non-object":    `{"models":["providers"]}`,
 		"no provider":   `{"models":{"providers":{}}}`,

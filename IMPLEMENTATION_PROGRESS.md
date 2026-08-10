@@ -550,7 +550,10 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
 
 ### Run records and controller
 
-- `internal/runstate` writes version-6, mode-0600 JSON manifests atomically
+- `internal/runstate` writes version-6, mode-0600 JSON manifests through
+  `internal/safefile` — which every store that keeps a small file uses, so
+  "bounded on the way in, whole on the way out, never anything but a regular
+  file" has one implementation and it is the strictest of the ones it replaced —
   under the user config directory (or `PISAFE_STATE_DIR`, resolved to an
   absolute path so every store filed under it is reached the same way), enforcing
   `creating → active → stopped → active|imported` and binding one capability to

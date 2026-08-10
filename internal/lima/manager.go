@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/mpizenberg/pisafe/internal/safefile"
 )
 
 type Status string
@@ -432,27 +434,10 @@ func (runner execRunner) wait(command *exec.Cmd, args []string) error {
 	return nil
 }
 
+// WriteConfig stores one rendered VM definition where limactl will read it.
 func WriteConfig(path string, config []byte) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return fmt.Errorf("create Lima configuration: %w", err)
-	}
-	complete := false
-	defer func() {
-		file.Close()
-		if !complete {
-			os.Remove(path)
-		}
-	}()
-	if _, err := file.Write(config); err != nil {
+	if err := safefile.Create(path, config, 0o600); err != nil {
 		return fmt.Errorf("write Lima configuration: %w", err)
 	}
-	if err := file.Sync(); err != nil {
-		return fmt.Errorf("sync Lima configuration: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return fmt.Errorf("close Lima configuration: %w", err)
-	}
-	complete = true
 	return nil
 }

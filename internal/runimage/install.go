@@ -12,8 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/mpizenberg/pisafe/internal/guestcall"
@@ -342,38 +340,4 @@ func buildContext(artifacts Artifacts) ([]byte, error) {
 		return nil, fmt.Errorf("close image context: %w", err)
 	}
 	return buffer.Bytes(), nil
-}
-
-func readRegularFile(path string, limit int64) ([]byte, error) {
-	path = filepath.Clean(path)
-	pathInfo, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !pathInfo.Mode().IsRegular() {
-		return nil, fmt.Errorf("path is not a regular file")
-	}
-	if pathInfo.Size() <= 0 || pathInfo.Size() > limit {
-		return nil, fmt.Errorf("file size is outside the allowed range")
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	openInfo, err := file.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !os.SameFile(pathInfo, openInfo) {
-		return nil, fmt.Errorf("file changed while it was being opened")
-	}
-	content, err := io.ReadAll(io.LimitReader(file, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(content) == 0 || int64(len(content)) > limit {
-		return nil, fmt.Errorf("file size is outside the allowed range")
-	}
-	return content, nil
 }

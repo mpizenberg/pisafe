@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
+	"github.com/mpizenberg/pisafe/internal/guestcall"
 	"github.com/mpizenberg/pisafe/internal/profile"
 	"github.com/mpizenberg/pisafe/internal/runcontainer"
 	"github.com/mpizenberg/pisafe/internal/runid"
@@ -379,11 +380,6 @@ func (controller Controller) configureModels(
 	return nil
 }
 
-// guestResponseLimit bounds every JSON document a run hands back. It is far
-// above what any of them legitimately needs, and keeps a run from making the
-// controller allocate or the manifest grow without bound.
-const guestResponseLimit = 1 << 20
-
 // runRequest renders what a run is told about itself. The source root is the
 // Mac path its checkout lives at, which nothing inside a run may learn, so it is
 // cleared here rather than at each place that sends the snapshot in.
@@ -397,34 +393,11 @@ func runRequest(manifest runstate.Manifest) ([]byte, error) {
 	return encoded, nil
 }
 
-// decodeGuestResponse reads one document produced inside a run. Unknown fields
-// and trailing data are refused, so a run cannot smuggle anything past what
-// the controller expects to receive.
-func decodeGuestResponse[Document any](output []byte, subject string) (Document, error) {
-	var document Document
-	if len(output) > guestResponseLimit {
-		return document, fmt.Errorf("%s exceeds size limit", subject)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(output))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&document); err != nil {
-		return document, fmt.Errorf("decode %s: %w", subject, err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return document, fmt.Errorf("%s contains trailing data", subject)
-		}
-		return document, fmt.Errorf("decode %s trailer: %w", subject, err)
-	}
-	return document, nil
-}
-
 func decodeMaterializedSnapshot(
 	output []byte,
 	hostSnapshot gitstage.Snapshot,
 ) (gitstage.Snapshot, error) {
-	materialized, err := decodeGuestResponse[gitstage.Snapshot](output, "materialized snapshot")
+	materialized, err := guestcall.Decode[gitstage.Snapshot](bytes.NewReader(output), "materialized snapshot")
 	if err != nil {
 		return gitstage.Snapshot{}, err
 	}

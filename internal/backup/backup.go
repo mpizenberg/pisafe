@@ -27,6 +27,7 @@ import (
 	"github.com/mpizenberg/pisafe/internal/profile"
 	"github.com/mpizenberg/pisafe/internal/runcopy"
 	"github.com/mpizenberg/pisafe/internal/runid"
+	"github.com/mpizenberg/pisafe/internal/safefile"
 )
 
 // Version is the shape of the manifest. A backup this pisafe does not
@@ -190,23 +191,11 @@ func Write(directory string, held Backup) error {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return fmt.Errorf("create backup directory: %w", err)
 	}
-	staging, err := os.CreateTemp(directory, "."+ManifestFile+".*")
-	if err != nil {
-		return fmt.Errorf("reserve backup manifest: %w", err)
-	}
-	defer os.Remove(staging.Name())
-	if _, err := staging.Write(content); err != nil {
-		staging.Close()
-		return fmt.Errorf("write backup manifest: %w", err)
-	}
-	if err := staging.Chmod(0o600); err != nil {
-		staging.Close()
-		return fmt.Errorf("write backup manifest: %w", err)
-	}
-	if err := staging.Close(); err != nil {
-		return fmt.Errorf("write backup manifest: %w", err)
-	}
-	if err := os.Rename(staging.Name(), filepath.Join(directory, ManifestFile)); err != nil {
+	if err := safefile.Replace(
+		filepath.Join(directory, ManifestFile),
+		content,
+		0o600,
+	); err != nil {
 		return fmt.Errorf("write backup manifest: %w", err)
 	}
 	return nil
