@@ -289,12 +289,15 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   from 31.7 s to 0.5 s.
 - Build-time SSH host keys are removed; a network-disabled one-shot container
   generates each run's host key and installs only its client public key.
-- Run commands require an immutable `sha256:` ID and use UID/GID 1000, read-only
-  root, all capabilities dropped, `no-new-privileges`, rootless pasta networking
-  with explicit public DNS, 2 CPUs, 4 GiB memory with no extra swap, 512 PIDs,
-  bounded `/tmp` and `/run` tmpfs, and unique workspace/home directories inside a
-  run-scoped fixed-capacity filesystem owned by the mapped non-root user. No
-  Podman/Docker socket, forwarded agent, or credential environment is added.
+- Every container pisafe starts is rendered from one hardened base: an immutable
+  `sha256:` ID, UID/GID 1000, read-only root, all capabilities dropped,
+  `no-new-privileges`, and bounded memory, swap, and PIDs. The network is opt-in,
+  so a container that does not ask for it gets `--network=none`; the run and the
+  two package containers ask, and get rootless pasta with explicit public DNS.
+  The run adds 2 CPUs, 4 GiB memory, 512 PIDs, bounded `/tmp` and `/run` tmpfs,
+  and unique workspace/home directories inside a run-scoped fixed-capacity
+  filesystem owned by the mapped non-root user. No Podman/Docker socket,
+  forwarded agent, or credential environment is added anywhere.
 - Each run gets one sparse 10 GiB ext4 filesystem for workspace and home.
   Root-owned image storage and the fixed-policy helper prevent the rootless VM
   user from resizing or remounting it. Podman's independent `--timeout` enforces

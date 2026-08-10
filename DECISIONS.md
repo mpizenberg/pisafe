@@ -244,6 +244,40 @@ history holds them. New entries are appended in full.
   each transcript's own recorded cwd. Mirroring the nesting was written and
   rejected on the evidence: it matched what the broken runs had produced, not
   what a run with the variable set produces.
+- Every container pisafe starts is rendered from one hardened base rather than
+  from five hand-copied prologues: unprivileged user, read-only root, no
+  capabilities, no new privileges, and bounded memory and PIDs. The network is
+  opt-in, so a container that says nothing about it reaches nothing, and a
+  container added later inherits all of it instead of restating it. Writing the
+  prologue down once is what showed that the container generating a run's SSH
+  host key had no memory or PID limit at all; it has the run's now. One
+  difference survives and is not understood: the container that fetches and
+  unpacks an npm tarball mounts its scratch `/tmp` without `noexec` where every
+  other container has it, and whether npm needs that is unverified, so making
+  the base uniformly strict is backlog work behind a live install rather than a
+  silent change inside a deduplication.
+- The Mac's on-link deny set is canonicalized in exactly one place. `hostnet`
+  reports the prefixes it observed; `lima.CanonicalIPv4Prefixes` masks,
+  deduplicates, orders, and drops any prefix another already covers, and the VM
+  definition, its security-profile digest, and the check against a running VM
+  all read the set from there. `hostnet` doing half of it as well was the
+  previous arrangement: two functions that agreed, with nothing making them go
+  on agreeing. The digest therefore depends on the canonical set alone, which
+  was verified by diffing rendered configs and digests across the change,
+  including the collapsed-versus-raw pair that could otherwise have made every
+  running VM read as stale.
+- `lima.VM` is the one handle on the instance. `Manager` and `Transport` were
+  the same `{instance, runner}` value with different method sets, and four
+  commands built both to talk to one VM; nothing recorded why they were split.
+  Keeping either name was rejected — one would have named instance creation
+  after a transport, the other is a nothing-word — at the cost of a large
+  mechanical rename.
+- `guestcall` owns what a document crossing the controller/helper boundary is,
+  beside the names of the calls that carry them: bounded, decoded whole, unknown
+  fields and trailing data refused. The two binaries had a copy each.
+  `runctl.inspectContainer` is deliberately outside it: it reads Podman's own
+  inspection output, which must accept unknown fields, and folding it in would
+  have put a flag at every call site deciding which kind of document it is.
 - Backing up mounts each project's filesystem before archiving it. Reusing
   `EnsureProjectStorage` can create a store for a record whose filesystem is
   gone, which a verify-only helper call would instead refuse; creating was
@@ -426,6 +460,19 @@ history holds them. New entries are appended in full.
   pinned by a run that can still start a container are retained; an imported
   run pins none, because every command that still reads its workspace runs the
   controller's current image.
+
+- `internal/safefile` is the one implementation of "bounded on the way in, whole
+  on the way out, never anything but a regular file". Five writers and two
+  readers had said it slightly differently across `runstate`, `runssh`,
+  `runimage`, `backup`, `lima`, and the guest. The survivor is the strictest of
+  each variant, not the first one reached for: the reader rechecks the handle
+  against the path it opened, and every writer goes through a temporary file in
+  the same directory, fsyncs it, installs it by rename or by hard link, and
+  fsyncs the directory — which three of the writers did not do.
+- `runstart` stays a package of its own. Folding it into `runctl` would remove a
+  package and a mirrored interface, but the split is what keeps host-Git staging
+  and run-image sequencing out of the controller that drives containers, which
+  is the boundary that package names.
 
 ## Shared project state
 
@@ -1012,6 +1059,13 @@ history holds them. New entries are appended in full.
   separated without rewriting one of them; a partial drop would be a silent
   half-answer. Lifting this needs commit rewriting with a gitlink map, which is
   additive.
+- A stage package's file names have one owner, mirroring what the apply
+  direction already had: the side that writes the package and the side that
+  reads it both derive every path from `StagePackage`, and the transport's
+  allow-list asks the same package whether a name is one a stage can hold. Four
+  copies of that layout — the Mac's, the upload list's, the allow-list's, and
+  the guest's — were the previous arrangement. `InputsPath` now means the same
+  thing on both sides: set exactly when the package carries an input archive.
 - The Mac verifies the drop instead of trusting the run's word for it: the
   baseline commit exists only inside the run, so a source repository that knows
   it after the fetch learned it from the bundle that just arrived, and apply
@@ -1218,6 +1272,14 @@ history holds them. New entries are appended in full.
   of dropping it is that a stored credential that no longer parses is now
   reported when the broker starts, which already forces every login once, rather
   than by refusing to start a run that would not have used it.
+- The ChatGPT login stays a bare Keychain secret with no record file beside it,
+  unlike an API-key login. Giving it one would make "a stored login is a record
+  naming a Keychain secret" the single storage model and remove three
+  `chatgpt.Name` branches, at the cost of every existing ChatGPT login having to
+  re-authenticate once. That trade was worth considering while existence was
+  proved by reading and parsing the credential; it is not now that existence is
+  an attribute-only keychain lookup, and the OAuth flow would stay special-cased
+  whatever the storage looks like.
 - pisafe names the model a run opens on, rather than leaving it to Pi. Pi picks
   from a table keyed by its own provider names, which do not include pisafe's,
   so a subscription run opened on whatever the embedded catalog happened to list
