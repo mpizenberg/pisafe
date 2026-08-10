@@ -20,6 +20,15 @@ type SubmoduleStage struct {
 	BaselineCommit string `json:"baseline_commit,omitempty"`
 }
 
+// Base is the commit the run's work in this submodule starts from, on the same
+// terms as the superproject's.
+func (submodule SubmoduleStage) Base() string {
+	if submodule.BaselineCommit != "" {
+		return submodule.BaselineCommit
+	}
+	return submodule.Head
+}
+
 // PreparedSubmodule locates the artifacts of one staged submodule. Paths are
 // meaningful only on the side that holds the stage package.
 type PreparedSubmodule struct {
@@ -38,24 +47,37 @@ func submodulePatchName(index int) string {
 	return "submodule-" + strconv.Itoa(index) + ".patch"
 }
 
-// listSubmodules reports the initialized submodules of one repository.
-// Uninitialized submodules are left alone: they stay uninitialized in the run,
-// exactly as they are on the Mac.
-func listSubmodules(ctx context.Context, root string) ([]SubmoduleStage, error) {
+// gitlinks reports the submodule paths one index records, which is what a
+// submodule is before anything asks whether it has been initialized.
+func gitlinks(ctx context.Context, root string) ([]string, error) {
 	output, err := gitOutputBytes(ctx, root, "ls-files", "-z", "--stage")
 	if err != nil {
 		return nil, fmt.Errorf("inspect index: %w", err)
 	}
-	staged := []SubmoduleStage{}
+	paths := []string{}
 	for _, entry := range splitNULBytes(output) {
 		if !bytes.HasPrefix(entry, []byte("160000 ")) {
 			continue
 		}
 		tab := bytes.IndexByte(entry, '\t')
 		if tab < 0 {
-			return nil, fmt.Errorf("unreadable index entry for a submodule")
+			return nil, errors.New("unreadable index entry for a submodule")
 		}
-		path := string(entry[tab+1:])
+		paths = append(paths, string(entry[tab+1:]))
+	}
+	return paths, nil
+}
+
+// listSubmodules reports the initialized submodules of one repository.
+// Uninitialized submodules are left alone: they stay uninitialized in the run,
+// exactly as they are on the Mac.
+func listSubmodules(ctx context.Context, root string) ([]SubmoduleStage, error) {
+	paths, err := gitlinks(ctx, root)
+	if err != nil {
+		return nil, err
+	}
+	staged := []SubmoduleStage{}
+	for _, path := range paths {
 		working := filepath.Join(root, filepath.FromSlash(path))
 		if _, err := os.Stat(filepath.Join(working, ".git")); err != nil {
 			continue
@@ -76,14 +98,12 @@ func listSubmodules(ctx context.Context, root string) ([]SubmoduleStage, error) 
 }
 
 func rejectNestedSubmodules(ctx context.Context, root string) error {
-	output, err := gitOutputBytes(ctx, root, "ls-files", "-z", "--stage")
+	nested, err := gitlinks(ctx, root)
 	if err != nil {
-		return fmt.Errorf("inspect index: %w", err)
+		return err
 	}
-	for _, entry := range splitNULBytes(output) {
-		if bytes.HasPrefix(entry, []byte("160000 ")) {
-			return ErrNestedSubmodules
-		}
+	if len(nested) != 0 {
+		return ErrNestedSubmodules
 	}
 	return nil
 }
@@ -125,7 +145,7 @@ func restoreSubmodules(
 	if len(prepared.Submodules) != len(staged) {
 		return nil, errors.New("staged snapshot and submodule artifacts disagree")
 	}
-	names, err := submoduleNames(ctx, workspace)
+	named, err := namedSubmodules(ctx, workspace)
 	if err != nil {
 		return nil, err
 	}
@@ -136,34 +156,16 @@ func restoreSubmodules(
 		if artifacts.Path != submodule.Path {
 			return nil, errors.New("staged snapshot and submodule artifacts disagree")
 		}
-		if err := safeSubmodulePath(submodule.Path); err != nil {
+		if err := safePath("submodule", submodule.Path); err != nil {
 			return nil, err
 		}
 		target := filepath.Join(workspace, filepath.FromSlash(submodule.Path))
-		if err := gitRun(
-			ctx,
-			"",
-			nil,
-			nil,
-			"clone", "--quiet", artifacts.BundlePath, target,
-		); err != nil {
-			return nil, fmt.Errorf("clone submodule %q: %w", submodule.Path, err)
-		}
-		head, err := gitOutput(ctx, target, "rev-parse", "--verify", "HEAD")
-		if err != nil {
-			return nil, fmt.Errorf("resolve submodule %q HEAD: %w", submodule.Path, err)
-		}
-		if head != submodule.Head {
-			return nil, fmt.Errorf(
-				"submodule %q HEAD mismatch: wanted %s, got %s",
-				submodule.Path,
-				submodule.Head,
-				head,
-			)
+		if err := cloneStaged(ctx, artifacts.BundlePath, target, submodule.Head); err != nil {
+			return nil, fmt.Errorf("submodule %q: %w", submodule.Path, err)
 		}
 		// A submodule Git knows by name becomes a normal one: its git
 		// directory moves under the superproject and its URL is registered.
-		if _, named := names[submodule.Path]; named {
+		if named[submodule.Path] {
 			for _, args := range [][]string{
 				{"submodule", "absorbgitdirs", "--", submodule.Path},
 				{"submodule", "init", "--", submodule.Path},
@@ -218,12 +220,11 @@ func applySubmoduleBaseline(ctx context.Context, target, patchPath string) (stri
 	return gitOutput(ctx, target, "rev-parse", "HEAD")
 }
 
-// submoduleNames maps submodule paths to the names .gitmodules gives them.
-// A gitlink without a .gitmodules entry has no name and stays a plain
-// checkout.
-func submoduleNames(ctx context.Context, workspace string) (map[string]string, error) {
+// namedSubmodules reports which paths .gitmodules gives a name to. A gitlink
+// without an entry has no name and stays a plain checkout.
+func namedSubmodules(ctx context.Context, workspace string) (map[string]bool, error) {
 	if _, err := os.Stat(filepath.Join(workspace, ".gitmodules")); err != nil {
-		return map[string]string{}, nil
+		return map[string]bool{}, nil
 	}
 	output, err := gitOutputBytes(
 		ctx,
@@ -232,34 +233,15 @@ func submoduleNames(ctx context.Context, workspace string) (map[string]string, e
 	)
 	if err != nil {
 		if isExitCode(err, 1) {
-			return map[string]string{}, nil
+			return map[string]bool{}, nil
 		}
 		return nil, fmt.Errorf("read submodule configuration: %w", err)
 	}
-	names := map[string]string{}
+	named := map[string]bool{}
 	for _, entry := range splitNUL(output) {
-		key, path, found := strings.Cut(entry, "\n")
-		if !found {
-			continue
-		}
-		name := strings.TrimSuffix(strings.TrimPrefix(key, "submodule."), ".path")
-		names[path] = name
-	}
-	return names, nil
-}
-
-// safeSubmodulePath refuses a path that would place a submodule outside the
-// workspace or inside its Git directory.
-func safeSubmodulePath(path string) error {
-	cleaned := filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
-	if path == "" || cleaned != path || filepath.IsAbs(filepath.FromSlash(path)) ||
-		path == ".." || strings.HasPrefix(path, "../") {
-		return fmt.Errorf("unsafe submodule path %q", path)
-	}
-	for _, segment := range strings.Split(path, "/") {
-		if segment == ".git" {
-			return fmt.Errorf("unsafe submodule path %q", path)
+		if _, path, found := strings.Cut(entry, "\n"); found {
+			named[path] = true
 		}
 	}
-	return nil
+	return named, nil
 }

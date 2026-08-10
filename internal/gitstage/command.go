@@ -58,3 +58,34 @@ func isExitCode(err error, code int) bool {
 	var exitError *exec.ExitError
 	return errors.As(err, &exitError) && exitError.ExitCode() == code
 }
+
+// isAncestor reports whether one commit is in another's history. Git says no by
+// exiting 1, so any other failure is an unanswered question rather than a no.
+func isAncestor(ctx context.Context, repository, ancestor, descendant string) (bool, error) {
+	err := gitRun(
+		ctx, repository, nil, nil,
+		"merge-base", "--is-ancestor", ancestor, descendant,
+	)
+	switch {
+	case err == nil:
+		return true, nil
+	case isExitCode(err, 1):
+		return false, nil
+	default:
+		return false, fmt.Errorf("compare %s with %s: %w", ancestor, descendant, err)
+	}
+}
+
+// requireAncestor refuses a history that is not built on the commit pisafe gave
+// the run. Everything staging and apply conclude about what a run produced
+// follows from that relationship, so refusal names what was expected of it.
+func requireAncestor(ctx context.Context, repository, ancestor, descendant, refusal string) error {
+	based, err := isAncestor(ctx, repository, ancestor, descendant)
+	if err != nil {
+		return err
+	}
+	if !based {
+		return errors.New(refusal)
+	}
+	return nil
+}

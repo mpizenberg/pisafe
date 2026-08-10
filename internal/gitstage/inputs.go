@@ -397,8 +397,8 @@ func extractInputs(archivePath, workspace string) ([]string, error) {
 		if len(extracted) == maxInputFiles {
 			return nil, fmt.Errorf("input archive holds more than %d files", maxInputFiles)
 		}
-		name, err := safeInputName(header.Name)
-		if err != nil {
+		name := header.Name
+		if err := safePath("input", name); err != nil {
 			return nil, err
 		}
 		target := filepath.Join(workspace, filepath.FromSlash(name))
@@ -445,33 +445,17 @@ func writeExtractedInput(target string, reader io.Reader, header *tar.Header) er
 	return file.Close()
 }
 
-func safeInputName(name string) (string, error) {
-	cleaned := path.Clean(name)
-	if name == "" || cleaned != name ||
-		path.IsAbs(name) || strings.HasPrefix(name, "../") || name == ".." ||
-		filepath.IsAbs(filepath.FromSlash(name)) {
-		return "", fmt.Errorf("input archive holds an unsafe path %q", name)
-	}
-	for _, segment := range strings.Split(name, "/") {
-		if segment == ".git" {
-			return "", fmt.Errorf("input archive tries to write into a repository directory")
-		}
-	}
-	return name, nil
-}
-
 var (
+	// secretNames are the names no word in them would catch.
 	secretNames = map[string]bool{
-		".htpasswd":        true,
-		".netrc":           true,
-		".npmrc":           true,
-		".pgpass":          true,
-		"credentials":      true,
-		"credentials.json": true,
-		"id_dsa":           true,
-		"id_ecdsa":         true,
-		"id_ed25519":       true,
-		"id_rsa":           true,
+		".htpasswd":  true,
+		".netrc":     true,
+		".npmrc":     true,
+		".pgpass":    true,
+		"id_dsa":     true,
+		"id_ecdsa":   true,
+		"id_ed25519": true,
+		"id_rsa":     true,
 	}
 	secretExtensions = map[string]bool{
 		".jks":      true,

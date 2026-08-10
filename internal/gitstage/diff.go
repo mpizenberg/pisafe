@@ -62,27 +62,19 @@ func DiffRun(ctx context.Context, snapshot Snapshot, workspace string) (RunDiff,
 	if err := runid.Validate(snapshot.RunID); err != nil {
 		return RunDiff{}, err
 	}
-	base := snapshot.BaselineCommit
-	if base == "" {
-		base = snapshot.SourceHead
-	}
-	superproject, err := diffRepository(ctx, filepath.Clean(workspace), base, true)
+	superproject, err := diffRepository(ctx, filepath.Clean(workspace), snapshot.Base(), true)
 	if err != nil {
 		return RunDiff{}, err
 	}
 	diff := RunDiff{RunID: snapshot.RunID, Repositories: []RepositoryDiff{superproject}}
 	for _, submodule := range snapshot.Submodules {
-		if err := safeSubmodulePath(submodule.Path); err != nil {
+		if err := safePath("submodule", submodule.Path); err != nil {
 			return RunDiff{}, err
-		}
-		base := submodule.BaselineCommit
-		if base == "" {
-			base = submodule.Head
 		}
 		repository, err := diffRepository(
 			ctx,
 			filepath.Join(filepath.Clean(workspace), filepath.FromSlash(submodule.Path)),
-			base,
+			submodule.Base(),
 			false,
 		)
 		if err != nil {
@@ -104,11 +96,14 @@ func diffRepository(
 	if err != nil {
 		return RepositoryDiff{}, fmt.Errorf("resolve run head: %w", err)
 	}
-	if err := gitRun(
-		ctx, repository, nil, nil,
-		"merge-base", "--is-ancestor", base, head,
+	if err := requireAncestor(
+		ctx,
+		repository,
+		base,
+		head,
+		"run history is not based on the staged commit",
 	); err != nil {
-		return RepositoryDiff{}, fmt.Errorf("run history is not based on the staged commit")
+		return RepositoryDiff{}, err
 	}
 	commits, commitTotal, err := diffCommits(ctx, repository, base)
 	if err != nil {

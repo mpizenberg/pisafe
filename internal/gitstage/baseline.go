@@ -84,14 +84,14 @@ func replayWithoutBaseline(
 			paths[0],
 		)
 	}
-	if err := gitRun(
+	if err := requireAncestor(
 		ctx,
 		workspace,
-		nil,
-		nil,
-		"merge-base", "--is-ancestor", snapshot.BaselineCommit, snapshot.WorkRef,
+		snapshot.BaselineCommit,
+		snapshot.WorkRef,
+		"the run's history no longer contains the baseline commit",
 	); err != nil {
-		return "", nil, fmt.Errorf("the run's history no longer contains the baseline commit")
+		return "", nil, err
 	}
 
 	worktree := filepath.Join(packageDir, "replay")
@@ -167,7 +167,11 @@ func requireBaselineDropped(ctx context.Context, repository, ref, baseline strin
 	case err != nil:
 		return fmt.Errorf("inspect baseline commit: %w", err)
 	}
-	if gitRun(ctx, repository, nil, nil, "merge-base", "--is-ancestor", baseline, ref) == nil {
+	kept, err := isAncestor(ctx, repository, baseline, ref)
+	if err != nil {
+		return err
+	}
+	if kept {
 		return fmt.Errorf("the run returned a history that still contains the baseline commit")
 	}
 	return nil

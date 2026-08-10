@@ -326,6 +326,7 @@ func TestLooksLikeSecretMatchesWholeWordsOnly(t *testing.T) {
 	for _, name := range []string{
 		".env", ".env.local", "config/.npmrc", "deploy/id_rsa", "certs/server.pem",
 		"my-secret.txt", "api_token.json", "PASSWORD.txt", "passwords.csv",
+		"credentials", "credentials.json",
 	} {
 		if !LooksLikeSecret(name) {
 			t.Errorf("%q was not flagged", name)

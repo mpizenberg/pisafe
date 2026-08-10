@@ -156,14 +156,14 @@ func PrepareApply(
 	if err != nil {
 		return PreparedApply{}, fmt.Errorf("resolve run tip: %w", err)
 	}
-	if err := gitRun(
+	if err := requireAncestor(
 		ctx,
 		workspace,
-		nil,
-		nil,
-		"merge-base", "--is-ancestor", snapshot.SourceHead, tip,
+		snapshot.SourceHead,
+		tip,
+		"run history is not based on captured source HEAD",
 	); err != nil {
-		return PreparedApply{}, fmt.Errorf("run history is not based on captured source HEAD")
+		return PreparedApply{}, err
 	}
 
 	bundleRef := applyBundleRef(snapshot, choice)
@@ -188,15 +188,13 @@ func PrepareApply(
 		Untracked:   untracked,
 		Submodules:  submodules,
 	}
-	if tip == snapshot.SourceHead {
-		return prepared, nil
-	}
-	hash, err := createIncrementalBundle(
+	hash, err := captureIncremental(
 		ctx,
 		workspace,
 		filepath.Join(packageDir, applyBundleName),
 		bundleRef,
 		snapshot.SourceHead,
+		tip,
 	)
 	if err != nil {
 		return PreparedApply{}, err
@@ -214,7 +212,7 @@ func prepareApplySubmodules(
 	prepared := make([]PreparedApplySubmodule, 0, len(snapshot.Submodules))
 	untracked := []string{}
 	for index, submodule := range snapshot.Submodules {
-		if err := safeSubmodulePath(submodule.Path); err != nil {
+		if err := safePath("submodule", submodule.Path); err != nil {
 			return nil, nil, err
 		}
 		target := filepath.Join(workspace, filepath.FromSlash(submodule.Path))
@@ -229,54 +227,55 @@ func prepareApplySubmodules(
 		if err != nil {
 			return nil, nil, fmt.Errorf("resolve submodule %q tip: %w", submodule.Path, err)
 		}
-		base := submodule.BaselineCommit
-		if base == "" {
-			base = submodule.Head
-		}
-		if err := gitRun(
+		if err := requireAncestor(
 			ctx,
 			target,
-			nil,
-			nil,
-			"merge-base", "--is-ancestor", base, tip,
+			submodule.Base(),
+			tip,
+			"history is not based on its staged commit",
 		); err != nil {
-			return nil, nil, fmt.Errorf(
-				"submodule %q history is not based on its staged commit",
-				submodule.Path,
-			)
+			return nil, nil, fmt.Errorf("submodule %q: %w", submodule.Path, err)
 		}
-		entry := PreparedApplySubmodule{
-			Path:        submodule.Path,
-			Tip:         tip,
-			FinalCommit: finalCommit,
+		hash, err := captureIncremental(
+			ctx,
+			target,
+			filepath.Join(packageDir, applySubmoduleBundleName(index)),
+			"HEAD",
+			submodule.Head,
+			tip,
+		)
+		if err != nil {
+			return nil, nil, fmt.Errorf("submodule %q: %w", submodule.Path, err)
 		}
-		if tip != submodule.Head {
-			hash, err := createIncrementalBundle(
-				ctx,
-				target,
-				filepath.Join(packageDir, applySubmoduleBundleName(index)),
-				"HEAD",
-				submodule.Head,
-			)
-			if err != nil {
-				return nil, nil, fmt.Errorf("submodule %q: %w", submodule.Path, err)
-			}
-			entry.BundleSHA256 = hash
-		}
-		prepared = append(prepared, entry)
+		prepared = append(prepared, PreparedApplySubmodule{
+			Path:         submodule.Path,
+			Tip:          tip,
+			FinalCommit:  finalCommit,
+			BundleSHA256: hash,
+		})
 	}
 	return prepared, untracked, nil
+}
+
+// captureIncremental bundles the history one repository gained since the commit
+// it was given, and reports no bundle when it gained none. That is the one case
+// an apply carries no objects, so it is decided here rather than at each caller.
+func captureIncremental(
+	ctx context.Context,
+	repository, bundlePath, ref, base, tip string,
+) (string, error) {
+	if tip == base {
+		return "", nil
+	}
+	return createIncrementalBundle(ctx, repository, bundlePath, ref, base)
 }
 
 func createIncrementalBundle(
 	ctx context.Context,
 	repository, bundlePath, ref, base string,
 ) (string, error) {
-	if _, err := os.Stat(bundlePath); !errors.Is(err, os.ErrNotExist) {
-		if err == nil {
-			return "", fmt.Errorf("apply bundle already exists: %s", bundlePath)
-		}
-		return "", fmt.Errorf("inspect apply bundle path: %w", err)
+	if err := requireAbsent(bundlePath, "apply bundle"); err != nil {
+		return "", err
 	}
 	if err := gitRun(
 		ctx,
@@ -353,7 +352,7 @@ func ImportApply(
 		if submodule.Path != staged.Path {
 			return PlannedApply{}, fmt.Errorf("apply package does not match the staged submodules")
 		}
-		if err := safeSubmodulePath(submodule.Path); err != nil {
+		if err := safePath("submodule", submodule.Path); err != nil {
 			return PlannedApply{}, err
 		}
 		repository := filepath.Join(sourceRoot, filepath.FromSlash(submodule.Path))
@@ -462,8 +461,10 @@ func importBundle(
 }
 
 func requireAbsentRef(ctx context.Context, repository, ref string) error {
-	existing, err := gitOutput(ctx, repository, "rev-parse", "--verify", "--quiet", ref)
-	if err == nil || existing != "" {
+	// --quiet makes a missing ref exit 1 rather than print nothing and succeed,
+	// so success here means the ref is there.
+	_, err := gitOutput(ctx, repository, "rev-parse", "--verify", "--quiet", ref)
+	if err == nil {
 		return ErrBranchExists
 	}
 	if !isExitCode(err, 1) {

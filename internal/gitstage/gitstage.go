@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -87,6 +88,64 @@ type ExcludedInputs struct {
 	Ignored   []string
 }
 
+// Base is the commit a run's work starts from: the baseline commit carrying the
+// uncommitted work it was given, and otherwise the source HEAD it was staged at.
+func (snapshot Snapshot) Base() string {
+	if snapshot.BaselineCommit != "" {
+		return snapshot.BaselineCommit
+	}
+	return snapshot.SourceHead
+}
+
+// requireAbsent refuses to write where something already is. A path that cannot
+// be inspected is refused too: pisafe creates these only when it knows there is
+// nothing there to lose.
+func requireAbsent(path, noun string) error {
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		if err == nil {
+			return fmt.Errorf("%s already exists: %s", noun, path)
+		}
+		return fmt.Errorf("inspect %s: %w", noun, err)
+	}
+	return nil
+}
+
+// safePath bounds a slash-separated path chosen outside the Mac that pisafe
+// then writes to inside a workspace: it has to stay under the workspace and out
+// of any Git directory. Both spellings of "clean" must agree, so a name that is
+// one path to Git and another to the filesystem is refused rather than resolved.
+func safePath(subject, name string) error {
+	if name == "" || name == ".." || strings.HasPrefix(name, "../") ||
+		path.Clean(name) != name || path.IsAbs(name) ||
+		filepath.ToSlash(filepath.Clean(filepath.FromSlash(name))) != name ||
+		filepath.IsAbs(filepath.FromSlash(name)) {
+		return fmt.Errorf("unsafe %s path %q", subject, name)
+	}
+	for _, segment := range strings.Split(name, "/") {
+		if segment == ".git" {
+			return fmt.Errorf("unsafe %s path %q: names a Git directory", subject, name)
+		}
+	}
+	return nil
+}
+
+// cloneStaged restores one bundled repository and holds it to the commit the
+// snapshot says it was captured at, so a bundle that is not the one prepared
+// never becomes a workspace.
+func cloneStaged(ctx context.Context, bundlePath, target, head string) error {
+	if err := gitRun(ctx, "", nil, nil, "clone", "--quiet", bundlePath, target); err != nil {
+		return fmt.Errorf("clone staged repository: %w", err)
+	}
+	cloned, err := gitOutput(ctx, target, "rev-parse", "--verify", "HEAD")
+	if err != nil {
+		return fmt.Errorf("resolve staged HEAD: %w", err)
+	}
+	if cloned != head {
+		return fmt.Errorf("staged HEAD mismatch: wanted %s, got %s", head, cloned)
+	}
+	return nil
+}
+
 func RepositoryRoot(ctx context.Context, sourcePath string) (string, error) {
 	root, err := gitOutput(ctx, sourcePath, "rev-parse", "--show-toplevel")
 	if err != nil {
@@ -161,11 +220,8 @@ func Prepare(ctx context.Context, request PrepareRequest) (prepared PreparedStag
 	if err := runid.Validate(runID); err != nil {
 		return PreparedStage{}, err
 	}
-	if _, err := os.Stat(packageDir); !errors.Is(err, os.ErrNotExist) {
-		if err == nil {
-			return PreparedStage{}, fmt.Errorf("stage package already exists: %s", packageDir)
-		}
-		return PreparedStage{}, fmt.Errorf("inspect stage package: %w", err)
+	if err := requireAbsent(packageDir, "stage package"); err != nil {
+		return PreparedStage{}, err
 	}
 
 	root, err := RepositoryRoot(ctx, request.SourcePath)
@@ -291,17 +347,11 @@ func Materialize(ctx context.Context, prepared PreparedStage, workspace string) 
 	if prepared.Snapshot.WorkRef != "refs/heads/work/"+prepared.Snapshot.RunID {
 		return Snapshot{}, fmt.Errorf("work ref does not match run ID")
 	}
-	if _, err := os.Stat(workspace); !errors.Is(err, os.ErrNotExist) {
-		if err == nil {
-			return Snapshot{}, fmt.Errorf("workspace already exists: %s", workspace)
-		}
-		return Snapshot{}, fmt.Errorf("inspect workspace: %w", err)
+	if err := requireAbsent(workspace, "workspace"); err != nil {
+		return Snapshot{}, err
 	}
 	if err := os.MkdirAll(filepath.Dir(workspace), 0o700); err != nil {
 		return Snapshot{}, fmt.Errorf("create workspace parent: %w", err)
-	}
-	if err := gitRun(ctx, "", nil, nil, "clone", "--quiet", prepared.BundlePath, workspace); err != nil {
-		return Snapshot{}, fmt.Errorf("clone staged repository: %w", err)
 	}
 
 	cleanup := true
@@ -311,16 +361,13 @@ func Materialize(ctx context.Context, prepared PreparedStage, workspace string) 
 		}
 	}()
 
-	clonedHead, err := gitOutput(ctx, workspace, "rev-parse", "--verify", "HEAD")
-	if err != nil {
-		return Snapshot{}, fmt.Errorf("resolve staged HEAD: %w", err)
-	}
-	if clonedHead != prepared.Snapshot.SourceHead {
-		return Snapshot{}, fmt.Errorf(
-			"staged HEAD mismatch: wanted %s, got %s",
-			prepared.Snapshot.SourceHead,
-			clonedHead,
-		)
+	if err := cloneStaged(
+		ctx,
+		prepared.BundlePath,
+		workspace,
+		prepared.Snapshot.SourceHead,
+	); err != nil {
+		return Snapshot{}, err
 	}
 	if err := gitRun(
 		ctx,
@@ -382,7 +429,7 @@ func indexDiffersFromHead(ctx context.Context, workspace string) (bool, error) {
 	case isExitCode(err, 1):
 		return true, nil
 	default:
-		return false, fmt.Errorf("inspect staged baseline: %w", err)
+		return false, fmt.Errorf("inspect staged changes: %w", err)
 	}
 }
 
@@ -422,12 +469,12 @@ func FinalizeTracked(ctx context.Context, workspace string) (commitID string, un
 	}
 	untracked = splitNUL(untrackedOutput)
 
-	quietErr := gitRun(ctx, workspace, nil, nil, "diff", "--cached", "--quiet", "--")
-	switch {
-	case quietErr == nil:
+	staged, err := indexDiffersFromHead(ctx, workspace)
+	if err != nil {
+		return "", nil, err
+	}
+	if !staged {
 		return "", untracked, nil
-	case !isExitCode(quietErr, 1):
-		return "", nil, fmt.Errorf("inspect final tracked changes: %w", quietErr)
 	}
 
 	if err := commit(ctx, workspace, finalMessage); err != nil {

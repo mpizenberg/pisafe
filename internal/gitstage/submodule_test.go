@@ -186,17 +186,21 @@ func TestMaterializeRejectsMismatchedSubmoduleArtifacts(t *testing.T) {
 	}
 }
 
-func TestSafeSubmodulePathRejectsEscapes(t *testing.T) {
-	for _, path := range []string{
+// One predicate bounds every path something outside the Mac names and pisafe
+// then writes to: a submodule the snapshot places, and a file an input archive
+// carries.
+func TestSafePathRejectsEscapes(t *testing.T) {
+	for _, name := range []string{
 		"", "/absolute", "../outside", "..", "a/../b", "./a", "a/.git/hooks", ".git",
+		"a//b", "trailing/",
 	} {
-		if err := safeSubmodulePath(path); err == nil {
-			t.Errorf("%q was accepted", path)
+		if err := safePath("submodule", name); err == nil {
+			t.Errorf("%q was accepted", name)
 		}
 	}
-	for _, path := range []string{"dependency", "vendor/library"} {
-		if err := safeSubmodulePath(path); err != nil {
-			t.Errorf("%q was rejected: %v", path, err)
+	for _, name := range []string{"dependency", "vendor/library"} {
+		if err := safePath("submodule", name); err != nil {
+			t.Errorf("%q was rejected: %v", name, err)
 		}
 	}
 }
