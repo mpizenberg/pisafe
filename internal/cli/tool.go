@@ -83,9 +83,6 @@ func installTool(
 	if err != nil {
 		return err
 	}
-	if err := transport.EnsureGlobalStorage(ctx); err != nil {
-		return err
-	}
 	installed, err := transport.ReadProfileTools(ctx)
 	if err != nil {
 		return err

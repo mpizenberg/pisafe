@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/mpizenberg/pisafe/internal/broker"
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/hostnet"
 	"github.com/mpizenberg/pisafe/internal/lima"
@@ -31,37 +32,29 @@ func runStop(ctx context.Context, runID string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(
-		out,
-		"Stopped %s; %s of active time remains.\n",
-		runID,
-		time.Duration(runstate.RemainingSeconds(manifest, time.Now()))*time.Second,
-	)
+	fmt.Fprintf(out, "Stopped %s; %s of active time remains.\n", runID, remainingTime(manifest))
 	// Stopping clears the record's error, so anything left on it happened while
 	// publishing the run's caches, which is not a reason to fail a stop.
 	if manifest.LastError != "" {
 		fmt.Fprintf(out, "Warning: %s\n", manifest.LastError)
 	}
 	transport := lima.NewTransport()
-	notifySelfInstalled(ctx, transport, runID, out)
+	// What the run installed into its own package store is reported because
+	// nothing else will: a run's home is reclaimed with the run. It is an offer
+	// in the same sense an update is — pisafe names the command and applies
+	// nothing, because installing into the profile is a decision about every
+	// later run of every project.
+	printSelfInstalled(out, runID, transport.ReadSelfInstalled(ctx, runID))
 	// The stopped run's own image is enough to ask npm a question, which keeps
 	// the check off the path that installs and verifies the current one.
 	notifyExtensionUpdates(ctx, transport, manifest.Image, out)
 	return nil
 }
 
-// notifySelfInstalled reports what the run installed into its own package
-// store, which nothing else will: a run's home is reclaimed with the run. It
-// is an offer in the same sense an update is — pisafe names the command and
-// applies nothing, because installing into the profile is a decision about
-// every later run of every project.
-func notifySelfInstalled(
-	ctx context.Context,
-	transport lima.Transport,
-	runID string,
-	out io.Writer,
-) {
-	printSelfInstalled(out, runID, transport.ReadSelfInstalled(ctx, runID))
+// remainingTime is how much of a run's active wall-clock budget is left, as a
+// duration a user reads rather than the seconds a record holds.
+func remainingTime(manifest runstate.Manifest) time.Duration {
+	return time.Duration(runstate.RemainingSeconds(manifest, time.Now())) * time.Second
 }
 
 // printSelfInstalled names what a run installed and what would keep it. Every
@@ -92,7 +85,7 @@ func runResume(ctx context.Context, runID string, out io.Writer) error {
 		out,
 		"Resumed %s for up to %s.\nSSH: ssh -F %s %s\n",
 		runID,
-		time.Duration(runstate.RemainingSeconds(manifest, time.Now()))*time.Second,
+		remainingTime(manifest),
 		shellQuote(manifest.SSH.ConfigFile),
 		manifest.SSH.Alias,
 	)
@@ -221,7 +214,7 @@ func runDiscard(ctx context.Context, runID string, out io.Writer) error {
 // ends or removes what a run already holds. Such a command is not held to the
 // VM's boundary records, for the reasons on lima.Manager.StartUnverified.
 func prepareUnverified(ctx context.Context) (runctl.Controller, error) {
-	controller, err := newController(ctx)
+	controller, _, err := newController(ctx)
 	if err != nil {
 		return runctl.Controller{}, err
 	}
@@ -263,7 +256,7 @@ func ensureManagedRunImage(ctx context.Context) (string, error) {
 }
 
 func prepareLifecycle(ctx context.Context) (runctl.Controller, error) {
-	controller, err := newController(ctx)
+	controller, _, err := newController(ctx)
 	if err != nil {
 		return runctl.Controller{}, err
 	}
@@ -273,27 +266,42 @@ func prepareLifecycle(ctx context.Context) (runctl.Controller, error) {
 	return controller, nil
 }
 
-// newController builds what every command drives the VM through. It reaches
+// supportedHost reports whether this Mac is one pisafe can hold a run on. The
+// VM, its image, and the container runtime inside it are all ARM64 macOS, so
+// there is nothing here to fall back to.
+func supportedHost() bool {
+	return runtime.GOOS == "darwin" && runtime.GOARCH == "arm64"
+}
+
+func requireSupportedHost(command string) error {
+	if !supportedHost() {
+		return fmt.Errorf("pisafe %s requires macOS on ARM64", command)
+	}
+	return nil
+}
+
+// newController builds what every command drives the VM through, and hands back
+// the catalog it was built from so nothing asks the Keychain twice. It reaches
 // nothing itself, so the boundary a command is held to stays its caller's
 // decision.
-func newController(ctx context.Context) (runctl.Controller, error) {
-	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
-		return runctl.Controller{}, fmt.Errorf("pisafe lifecycle commands require macOS on ARM64")
+func newController(ctx context.Context) (runctl.Controller, broker.Catalog, error) {
+	if err := requireSupportedHost("lifecycle commands"); err != nil {
+		return runctl.Controller{}, nil, err
 	}
 	catalog, err := providers.Load(ctx)
 	if err != nil {
-		return runctl.Controller{}, err
+		return runctl.Controller{}, nil, err
 	}
 	root, err := runstate.DefaultRoot()
 	if err != nil {
-		return runctl.Controller{}, err
+		return runctl.Controller{}, nil, err
 	}
 	return runctl.New(
 		lima.NewTransport(),
 		runstate.NewStore(root),
 		runssh.NewStore(filepath.Join(root, "ssh")),
 		inferenceConfig(catalog),
-	), nil
+	), catalog, nil
 }
 
 // startBoundary brings the VM up for a command that may start a run, and holds

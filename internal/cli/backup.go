@@ -11,7 +11,6 @@ import (
 	"github.com/mpizenberg/pisafe/internal/lima"
 	"github.com/mpizenberg/pisafe/internal/runctl"
 	"github.com/mpizenberg/pisafe/internal/runid"
-	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
 var (
@@ -62,11 +61,11 @@ func writeBackup(
 	directory string,
 	out io.Writer,
 ) error {
-	root, err := runstate.DefaultRoot()
+	store, err := runStore()
 	if err != nil {
 		return err
 	}
-	recorded, err := runstate.NewStore(root).ListProjects()
+	recorded, err := store.ListProjects()
 	if err != nil {
 		return err
 	}
@@ -213,9 +212,6 @@ func restoreProfile(
 	}
 	imageID, err := ensureRunImage(ctx, transport)
 	if err != nil {
-		return err
-	}
-	if err := transport.EnsureGlobalStorage(ctx); err != nil {
 		return err
 	}
 	var failures []error

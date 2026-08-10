@@ -99,9 +99,6 @@ func installExtension(
 	if err != nil {
 		return err
 	}
-	if err := transport.EnsureGlobalStorage(ctx); err != nil {
-		return err
-	}
 	record, err := transport.ReadProfileRecord(ctx)
 	if err != nil {
 		return err
@@ -110,10 +107,7 @@ func installExtension(
 	if err != nil {
 		return err
 	}
-	if err := transport.InstallExtension(ctx, imageID, extension); err != nil {
-		return err
-	}
-	if err := transport.WriteProfileRecord(ctx, record.With(extension)); err != nil {
+	if _, err := pinExtension(ctx, transport, imageID, record, extension); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "Installed %s@%s\n  %s\n", extension.Name, extension.Version, extension.Integrity)
@@ -141,9 +135,6 @@ func updateExtensions(
 	}
 	imageID, err := ensureRunImage(ctx, transport)
 	if err != nil {
-		return err
-	}
-	if err := transport.EnsureGlobalStorage(ctx); err != nil {
 		return err
 	}
 	record, err := transport.ReadProfileRecord(ctx)
@@ -222,11 +213,8 @@ func applyExtensionUpdate(
 		fmt.Fprintf(out, "%s is already at %s, which is what npm resolves it to.\n", name, installed.Version)
 		return record, nil
 	}
-	if err := transport.InstallExtension(ctx, imageID, resolved); err != nil {
-		return record, err
-	}
-	updated := record.With(resolved)
-	if err := transport.WriteProfileRecord(ctx, updated); err != nil {
+	updated, err := pinExtension(ctx, transport, imageID, record, resolved)
+	if err != nil {
 		return record, err
 	}
 	fmt.Fprintf(out, "Updated %s from %s to %s\n  %s\n", name, installed.Version, resolved.Version, resolved.Integrity)
@@ -234,6 +222,27 @@ func applyExtensionUpdate(
 		out,
 		"Live runs mount the profile itself, so a Pi started in one from now loads the new release.",
 	)
+	return updated, nil
+}
+
+// pinExtension puts one package in the profile and records the pin, in that
+// order: what the record names is always something already there, and what is
+// there but unrecorded is loaded by no run. Every route into the profile ends
+// here, so what is recorded is what the fetched bytes were checked against.
+func pinExtension(
+	ctx context.Context,
+	transport lima.Transport,
+	imageID string,
+	record profile.Record,
+	pin profile.Pin,
+) (profile.Record, error) {
+	if err := transport.InstallExtension(ctx, imageID, pin); err != nil {
+		return record, err
+	}
+	updated := record.With(pin)
+	if err := transport.WriteProfileRecord(ctx, updated); err != nil {
+		return record, err
+	}
 	return updated, nil
 }
 
@@ -362,6 +371,11 @@ func ensureRunImage(ctx context.Context, transport lima.Transport) (string, erro
 	image, err := runimage.NewInstaller(transport).Ensure(ctx, artifacts)
 	if err != nil {
 		return "", fmt.Errorf("install managed run image: %w", err)
+	}
+	// The profile filesystem is what every one of these commands then writes to,
+	// and it can only be laid out once the VM this just brought up is there.
+	if err := transport.EnsureGlobalStorage(ctx); err != nil {
+		return "", err
 	}
 	return image, nil
 }

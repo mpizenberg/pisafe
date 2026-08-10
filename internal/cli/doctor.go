@@ -47,7 +47,7 @@ func runDoctor(ctx context.Context, out io.Writer) error {
 		fmt.Fprintf(out, "OK       %-7s %s\n", prerequisite.name, path)
 	}
 
-	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+	if !supportedHost() {
 		missingRequired = true
 		fmt.Fprintln(out, "MISSING  platform (Phase 1 requires macOS on ARM64)")
 	}

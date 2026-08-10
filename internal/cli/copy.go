@@ -172,7 +172,6 @@ func runCopy(ctx context.Context, args []string, out io.Writer) error {
 // inside it, so they are quoted rather than written to the terminal as they
 // stand, and going in they are quoted for the symmetry of reading one report.
 func printCopyResult(out io.Writer, request copyRequest, entries []runcopy.Entry) {
-	const maximumNames = 12
 	files, total := 0, int64(0)
 	for _, entry := range entries {
 		if entry.Directory {
@@ -192,7 +191,7 @@ func printCopyResult(out io.Writer, request copyRequest, entries []runcopy.Entry
 			continue
 		}
 		if printed == maximumNames {
-			fmt.Fprintf(out, "           ... and %d more\n", files-printed)
+			printMoreNames(out, files-printed)
 			break
 		}
 		fmt.Fprintf(out, "           %9s %q\n", humanBytes(entry.Size), entry.Path)

@@ -26,6 +26,21 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 		return nil
 	}
 
+	// Commands taking an optional run name and nothing else, which is the whole
+	// of what runIDArgument reads.
+	if command, named := map[string]func(context.Context, string, io.Writer) error{
+		"zed":    runZed,
+		"stop":   runStop,
+		"resume": runResume,
+		"diff":   runDiff,
+	}[args[0]]; named {
+		runID, err := runIDArgument(ctx, args[1:])
+		if err != nil {
+			return err
+		}
+		return command(ctx, runID, out)
+	}
+
 	switch args[0] {
 	case "run":
 		return runCreate(ctx, args[1:], out)
@@ -55,44 +70,16 @@ func Run(ctx context.Context, args []string, in io.Reader, out io.Writer) error 
 			return errUsage
 		}
 		return runList(ctx, out)
-	case "zed":
-		runID, err := runIDArgument(ctx, args[1:])
-		if err != nil {
-			return err
-		}
-		return runZed(ctx, runID, out)
-	case "stop":
-		runID, err := runIDArgument(ctx, args[1:])
-		if err != nil {
-			return err
-		}
-		return runStop(ctx, runID, out)
-	case "resume":
-		runID, err := runIDArgument(ctx, args[1:])
-		if err != nil {
-			return err
-		}
-		return runResume(ctx, runID, out)
-	case "diff":
-		runID, err := runIDArgument(ctx, args[1:])
-		if err != nil {
-			return err
-		}
-		return runDiff(ctx, runID, out)
 	case "cp":
 		return runCopy(ctx, args[1:], out)
 	case "apply":
 		return runApply(ctx, args[1:], in, out)
 	case "discard":
-		if len(args) != 4 || args[2] != "--confirm" {
-			return fmt.Errorf(
-				"discard requires exact confirmation: pisafe discard RUN --confirm RUN",
-			)
+		runID, err := confirmedTarget(args, "discard RUN --confirm RUN", "run ")
+		if err != nil {
+			return err
 		}
-		if args[3] != args[1] {
-			return fmt.Errorf("discard confirmation does not exactly match run %q", args[1])
-		}
-		return runDiscard(ctx, args[1], out)
+		return runDiscard(ctx, runID, out)
 	case "project":
 		return runProject(ctx, args[1:], out)
 	case "profile":
@@ -456,6 +443,26 @@ func chooseProjectRun(runs []runstate.Manifest, project runid.Project) (string, 
 	}
 }
 
+// confirmedTarget reads a command that has to name what it destroys twice. The
+// second naming is typed rather than defaulted, because nothing these take away
+// comes back and a command line one word short of what was meant must do
+// nothing at all. usage is how the command is spelled in full, and noun what it
+// calls the thing it takes.
+func confirmedTarget(args []string, usage, noun string) (string, error) {
+	if len(args) != 4 || args[2] != "--confirm" {
+		return "", fmt.Errorf("%s requires exact confirmation: pisafe %s", args[0], usage)
+	}
+	if args[3] != args[1] {
+		return "", fmt.Errorf(
+			"%s confirmation does not exactly match %s%q",
+			args[0],
+			noun,
+			args[1],
+		)
+	}
+	return args[1], nil
+}
+
 // runIDArgument reads the optional run name of a command that takes nothing
 // else.
 func runIDArgument(ctx context.Context, args []string) (string, error) {
@@ -528,7 +535,7 @@ func restoreRun(
 		out,
 		"Resumed %s with its workspace as it was and %s of active time.\n",
 		runID,
-		time.Duration(runstate.RemainingSeconds(manifest, time.Now()))*time.Second,
+		remainingTime(manifest),
 	)
 	return manifest, nil
 }

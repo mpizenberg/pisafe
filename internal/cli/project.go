@@ -37,15 +37,11 @@ func runProject(ctx context.Context, args []string, out io.Writer) error {
 		}
 		return resetProject(ctx, args[1], out)
 	case "drop":
-		if len(args) != 4 || args[2] != "--confirm" {
-			return errors.New(
-				"drop requires exact confirmation: pisafe project drop PATH --confirm PATH",
-			)
+		path, err := confirmedTarget(args, "project drop PATH --confirm PATH", "")
+		if err != nil {
+			return err
 		}
-		if args[3] != args[1] {
-			return fmt.Errorf("drop confirmation does not exactly match %q", args[1])
-		}
-		return dropProject(ctx, args[1], out)
+		return dropProject(ctx, path, out)
 	case "rebind":
 		if len(args) != 2 {
 			return errProjectUsage
@@ -61,11 +57,10 @@ func runProject(ctx context.Context, args []string, out io.Writer) error {
 // answer this question even if it were asked, and a user wanting to know what
 // pisafe is holding should not have to boot a virtual machine to find out.
 func listProjects(out io.Writer) error {
-	root, err := runstate.DefaultRoot()
+	store, err := runStore()
 	if err != nil {
 		return err
 	}
-	store := runstate.NewStore(root)
 	projects, err := store.ListProjects()
 	if err != nil {
 		return err

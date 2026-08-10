@@ -6,19 +6,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/mpizenberg/pisafe/internal/broker"
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/hostnet"
 	"github.com/mpizenberg/pisafe/internal/lima"
-	"github.com/mpizenberg/pisafe/internal/providers"
 	"github.com/mpizenberg/pisafe/internal/runctl"
 	"github.com/mpizenberg/pisafe/internal/runimage"
-	"github.com/mpizenberg/pisafe/internal/runssh"
 	"github.com/mpizenberg/pisafe/internal/runstart"
-	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
 const guestHelperEnvironment = "PISAFE_GUEST_HELPER"
@@ -50,8 +46,8 @@ func parseInputSelection(args []string) (gitstage.InputSelection, error) {
 }
 
 func runCreate(ctx context.Context, args []string, out io.Writer) error {
-	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
-		return fmt.Errorf("pisafe run requires macOS on ARM64")
+	if err := requireSupportedHost("run"); err != nil {
+		return err
 	}
 	inputs, err := parseInputSelection(args)
 	if err != nil {
@@ -61,7 +57,7 @@ func runCreate(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	catalog, err := providers.Load(ctx)
+	controller, catalog, err := newController(ctx)
 	if err != nil {
 		return err
 	}
@@ -69,20 +65,9 @@ func runCreate(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("discover host networks: %w", err)
 	}
-	stateRoot, err := runstate.DefaultRoot()
-	if err != nil {
-		return err
-	}
-	transport := lima.NewTransport()
-	controller := runctl.New(
-		transport,
-		runstate.NewStore(stateRoot),
-		runssh.NewStore(filepath.Join(stateRoot, "ssh")),
-		inferenceConfig(catalog),
-	)
 	service := runstart.New(
 		lima.NewManager(),
-		runimage.NewInstaller(transport),
+		runimage.NewInstaller(lima.NewTransport()),
 		controller,
 		artifacts,
 	)
@@ -188,10 +173,19 @@ type namedList struct {
 	names []string
 }
 
-// printNames lists file names under a run summary line, keeping the output
-// short enough to read whatever the repository holds.
+// maximumNames bounds a file list printed under a summary line, so the output
+// stays readable whatever the repository or the copy held. What was left out is
+// counted in its place.
+const maximumNames = 12
+
+// printMoreNames closes a list that was cut short, in the column it was
+// printed in.
+func printMoreNames(out io.Writer, remaining int) {
+	fmt.Fprintf(out, "           ... and %d more\n", remaining)
+}
+
+// printNames lists file names under a run summary line.
 func printNames(out io.Writer, lists ...namedList) {
-	const maximumNames = 12
 	total := 0
 	for _, list := range lists {
 		total += len(list.names)
@@ -204,7 +198,7 @@ func printNames(out io.Writer, lists ...namedList) {
 		}
 		for _, name := range list.names {
 			if printed == maximumNames {
-				fmt.Fprintf(out, "           ... and %d more\n", total-printed)
+				printMoreNames(out, total-printed)
 				return
 			}
 			fmt.Fprintf(out, "%s%q\n", prefix, name)

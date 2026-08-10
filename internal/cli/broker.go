@@ -7,22 +7,19 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"runtime"
 	"strings"
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/broker"
-	"github.com/mpizenberg/pisafe/internal/hostnet"
 	"github.com/mpizenberg/pisafe/internal/lima"
 	"github.com/mpizenberg/pisafe/internal/providers"
-	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
 // runBroker serves brokered inference to active runs until interrupted. The
 // VM-side listener exists only while this process holds the reverse forward.
 func runBroker(ctx context.Context, out io.Writer) error {
-	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
-		return fmt.Errorf("pisafe broker requires macOS on ARM64")
+	if err := requireSupportedHost("broker"); err != nil {
+		return err
 	}
 	catalog, err := providers.Load(ctx)
 	if err != nil {
@@ -38,15 +35,7 @@ func runBroker(ctx context.Context, out io.Writer) error {
 			unusable = append(unusable, fmt.Sprintf("  %s: %v", provider.Name, err))
 		}
 	}
-	prefixes, err := hostnet.OnLinkIPv4(ctx)
-	if err != nil {
-		return fmt.Errorf("discover host networks: %w", err)
-	}
-	prefixStrings := make([]string, 0, len(prefixes))
-	for _, prefix := range prefixes {
-		prefixStrings = append(prefixStrings, prefix.String())
-	}
-	if err := lima.NewManager().Start(ctx, prefixStrings); err != nil {
+	if err := startBoundary(ctx); err != nil {
 		return err
 	}
 	transport := lima.NewTransport()
@@ -54,7 +43,7 @@ func runBroker(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	stateRoot, err := runstate.DefaultRoot()
+	store, err := runStore()
 	if err != nil {
 		return err
 	}
@@ -67,7 +56,7 @@ func runBroker(ctx context.Context, out io.Writer) error {
 	localPort := listener.Addr().(*net.TCPAddr).Port
 
 	server := &http.Server{
-		Handler:           broker.NewServer(runstate.NewStore(stateRoot), catalog),
+		Handler:           broker.NewServer(store, catalog),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	serverFailed := make(chan error, 1)
