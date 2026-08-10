@@ -22,8 +22,8 @@ var modelCatalog []byte
 // models.json, and in the relay path that reaches it.
 const Name = "chatgpt"
 
-// Provider is the brokered ChatGPT subscription upstream.
-func Provider(source *Source) (*broker.Provider, error) {
+// provider is the brokered ChatGPT subscription upstream.
+func provider(source *Source) (*broker.Provider, error) {
 	var models []json.RawMessage
 	if err := json.Unmarshal(modelCatalog, &models); err != nil {
 		return nil, fmt.Errorf("parse embedded chatgpt model catalog: %w", err)
@@ -47,5 +47,5 @@ func LoadProvider(ctx context.Context) (*broker.Provider, error) {
 		}
 		return nil, err
 	}
-	return Provider(NewSource(keychain, DefaultEndpoints()))
+	return provider(NewSource(keychain, DefaultEndpoints()))
 }

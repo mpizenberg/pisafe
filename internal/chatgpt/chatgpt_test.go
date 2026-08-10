@@ -159,37 +159,26 @@ func TestLoginRejectsStateMismatch(t *testing.T) {
 	}
 }
 
-type fakeStore struct {
-	mu         sync.Mutex
-	credential Credential
-	loadErr    error
-	saves      int
-}
-
-func (store *fakeStore) Load(context.Context) (Credential, error) {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	if store.loadErr != nil {
-		return Credential{}, store.loadErr
+// storedLogin is what a login looks like once it is stored: the real Keychain,
+// over a fake of where secrets are kept rather than of what they mean.
+func storedLogin(t *testing.T, credential Credential) Keychain {
+	t.Helper()
+	store := Keychain{secrets: fakeSecrets{}}
+	if err := store.Save(context.Background(), credential); err != nil {
+		t.Fatal(err)
 	}
-	return store.credential, nil
-}
-
-func (store *fakeStore) Save(_ context.Context, credential Credential) error {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	store.credential = credential
-	store.saves++
-	return nil
+	return store
 }
 
 func TestSourceServesFreshCredentialWithoutRefresh(t *testing.T) {
-	store := &fakeStore{credential: Credential{
+	store := storedLogin(t, Credential{
 		Access:    "access-1",
 		Refresh:   "refresh-1",
 		Expires:   time.Now().Add(time.Hour),
 		AccountID: "acct-1",
-	}}
+	})
+	// An unreachable token endpoint: a refresh of a fresh credential fails the
+	// call rather than merely being counted.
 	source := NewSource(store, Endpoints{Token: "http://127.0.0.1:1/unreachable"})
 	headers, err := source.UpstreamAuth(context.Background())
 	if err != nil {
@@ -199,19 +188,16 @@ func TestSourceServesFreshCredentialWithoutRefresh(t *testing.T) {
 		headers.Get("chatgpt-account-id") != "acct-1" {
 		t.Fatalf("headers = %#v", headers)
 	}
-	if store.saves != 0 {
-		t.Fatalf("saves = %d", store.saves)
-	}
 }
 
 func TestSourceRefreshesExpiringCredentialAndPersists(t *testing.T) {
 	tokens, requests := tokenStub(t, "acct-2")
-	store := &fakeStore{credential: Credential{
+	store := storedLogin(t, Credential{
 		Access:    "stale-access",
 		Refresh:   "refresh-old",
 		Expires:   time.Now().Add(time.Minute),
 		AccountID: "acct-2",
-	}}
+	})
 	source := NewSource(store, Endpoints{Token: tokens.URL})
 	headers, err := source.UpstreamAuth(context.Background())
 	if err != nil {
@@ -220,8 +206,9 @@ func TestSourceRefreshesExpiringCredentialAndPersists(t *testing.T) {
 	if headers.Get("Authorization") != "Bearer "+testAccessToken("acct-2") {
 		t.Fatalf("headers = %#v", headers)
 	}
-	if store.saves != 1 || store.credential.Refresh != "refresh-next" {
-		t.Fatalf("store = %#v", store)
+	rotated, err := store.Load(context.Background())
+	if err != nil || rotated.Refresh != "refresh-next" {
+		t.Fatalf("stored credential = %#v, err = %v", rotated, err)
 	}
 	form := (*requests)[0]
 	if form.Get("grant_type") != "refresh_token" ||
@@ -238,8 +225,7 @@ func TestSourceRefreshesExpiringCredentialAndPersists(t *testing.T) {
 }
 
 func TestSourcePropagatesMissingLogin(t *testing.T) {
-	store := &fakeStore{loadErr: ErrNotLoggedIn}
-	source := NewSource(store, Endpoints{})
+	source := NewSource(Keychain{secrets: fakeSecrets{}}, Endpoints{})
 	if _, err := source.UpstreamAuth(context.Background()); !errors.Is(err, ErrNotLoggedIn) {
 		t.Fatalf("err = %v", err)
 	}
@@ -317,7 +303,7 @@ func TestAStoredLoginIsCompleteOrIsNotALogin(t *testing.T) {
 }
 
 func TestProviderUsesEmbeddedCatalogWithoutRoutingOverrides(t *testing.T) {
-	provider, err := Provider(nil)
+	provider, err := provider(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +334,7 @@ func TestProviderUsesEmbeddedCatalogWithoutRoutingOverrides(t *testing.T) {
 // catalog still offers it: a re-sync that dropped the id would hand the choice
 // back to Pi, whose own table does not know this provider by pisafe's name.
 func TestASubscriptionRunOpensOnAModelPisafeNames(t *testing.T) {
-	provider, err := Provider(nil)
+	provider, err := provider(nil)
 	if err != nil {
 		t.Fatal(err)
 	}

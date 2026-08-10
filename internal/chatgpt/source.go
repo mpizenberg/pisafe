@@ -12,18 +12,12 @@ import (
 // inference request never races the deadline.
 const refreshMargin = 5 * time.Minute
 
-// CredentialStore abstracts the Keychain for tests.
-type CredentialStore interface {
-	Load(ctx context.Context) (Credential, error)
-	Save(ctx context.Context, credential Credential) error
-}
-
 // Source hands the broker fresh upstream credentials. Refreshes are
 // serialized, and a rotated refresh token must be persisted before use
 // because the provider may invalidate its predecessor.
 type Source struct {
 	endpoints Endpoints
-	store     CredentialStore
+	store     Keychain
 	now       func() time.Time
 
 	mu         sync.Mutex
@@ -31,7 +25,7 @@ type Source struct {
 	loaded     bool
 }
 
-func NewSource(store CredentialStore, endpoints Endpoints) *Source {
+func NewSource(store Keychain, endpoints Endpoints) *Source {
 	return &Source{endpoints: endpoints, store: store, now: time.Now}
 }
 

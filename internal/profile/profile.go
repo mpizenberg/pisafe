@@ -98,25 +98,9 @@ func ParseRecord(content []byte) (Record, error) {
 	if len(bytes.TrimSpace(content)) == 0 {
 		return Record{Version: RecordVersion}, nil
 	}
-	if len(content) > maxRecordBytes {
-		return Record{}, errors.New("profile record exceeds size limit")
-	}
-	decoder := json.NewDecoder(bytes.NewReader(content))
-	decoder.DisallowUnknownFields()
-	var record Record
-	if err := decoder.Decode(&record); err != nil {
-		return Record{}, fmt.Errorf("decode profile record: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return Record{}, errors.New("profile record contains trailing data")
-	}
-	if record.Version != RecordVersion {
-		return Record{}, fmt.Errorf(
-			"profile record version %d is not %d; reinstall the profile's extensions",
-			record.Version,
-			RecordVersion,
-		)
+	record, err := parseStored(content, "record", "extensions", RecordVersion, recordVersion)
+	if err != nil {
+		return Record{}, err
 	}
 	seen := make(map[string]bool, len(record.Extensions))
 	for _, pin := range record.Extensions {
@@ -135,14 +119,8 @@ func ParseRecord(content []byte) (Record, error) {
 // reorders what it did not touch.
 func (record Record) Encode() ([]byte, error) {
 	record.Version = RecordVersion
-	slices.SortFunc(record.Extensions, func(left, right Pin) int {
-		return strings.Compare(left.Name, right.Name)
-	})
-	content, err := json.MarshalIndent(record, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("encode profile record: %w", err)
-	}
-	return append(content, '\n'), nil
+	sortByName(record.Extensions, pinName)
+	return encodeStored(record, "record")
 }
 
 // With adds or replaces one package.
@@ -165,7 +143,8 @@ func (record Record) Find(name string) (Pin, bool) {
 	return find(record.Extensions, name, pinName)
 }
 
-func pinName(pin Pin) string { return pin.Name }
+func pinName(pin Pin) string          { return pin.Name }
+func recordVersion(record Record) int { return record.Version }
 
 // A package name is what identifies an entry in either record, so adding,
 // removing, and looking one up are the same three operations over both.
@@ -207,6 +186,60 @@ func find[Entry any](entries []Entry, target string, name func(Entry) string) (E
 	}
 	var missing Entry
 	return missing, false
+}
+
+func sortByName[Entry any](entries []Entry, name func(Entry) string) {
+	slices.SortFunc(entries, func(left, right Entry) int {
+		return strings.Compare(name(left), name(right))
+	})
+}
+
+// parseStored reads one of the profile's own files: a bounded document decoded
+// whole and strictly, whose version must be the one this pisafe writes. A file
+// of another shape is refused rather than guessed at, because what these name is
+// installed in the profile every run mounts. The remedy is part of the refusal
+// because a user who cannot reinstall is only told their profile is unusable.
+func parseStored[Document any](
+	content []byte,
+	noun string,
+	reinstall string,
+	want int,
+	stored func(Document) int,
+) (Document, error) {
+	var empty Document
+	if len(content) > maxRecordBytes {
+		return empty, fmt.Errorf("profile %s exceeds size limit", noun)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.DisallowUnknownFields()
+	var document Document
+	if err := decoder.Decode(&document); err != nil {
+		return empty, fmt.Errorf("decode profile %s: %w", noun, err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return empty, fmt.Errorf("profile %s contains trailing data", noun)
+	}
+	if stored(document) != want {
+		return empty, fmt.Errorf(
+			"profile %s version %d is not %d; reinstall the profile's %s",
+			noun,
+			stored(document),
+			want,
+			reinstall,
+		)
+	}
+	return document, nil
+}
+
+// encodeStored renders one of those files. The trailing newline is what makes
+// them append cleanly and read as text.
+func encodeStored(document any, noun string) ([]byte, error) {
+	content, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encode profile %s: %w", noun, err)
+	}
+	return append(content, '\n'), nil
 }
 
 // Offer is what npm resolved one installed extension's name to when it was
@@ -259,14 +292,8 @@ func ParseOffers(content []byte) Offers {
 // Encode renders the offers for storage.
 func (offers Offers) Encode() ([]byte, error) {
 	offers.Version = OffersVersion
-	slices.SortFunc(offers.Latest, func(left, right Offer) int {
-		return strings.Compare(left.Name, right.Name)
-	})
-	content, err := json.MarshalIndent(offers, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("encode profile offers: %w", err)
-	}
-	return append(content, '\n'), nil
+	sortByName(offers.Latest, func(offer Offer) string { return offer.Name })
+	return encodeStored(offers, "offers")
 }
 
 // Stale reports whether a check is due. A check that never happened is stale,
@@ -304,9 +331,7 @@ func (record Record) Pending(offers Offers) []Update {
 			Available: version,
 		})
 	}
-	slices.SortFunc(updates, func(left, right Update) int {
-		return strings.Compare(left.Name, right.Name)
-	})
+	sortByName(updates, func(update Update) string { return update.Name })
 	return updates
 }
 
@@ -445,25 +470,9 @@ func ParseTools(content []byte) (Tools, error) {
 	if len(bytes.TrimSpace(content)) == 0 {
 		return Tools{Version: ToolsVersion}, nil
 	}
-	if len(content) > maxRecordBytes {
-		return Tools{}, errors.New("profile tool record exceeds size limit")
-	}
-	decoder := json.NewDecoder(bytes.NewReader(content))
-	decoder.DisallowUnknownFields()
-	var record Tools
-	if err := decoder.Decode(&record); err != nil {
-		return Tools{}, fmt.Errorf("decode profile tool record: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return Tools{}, errors.New("profile tool record contains trailing data")
-	}
-	if record.Version != ToolsVersion {
-		return Tools{}, fmt.Errorf(
-			"profile tool record version %d is not %d; reinstall the profile's tools",
-			record.Version,
-			ToolsVersion,
-		)
+	record, err := parseStored(content, "tool record", "tools", ToolsVersion, toolsVersion)
+	if err != nil {
+		return Tools{}, err
 	}
 	claimed := make(map[string]string, len(record.Tools))
 	for _, tool := range record.Tools {
@@ -492,14 +501,8 @@ func ParseTools(content []byte) (Tools, error) {
 // Encode renders the tool record for storage.
 func (record Tools) Encode() ([]byte, error) {
 	record.Version = ToolsVersion
-	slices.SortFunc(record.Tools, func(left, right Tool) int {
-		return strings.Compare(left.Name, right.Name)
-	})
-	content, err := json.MarshalIndent(record, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("encode profile tool record: %w", err)
-	}
-	return append(content, '\n'), nil
+	sortByName(record.Tools, toolName)
+	return encodeStored(record, "tool record")
 }
 
 // With adds or replaces one tool.
@@ -518,7 +521,8 @@ func (record Tools) Find(name string) (Tool, bool) {
 	return find(record.Tools, name, toolName)
 }
 
-func toolName(tool Tool) string { return tool.Name }
+func toolName(tool Tool) string     { return tool.Name }
+func toolsVersion(record Tools) int { return record.Version }
 
 // Conflict is one binary name two packages both claim. Which name a package
 // installs is the package's own choice rather than the user's, so a collision
@@ -542,9 +546,7 @@ func (record Tools) Conflicts(candidate Tool) []Conflict {
 			}
 		}
 	}
-	slices.SortFunc(conflicts, func(left, right Conflict) int {
-		return strings.Compare(left.Binary, right.Binary)
-	})
+	sortByName(conflicts, func(conflict Conflict) string { return conflict.Binary })
 	return conflicts
 }
 
@@ -565,9 +567,7 @@ func (record Tools) Links() []Link {
 			links = append(links, Link{Binary: binary, Directory: tool.Directory})
 		}
 	}
-	slices.SortFunc(links, func(left, right Link) int {
-		return strings.Compare(left.Binary, right.Binary)
-	})
+	sortByName(links, func(link Link) string { return link.Binary })
 	return links
 }
 
