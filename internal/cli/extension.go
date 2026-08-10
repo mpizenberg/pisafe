@@ -363,5 +363,5 @@ func ensureRunImage(ctx context.Context, transport lima.Transport) (string, erro
 	if err != nil {
 		return "", fmt.Errorf("install managed run image: %w", err)
 	}
-	return image.ImageID, nil
+	return image, nil
 }

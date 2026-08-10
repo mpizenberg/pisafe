@@ -68,7 +68,7 @@ func ensureLiveVM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	config, err := lima.RenderConfig(lima.DefaultConfigOptions(prefixes))
+	config, err := lima.RenderConfig(prefixes)
 	if err != nil {
 		t.Fatal(err)
 	}

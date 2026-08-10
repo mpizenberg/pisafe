@@ -17,34 +17,21 @@ const (
 	InstanceName = "pisafe"
 	// StateDiskName names both the Lima disk and the filesystem on it, because
 	// they are one thing: the storage that outlives the instance.
-	StateDiskName      = "pisafe-state"
-	StateDiskSize      = "64GiB"
-	BrokerAddress      = "192.0.2.1"
-	BrokerPort         = 18080
-	MinimumLimaVersion = "2.2.0"
+	StateDiskName = "pisafe-state"
+	StateDiskSize = "64GiB"
+	BrokerAddress = "192.0.2.1"
+	BrokerPort    = 18080
+
+	// How large the VM is bounds nothing a run may do — a run is bounded by its
+	// container's limits and by its own filesystem — so this sizing is outside
+	// the security profile and changing it never asks for a new instance.
+	vmCPUs      = 4
+	vmMemoryGiB = 8
+	vmDiskGiB   = 64
 )
 
-type ConfigOptions struct {
-	CPUs             int
-	MemoryGiB        int
-	DiskGiB          int
-	HostIPv4Prefixes []netip.Prefix
-}
-
-func DefaultConfigOptions(prefixes []netip.Prefix) ConfigOptions {
-	return ConfigOptions{
-		CPUs:             4,
-		MemoryGiB:        8,
-		DiskGiB:          64,
-		HostIPv4Prefixes: prefixes,
-	}
-}
-
-func RenderConfig(options ConfigOptions) ([]byte, error) {
-	if options.CPUs < 1 || options.MemoryGiB < 1 || options.DiskGiB < 1 {
-		return nil, errors.New("VM CPU, memory, and disk limits must be positive")
-	}
-	prefixes, err := canonicalIPv4Prefixes(options.HostIPv4Prefixes)
+func RenderConfig(hostIPv4Prefixes []netip.Prefix) ([]byte, error) {
+	prefixes, err := canonicalIPv4Prefixes(hostIPv4Prefixes)
 	if err != nil {
 		return nil, err
 	}
@@ -53,9 +40,9 @@ func RenderConfig(options ConfigOptions) ([]byte, error) {
 	globalNamespaces := strings.Join(runcontainer.GlobalNamespaces(), " ")
 
 	replacements := strings.NewReplacer(
-		"@@CPUS@@", fmt.Sprintf("%d", options.CPUs),
-		"@@MEMORY@@", fmt.Sprintf("%dGiB", options.MemoryGiB),
-		"@@DISK@@", fmt.Sprintf("%dGiB", options.DiskGiB),
+		"@@CPUS@@", strconv.Itoa(vmCPUs),
+		"@@MEMORY@@", strconv.Itoa(vmMemoryGiB)+"GiB",
+		"@@DISK@@", strconv.Itoa(vmDiskGiB)+"GiB",
 		"@@HOST_PREFIXES@@", strings.Join(prefixes, ", "),
 		"@@HOST_PREFIX_LINES@@", strings.Join(prefixes, "\n    "),
 		"@@SECURITY_PROFILE_DIGEST@@", securityProfile,

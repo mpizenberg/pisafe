@@ -42,12 +42,11 @@ type Snapshot struct {
 }
 
 type ApplyResult struct {
-	Branch       string             `json:"branch"`
-	Tip          string             `json:"tip"`
-	FinalCommit  string             `json:"final_commit,omitempty"`
-	Untracked    []string           `json:"untracked,omitempty"`
-	BundleSHA256 string             `json:"bundle_sha256,omitempty"`
-	Submodules   []AppliedSubmodule `json:"submodules,omitempty"`
+	Branch      string             `json:"branch"`
+	Tip         string             `json:"tip"`
+	FinalCommit string             `json:"final_commit,omitempty"`
+	Untracked   []string           `json:"untracked,omitempty"`
+	Submodules  []AppliedSubmodule `json:"submodules,omitempty"`
 }
 
 // AppliedSubmodule reports which commit the imported superproject branch

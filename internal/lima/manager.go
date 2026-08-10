@@ -94,7 +94,7 @@ func (manager Manager) Create(ctx context.Context, configPath string) error {
 // Ensure creates the dedicated VM when absent, then starts and verifies it
 // against the current host-network boundary.
 func (manager Manager) Ensure(ctx context.Context, prefixes []netip.Prefix) error {
-	config, err := RenderConfig(DefaultConfigOptions(prefixes))
+	config, err := RenderConfig(prefixes)
 	if err != nil {
 		return err
 	}

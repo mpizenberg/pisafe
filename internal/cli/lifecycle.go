@@ -259,7 +259,7 @@ func ensureManagedRunImage(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("install managed run image: %w", err)
 	}
-	return image.ImageID, nil
+	return image, nil
 }
 
 func prepareLifecycle(ctx context.Context) (runctl.Controller, error) {

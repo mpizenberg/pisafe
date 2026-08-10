@@ -61,6 +61,26 @@ func SafePath(request string) (string, error) {
 	return cleaned, nil
 }
 
+// ArrivalName holds what a copy may be filed under where it lands. It is one
+// path segment, so a name decides nothing about which directory the copy goes
+// into: that is the caller's, already resolved.
+func ArrivalName(name string) error {
+	if name == "" || name != path.Base(name) || name == "." || name == ".." {
+		return fmt.Errorf("%q is not a name a copy can arrive under", name)
+	}
+	return nil
+}
+
+// copiedMode is the whole of what a copy carries about permissions: whether
+// the file is executable. Both ends map that one bit the same way, so a file
+// arrives as runnable as the one that left and no more.
+func copiedMode(executable bool) fs.FileMode {
+	if executable {
+		return 0o700
+	}
+	return 0o600
+}
+
 // Archive writes one path of the run's workspace as a tar. Only regular files
 // and directories cross: a symlink, device, socket, or named pipe stops the
 // copy naming the path, because on the Mac they would resolve against a
@@ -115,14 +135,10 @@ func Archive(workspace, request string, out io.Writer) error {
 			if total > MaxTotalBytes {
 				return fmt.Errorf("%q exceeds the %d-byte copy limit", request, MaxTotalBytes)
 			}
-			mode := int64(0o600)
-			if info.Mode().Perm()&0o100 != 0 {
-				mode = 0o700
-			}
 			if err := writer.WriteHeader(&tar.Header{
 				Name:     archiveName,
 				Typeflag: tar.TypeReg,
-				Mode:     mode,
+				Mode:     int64(copiedMode(info.Mode().Perm()&0o100 != 0)),
 				Size:     info.Size(),
 			}); err != nil {
 				return err
@@ -301,10 +317,7 @@ func writeCopiedFile(root *os.Root, name string, archive io.Reader, header *tar.
 			return fmt.Errorf("create copied directory %q: %w", parent, err)
 		}
 	}
-	mode := fs.FileMode(0o600)
-	if header.Mode&0o100 != 0 {
-		mode = 0o700
-	}
+	mode := copiedMode(header.Mode&0o100 != 0)
 	file, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		return fmt.Errorf("create copied file %q: %w", name, err)

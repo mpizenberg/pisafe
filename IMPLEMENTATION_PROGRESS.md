@@ -167,7 +167,9 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
 - Dedicated instance `pisafe`, Lima ≥ 2.2.0, `plain: true` (no mounts, dynamic
   forwarding, containerd, guest agent, or agent forwarding), explicitly empty
   mounts, no forwarded X11/proxy/host-resolver/Podman socket, public DNS, IPv6
-  disabled. Default resources: 4 CPUs, 8 GiB, 64 GiB sparse disk.
+  disabled. Fixed resources: 4 CPUs, 8 GiB, 64 GiB sparse disk. How large the
+  VM is bounds nothing a run may do, so it is outside the security profile and
+  changing it never asks for a new instance.
 - A second 64 GiB sparse Lima disk, `pisafe-state`, carries `/var/lib/pisafe`.
   It belongs to Lima rather than to the instance, so deleting the instance —
   what every failed boundary check asks for — leaves every run's filesystem,
@@ -399,7 +401,9 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   per-model routing fields are stripped. Plain HTTP is refused except on
   loopback, and a URL already ending in the segment the relay appends is
   refused. `pisafe login` with no argument lists what is configured, and
-  `pisafe logout NAME` removes one whether or not it still works.
+  `pisafe logout NAME` removes one whether or not it still works. A run is never
+  configured with a provider whose API has no canonical path, so an upstream
+  pisafe cannot route reaches no run rather than being relayed by guess.
 - A key is read only when the broker relays a request. Starting a run renders
   `models.json`, which carries no upstream credential, so run creation touches
   no secret at all.
@@ -540,8 +544,9 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
 
 ### Run records and controller
 
-- `internal/runstate` writes version-4, mode-0600 JSON manifests atomically
-  under the user config directory (or `PISAFE_STATE_DIR`), enforcing
+- `internal/runstate` writes version-6, mode-0600 JSON manifests atomically
+  under the user config directory (or `PISAFE_STATE_DIR`, resolved to an
+  absolute path so every store filed under it is reached the same way), enforcing
   `creating → active → stopped → active|imported` and binding one capability to
   exactly the active state. Activation records the baseline commit each
   repository actually got, superproject and submodules alike, and refuses a

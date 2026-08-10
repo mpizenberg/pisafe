@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/runssh"
-	"github.com/mpizenberg/pisafe/internal/runstate"
 	"github.com/mpizenberg/pisafe/internal/zedsettings"
 )
 
@@ -28,7 +27,17 @@ func runZed(ctx context.Context, runID string, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("find Zed CLI: install it from Zed's command palette")
 	}
-	path, added, err := saveZedConnection(manifest)
+	path, err := zedsettings.Path()
+	if err != nil {
+		return err
+	}
+	// Zed passes ssh nothing but what a saved connection carries, and a run's
+	// alias is defined only in pisafe's own per-run config, so without this the
+	// alias is a host name nothing on the Mac resolves.
+	added, err := zedsettings.Ensure(path, zedsettings.Connection{
+		Host:       manifest.SSH.Alias,
+		ConfigFile: manifest.SSH.ConfigFile,
+	})
 	if err != nil {
 		return fmt.Errorf(
 			"save a Zed connection in %s: %w\n"+
@@ -53,22 +62,6 @@ func runZed(ctx context.Context, runID string, out io.Writer) error {
 		return fmt.Errorf("open run in Zed: %s", output)
 	}
 	return nil
-}
-
-// saveZedConnection tells Zed how to reach a run, reporting the settings file
-// and whether it had to be written. Zed passes ssh nothing but what a saved
-// connection carries, and a run's alias is defined only in pisafe's own per-run
-// config, so without this the alias is a host name nothing on the Mac resolves.
-func saveZedConnection(manifest runstate.Manifest) (string, bool, error) {
-	path, err := zedsettings.Path()
-	if err != nil {
-		return "", false, err
-	}
-	added, err := zedsettings.Ensure(path, zedsettings.Connection{
-		Host:       manifest.SSH.Alias,
-		ConfigFile: manifest.SSH.ConfigFile,
-	})
-	return path, added, err
 }
 
 // forgetZedConnection takes a reclaimed run's saved connection back out, which

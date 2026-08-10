@@ -122,11 +122,7 @@ func printCollection(out io.Writer, plan runctl.GCPlan, images []string, dryRun 
 func projectLabels(projects []runstate.ProjectRecord) []string {
 	labels := make([]string, 0, len(projects))
 	for _, project := range projects {
-		since := "first seen missing"
-		if project.MissingSince != nil {
-			since = "missing since " + project.MissingSince.Format(time.DateOnly)
-		}
-		labels = append(labels, fmt.Sprintf("%q (%s)", project.Root, since))
+		labels = append(labels, fmt.Sprintf("%q (%s)", project.Root, missingSince(project)))
 	}
 	return labels
 }

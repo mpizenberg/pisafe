@@ -560,8 +560,8 @@ creating → active → stopped → imported → reclaimed
 
 While a run exists, its record holds the run ID, project identity, captured
 source HEAD, timestamps, exact image and tool versions, baseline and final
-commit IDs, explicitly included input files by name, bundle hashes, and the
-imported branch name. Nothing is retained once the run is reclaimed: what it
+commit IDs, explicitly included input files by name, and the imported branch
+name. Nothing is retained once the run is reclaimed: what it
 produced is already in the user's repository, on a branch named `pisafe/<run>`
 after the run itself, with the base commit as its parent and the author it
 committed as — so a surviving record would only restate what git holds.

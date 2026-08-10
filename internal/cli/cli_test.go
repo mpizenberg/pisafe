@@ -20,6 +20,7 @@ import (
 	"github.com/mpizenberg/pisafe/internal/runssh"
 	"github.com/mpizenberg/pisafe/internal/runstart"
 	"github.com/mpizenberg/pisafe/internal/runstate"
+	"github.com/mpizenberg/pisafe/internal/zedsettings"
 )
 
 func TestListWithNoRuns(t *testing.T) {
@@ -1090,12 +1091,19 @@ func TestZedConnectionsAreSavedAndReclaimedUnderTheSameAlias(t *testing.T) {
 		},
 	}
 
-	path, added, err := saveZedConnection(manifest)
+	path, err := zedsettings.Path()
 	if err != nil {
-		t.Fatalf("save: %v", err)
+		t.Fatalf("settings path: %v", err)
 	}
-	if path != settings || !added {
-		t.Fatalf("saved to %q (added=%v), want %q", path, added, settings)
+	if path != settings {
+		t.Fatalf("settings path = %q, want %q", path, settings)
+	}
+	connection := zedsettings.Connection{
+		Host:       manifest.SSH.Alias,
+		ConfigFile: manifest.SSH.ConfigFile,
+	}
+	if added, err := zedsettings.Ensure(path, connection); err != nil || !added {
+		t.Fatalf("save: added=%v err=%v", added, err)
 	}
 	saved, err := os.ReadFile(settings)
 	if err != nil {
@@ -1109,7 +1117,7 @@ func TestZedConnectionsAreSavedAndReclaimedUnderTheSameAlias(t *testing.T) {
 
 	// Nothing is written twice, so opening a run again never waits for Zed to
 	// reread settings it already has.
-	if _, added, err := saveZedConnection(manifest); err != nil || added {
+	if added, err := zedsettings.Ensure(path, connection); err != nil || added {
 		t.Fatalf("saving again: added=%v err=%v", added, err)
 	}
 

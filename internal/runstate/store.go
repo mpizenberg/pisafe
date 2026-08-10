@@ -113,7 +113,13 @@ func NewStore(root string) Store {
 
 func DefaultRoot() (string, error) {
 	if override := os.Getenv("PISAFE_STATE_DIR"); override != "" {
-		return filepath.Clean(override), nil
+		// Everything filed under the state root is reached by absolute path, so
+		// the root is made one here rather than by each store that takes it.
+		absolute, err := filepath.Abs(override)
+		if err != nil {
+			return "", fmt.Errorf("resolve PISAFE_STATE_DIR: %w", err)
+		}
+		return absolute, nil
 	}
 	config, err := os.UserConfigDir()
 	if err != nil {
@@ -553,7 +559,7 @@ func ensureDirectory(path string) error {
 	if err != nil {
 		return fmt.Errorf("inspect state directory: %w", err)
 	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+	if !info.IsDir() {
 		return fmt.Errorf("state path %q is not a directory", path)
 	}
 	if info.Mode().Perm()&0o077 != 0 {
@@ -681,10 +687,11 @@ func validateStoredManifest(manifest Manifest, expectedRunID string) error {
 	}
 	switch manifest.State {
 	case StateCreating:
-		if manifest.SSH != nil ||
-			manifest.ActiveStartedAt != nil ||
-			manifest.ActiveDeadline != nil {
+		if manifest.SSH != nil {
 			return fmt.Errorf("creating run cannot have an SSH connection")
+		}
+		if manifest.ActiveStartedAt != nil || manifest.ActiveDeadline != nil {
+			return fmt.Errorf("inactive run retains active wall-clock timestamps")
 		}
 	case StateActive:
 		if manifest.SSH == nil {

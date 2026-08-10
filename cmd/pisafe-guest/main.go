@@ -125,8 +125,8 @@ func importCopy(workspace, destination, name, decision string, in io.Reader, out
 	if !replace && decision != "refuse" {
 		return usageError()
 	}
-	if name == "" || name != filepath.Base(name) || name == "." || name == ".." {
-		return fmt.Errorf("%q is not a name a copy can arrive under", name)
+	if err := runcopy.ArrivalName(name); err != nil {
+		return err
 	}
 	target := filepath.Clean(workspace)
 	if destination != "" {
@@ -599,7 +599,7 @@ func serveSSH(home string) error {
 		if err != nil {
 			return fmt.Errorf("inspect SSH runtime file: %w", err)
 		}
-		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		if !info.Mode().IsRegular() {
 			return fmt.Errorf("SSH runtime path is not a regular file: %s", required)
 		}
 	}

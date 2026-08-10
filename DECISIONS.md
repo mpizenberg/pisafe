@@ -130,6 +130,13 @@ history holds them. New entries are appended in full.
   made its Mac-side interface appear only after the immutable host-network
   profile was captured; QEMU would add a host dependency. Changing this
   requires VM recreation.
+- How large the VM is — its CPUs, memory, and disk — is three constants, not a
+  configurable option. They were carried as a `ConfigOptions` struct with one
+  default constructor and no second caller, which cost a validator for values
+  nothing could make invalid. Sizing stays deliberately outside the security
+  profile digest: it bounds nothing a run may do, since a run is bounded by its
+  container's limits and its own filesystem, so changing it must not demand the
+  recreation that destroys every project store.
 - The run-image Containerfile is embedded in the controller while the static
   Linux ARM64 guest helper is a sibling release artifact. Building the helper
   at runtime would require a Go toolchain in the installed product; checking a
@@ -1182,6 +1189,13 @@ history holds them. New entries are appended in full.
   relay appends the client's own API path, so pasting the documented URL
   produces `/v1/v1/responses` and nothing but the upstream's 404 would say so.
   Refusing, rather than silently rewriting, teaches the shape once.
+- An API pisafe does not know has no canonical path, and a catalog holding one
+  configures no run. The path used to fall through to `/v1/responses`, which
+  made the known OpenAI-responses case indistinguishable from the unknown one
+  and would have relayed an unrecognised wire format upstream under a shape it
+  does not speak. Naming all four APIs and refusing the rest costs a run
+  nothing — no login path can produce another — and turns a guess into a
+  refusal at the one place that already refuses catalogs no run could use.
 - A login is removable whether or not it is still usable, whichever kind it is.
   `logout` used to confirm the login existed by loading it — the whole key
   catalog for a key, the parsed and validated credential for the subscription —

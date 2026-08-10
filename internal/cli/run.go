@@ -146,16 +146,14 @@ func printRunResult(out io.Writer, result runstart.Result, inferenceConfigured b
 	}
 	sshCommand := "ssh -F " + shellQuote(manifest.SSH.ConfigFile) +
 		" " + manifest.SSH.Alias
-	if _, err := fmt.Fprintf(
+	fmt.Fprintf(
 		out,
 		"Run:       %s\nWorkspace: %s\nBranch:    %s\nSSH:       %s\n",
 		manifest.RunID,
 		manifest.Workspace(),
 		strings.TrimPrefix(manifest.Snapshot.WorkRef, "refs/heads/"),
 		sshCommand,
-	); err != nil {
-		return err
-	}
+	)
 	if result.Manifest.Snapshot.BaselineCommit != "" {
 		fmt.Fprintln(out, "Baseline:  tracked working-tree changes were flattened into one commit")
 	}

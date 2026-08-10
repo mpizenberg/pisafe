@@ -119,10 +119,6 @@ func TestApplyCreatesBranchWithoutChangingCheckout(t *testing.T) {
 	if len(result.Untracked) != 1 || result.Untracked[0] != "not-imported.txt" {
 		t.Fatalf("untracked = %#v", result.Untracked)
 	}
-	if result.BundleSHA256 == "" {
-		t.Fatal("apply bundle hash is empty")
-	}
-
 	branchContent := runGit(t, source, "show", "pisafe/apply-run:tracked.txt")
 	if branchContent != "agent result" {
 		t.Fatalf("branch content = %q", branchContent)

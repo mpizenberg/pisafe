@@ -41,10 +41,10 @@ type fakeInstaller struct {
 func (installer *fakeInstaller) Ensure(
 	_ context.Context,
 	artifacts runimage.Artifacts,
-) (runimage.Result, error) {
+) (string, error) {
 	installer.artifacts = artifacts
 	installer.called = true
-	return runimage.Result{ImageID: testImageID}, nil
+	return testImageID, nil
 }
 
 type fakeController struct {

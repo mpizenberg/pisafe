@@ -88,11 +88,14 @@ func TestRunConfigurationRefusesACatalogNoRunCouldUse(t *testing.T) {
 	unnamed.Name = "Not A Name"
 	empty := provider
 	empty.Models = nil
+	unroutable := provider
+	unroutable.API = "invented-api"
 	for name, catalog := range map[string]Catalog{
 		"nothing configured": nil,
 		"unusable name":      {unnamed},
 		"no models":          {empty},
 		"one name twice":     {provider, provider},
+		"unroutable API":     {unroutable},
 	} {
 		if _, err := catalog.RunConfiguration(testCapability()); err == nil {
 			t.Errorf("%s was accepted", name)

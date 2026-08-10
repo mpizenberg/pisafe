@@ -40,13 +40,6 @@ type Artifacts struct {
 	Guest         []byte
 }
 
-type Result struct {
-	ImageID string
-	Tag     string
-	Recipe  string
-	Built   bool
-}
-
 type Installer struct {
 	backend Backend
 }
@@ -115,25 +108,25 @@ func (artifacts Artifacts) RecipeDigest() string {
 func (installer Installer) Ensure(
 	ctx context.Context,
 	artifacts Artifacts,
-) (Result, error) {
+) (string, error) {
 	if installer.backend == nil {
-		return Result{}, errors.New("run-image backend is required")
+		return "", errors.New("run-image backend is required")
 	}
 	if err := artifacts.Validate(); err != nil {
-		return Result{}, err
+		return "", err
 	}
 	recipe := artifacts.RecipeDigest()
 	tag := managedTag(recipe)
 
 	if image, err := installer.inspect(ctx, tag); err == nil {
 		if err := validateImage(image, recipe); err == nil {
-			return Result{ImageID: image.ID, Tag: tag, Recipe: recipe}, nil
+			return image.ID, nil
 		}
 	}
 
 	contextArchive, err := buildContext(artifacts)
 	if err != nil {
-		return Result{}, err
+		return "", err
 	}
 	if _, err := installer.backend.Execute(
 		ctx,
@@ -147,22 +140,17 @@ func (installer Installer) Ensure(
 		"--tag", tag,
 		"-",
 	); err != nil {
-		return Result{}, fmt.Errorf("build managed run image: %w", err)
+		return "", fmt.Errorf("build managed run image: %w", err)
 	}
 
 	image, err := installer.inspect(ctx, tag)
 	if err != nil {
-		return Result{}, fmt.Errorf("inspect built run image: %w", err)
+		return "", fmt.Errorf("inspect built run image: %w", err)
 	}
 	if err := validateImage(image, recipe); err != nil {
-		return Result{}, fmt.Errorf("validate built run image: %w", err)
+		return "", fmt.Errorf("validate built run image: %w", err)
 	}
-	return Result{
-		ImageID: image.ID,
-		Tag:     tag,
-		Recipe:  recipe,
-		Built:   true,
-	}, nil
+	return image.ID, nil
 }
 
 // Superseded lists managed run images that nothing can still start a container

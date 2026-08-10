@@ -484,11 +484,13 @@ func (transport Transport) SSHGateway(ctx context.Context) (runssh.Gateway, erro
 	if !filepath.IsAbs(configFile) || strings.Contains(configFile, "\n") {
 		return runssh.Gateway{}, fmt.Errorf("Lima returned an invalid SSH config path")
 	}
+	// Lstat, so a symlink is reported as itself and fails the regular-file test
+	// rather than being followed to whatever it names.
 	info, err := os.Lstat(configFile)
 	if err != nil {
 		return runssh.Gateway{}, fmt.Errorf("inspect Lima SSH config: %w", err)
 	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+	if !info.Mode().IsRegular() {
 		return runssh.Gateway{}, fmt.Errorf("Lima SSH config is not a regular file")
 	}
 	return runssh.Gateway{
@@ -1128,19 +1130,16 @@ func parseResolvedExtension(output []byte) (profile.Pin, error) {
 	return extension, nil
 }
 
-// InstallPackage puts one resolved package in the profile, under the module
+// installPackage puts one resolved package in the profile, under the module
 // root the caller names. The container fetches and builds the tree; this script
 // is what makes it the profile's, so nothing that ran with the network open
 // ever held the profile open for writing.
-func (transport Transport) InstallPackage(
+func (transport Transport) installPackage(
 	ctx context.Context,
 	imageID string,
 	root string,
 	pin profile.Pin,
 ) error {
-	if err := pin.Validate(); err != nil {
-		return err
-	}
 	installArgs, err := runcontainer.PackageInstallArgs(
 		imageID,
 		pin.Name,
@@ -1161,8 +1160,8 @@ func (transport Transport) InstallPackage(
 	return nil
 }
 
-// RemovePackage takes one module root out of the profile.
-func (transport Transport) RemovePackage(ctx context.Context, root string) error {
+// removePackage takes one module root out of the profile.
+func (transport Transport) removePackage(ctx context.Context, root string) error {
 	if _, err := transport.shellScript(ctx, nil, removePackageScript, root); err != nil {
 		return fmt.Errorf("remove %s: %w", root, err)
 	}
@@ -1183,7 +1182,7 @@ func (transport Transport) InstallExtension(
 	if err := extension.Validate(); err != nil {
 		return err
 	}
-	return transport.InstallPackage(
+	return transport.installPackage(
 		ctx, imageID, runcontainer.ExtensionInstallRoot(extension.Directory), extension,
 	)
 }
@@ -1195,7 +1194,7 @@ func (transport Transport) RemoveExtension(
 	if err := extension.Validate(); err != nil {
 		return err
 	}
-	return transport.RemovePackage(
+	return transport.removePackage(
 		ctx, runcontainer.ExtensionInstallRoot(extension.Directory),
 	)
 }
@@ -1208,7 +1207,7 @@ func (transport Transport) InstallTool(
 	if err := tool.Validate(); err != nil {
 		return err
 	}
-	return transport.InstallPackage(
+	return transport.installPackage(
 		ctx, imageID, runcontainer.ToolInstallRoot(tool.Directory), tool,
 	)
 }
@@ -1217,7 +1216,7 @@ func (transport Transport) RemoveTool(ctx context.Context, tool profile.Pin) err
 	if err := tool.Validate(); err != nil {
 		return err
 	}
-	return transport.RemovePackage(ctx, runcontainer.ToolInstallRoot(tool.Directory))
+	return transport.removePackage(ctx, runcontainer.ToolInstallRoot(tool.Directory))
 }
 
 // ToolBinaries reports the commands one installed tool claims. Which names a

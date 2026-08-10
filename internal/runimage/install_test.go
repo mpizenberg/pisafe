@@ -57,15 +57,13 @@ func TestEnsureReusesValidatedImage(t *testing.T) {
 	recipe := artifacts.RecipeDigest()
 	backend := &imageBackend{outputs: [][]byte{inspectJSON(t, recipe)}}
 
-	result, err := NewInstaller(backend).Ensure(context.Background(), artifacts)
+	imageID, err := NewInstaller(backend).Ensure(context.Background(), artifacts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Built {
-		t.Fatal("validated image was unexpectedly rebuilt")
-	}
-	if result.ImageID != testImageID() || len(backend.calls) != 1 {
-		t.Fatalf("result = %#v, calls = %#v", result, backend.calls)
+	// One call is the cache lookup: a validated image is never rebuilt.
+	if imageID != testImageID() || len(backend.calls) != 1 {
+		t.Fatalf("image = %q, calls = %#v", imageID, backend.calls)
 	}
 }
 
@@ -76,12 +74,12 @@ func TestEnsureNormalizesPodmanBareImageID(t *testing.T) {
 	inspection = bytes.ReplaceAll(inspection, []byte("sha256:012345"), []byte("012345"))
 	backend := &imageBackend{outputs: [][]byte{inspection}}
 
-	result, err := NewInstaller(backend).Ensure(context.Background(), artifacts)
+	imageID, err := NewInstaller(backend).Ensure(context.Background(), artifacts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ImageID != testImageID() {
-		t.Fatalf("image ID = %q", result.ImageID)
+	if imageID != testImageID() {
+		t.Fatalf("image ID = %q", imageID)
 	}
 }
 
@@ -93,13 +91,14 @@ func TestEnsureBuildsFromTwoFileContextAndValidatesResult(t *testing.T) {
 		errors:  []error{errors.New("image not found"), nil, nil},
 	}
 
-	result, err := NewInstaller(backend).Ensure(context.Background(), artifacts)
+	imageID, err := NewInstaller(backend).Ensure(context.Background(), artifacts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Built || result.ImageID != testImageID() {
-		t.Fatalf("result = %#v", result)
+	if imageID != testImageID() {
+		t.Fatalf("image ID = %q", imageID)
 	}
+	// A failed lookup, the build, and the inspection that validates it.
 	if len(backend.calls) != 3 {
 		t.Fatalf("calls = %#v", backend.calls)
 	}

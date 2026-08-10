@@ -339,11 +339,10 @@ func ImportApply(
 	targetRef := journal.Ref()
 	temporaryRef := journal.TemporaryRef()
 	result := ApplyResult{
-		Branch:       strings.TrimPrefix(targetRef, "refs/heads/"),
-		Tip:          prepared.Tip,
-		FinalCommit:  prepared.FinalCommit,
-		Untracked:    prepared.Untracked,
-		BundleSHA256: prepared.BundleSHA256,
+		Branch:      strings.TrimPrefix(targetRef, "refs/heads/"),
+		Tip:         prepared.Tip,
+		FinalCommit: prepared.FinalCommit,
+		Untracked:   prepared.Untracked,
 	}
 
 	// Submodule refs are created before the superproject ref, so an

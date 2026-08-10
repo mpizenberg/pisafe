@@ -4,7 +4,6 @@ package runcontainer
 
 import (
 	"fmt"
-	"path"
 	"regexp"
 	"slices"
 	"strconv"
@@ -753,8 +752,8 @@ func (spec Spec) ImportArgs(
 		}
 		destination = cleaned
 	}
-	if name == "" || name != path.Base(name) || name == "." || name == ".." {
-		return nil, fmt.Errorf("%q is not a name a copy can arrive under", name)
+	if err := runcopy.ArrivalName(name); err != nil {
+		return nil, err
 	}
 	args, err := spec.inspectionArgs("copy-in", projectDirectory, "")
 	if err != nil {

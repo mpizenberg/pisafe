@@ -102,12 +102,22 @@ func listProjects(out io.Writer) error {
 
 func projectStatus(project runstate.ProjectRecord, runs int) string {
 	if project.MissingSince != nil {
-		return "checkout missing since " + project.MissingSince.Format(time.DateOnly)
+		return "checkout " + missingSince(project)
 	}
 	if runs > 0 {
 		return "in use"
 	}
 	return "idle"
+}
+
+// missingSince says how long a project's checkout has been gone. A sweep dates
+// a checkout the first time it finds it absent, so a record reported by the
+// sweep that is about to date it has no date to show yet.
+func missingSince(project runstate.ProjectRecord) string {
+	if project.MissingSince == nil {
+		return "first seen missing"
+	}
+	return "missing since " + project.MissingSince.Format(time.DateOnly)
 }
 
 func resetProject(ctx context.Context, path string, out io.Writer) error {

@@ -80,7 +80,7 @@ func checkGeneratedLimaConfig(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("host networks: %w", err)
 	}
-	config, err := limabackend.RenderConfig(limabackend.DefaultConfigOptions(prefixes))
+	config, err := limabackend.RenderConfig(prefixes)
 	if err != nil {
 		return fmt.Errorf("render Lima configuration: %w", err)
 	}

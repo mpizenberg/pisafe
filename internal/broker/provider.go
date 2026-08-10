@@ -62,18 +62,20 @@ func ValidateName(name string) error {
 
 // CanonicalPath is the only request path the broker relays. It matches what
 // the pinned Pi client emits for the configured API against the models.json
-// base URL written into each run.
+// base URL written into each run. An API pisafe does not know has no path, so
+// its route matches nothing a client could send rather than guessing one.
 func (provider Provider) CanonicalPath() string {
 	switch provider.API {
 	case APIAnthropicMessages:
 		return "/v1/messages"
 	case APIOpenAICompletions:
 		return "/v1/chat/completions"
+	case APIOpenAIResponses:
+		return "/v1/responses"
 	case APIOpenAICodexResponses:
 		return "/codex/responses"
-	default:
-		return "/v1/responses"
 	}
+	return ""
 }
 
 func (provider Provider) upstreamEndpoint() string {
@@ -222,6 +224,13 @@ func (catalog Catalog) modelsJSON(capability string) ([]byte, error) {
 		}
 		if len(provider.Models) == 0 {
 			return nil, fmt.Errorf("inference provider %q lists no models", provider.Name)
+		}
+		if provider.CanonicalPath() == "" {
+			return nil, fmt.Errorf(
+				"inference provider %q speaks %q, which pisafe cannot route",
+				provider.Name,
+				provider.API,
+			)
 		}
 		entries[provider.Name] = providerEntry{
 			Name:    "pisafe: " + provider.Name,

@@ -23,7 +23,7 @@ type Boundary interface {
 }
 
 type ImageInstaller interface {
-	Ensure(context.Context, runimage.Artifacts) (runimage.Result, error)
+	Ensure(context.Context, runimage.Artifacts) (string, error)
 }
 
 type Controller interface {
@@ -41,7 +41,6 @@ type Result struct {
 	Manifest runstate.Manifest
 	Excluded gitstage.ExcludedInputs
 	Included []string
-	Image    runimage.Result
 }
 
 type Service struct {
@@ -124,11 +123,11 @@ func (service Service) Start(
 	if err := service.boundary.Ensure(ctx, hostPrefixes); err != nil {
 		return Result{}, fmt.Errorf("prepare Lima boundary: %w", err)
 	}
-	image, err := service.installer.Ensure(ctx, service.artifacts)
+	imageID, err := service.installer.Ensure(ctx, service.artifacts)
 	if err != nil {
 		return Result{}, fmt.Errorf("install managed run image: %w", err)
 	}
-	caches, err := declared.Mounts(root, image.ImageID)
+	caches, err := declared.Mounts(root, imageID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -151,7 +150,7 @@ func (service Service) Start(
 		ctx,
 		prepared,
 		project,
-		image.ImageID,
+		imageID,
 		identity,
 		caches,
 	)
@@ -162,6 +161,5 @@ func (service Service) Start(
 		Manifest: manifest,
 		Excluded: remaining,
 		Included: prepared.Snapshot.Inputs,
-		Image:    image,
 	}, nil
 }

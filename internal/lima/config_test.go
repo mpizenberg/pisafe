@@ -10,11 +10,11 @@ import (
 )
 
 func TestRenderConfigContainsSecurityBoundary(t *testing.T) {
-	config, err := RenderConfig(DefaultConfigOptions([]netip.Prefix{
+	config, err := RenderConfig([]netip.Prefix{
 		netip.MustParsePrefix("203.0.113.8/24"),
 		netip.MustParsePrefix("192.168.4.2/24"),
 		netip.MustParsePrefix("192.168.4.1/32"),
-	}))
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestSecurityProfileChangesWithTemplateOrNetworks(t *testing.T) {
 }
 
 func TestRenderConfigRequiresHostNetworks(t *testing.T) {
-	_, err := RenderConfig(DefaultConfigOptions(nil))
+	_, err := RenderConfig(nil)
 	if err == nil {
 		t.Fatal("RenderConfig unexpectedly accepted no host networks")
 	}
@@ -124,9 +124,9 @@ func TestGeneratedConfigValidatesWithInstalledLima(t *testing.T) {
 	if err != nil {
 		t.Skip("limactl is not installed")
 	}
-	config, err := RenderConfig(DefaultConfigOptions([]netip.Prefix{
+	config, err := RenderConfig([]netip.Prefix{
 		netip.MustParsePrefix("192.168.4.0/24"),
-	}))
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

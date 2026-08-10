@@ -61,17 +61,8 @@ func Alias(runID string) string {
 }
 
 func NewStore(root string) Store {
-	cleaned := filepath.Clean(root)
-	if root != "" {
-		absolute, err := filepath.Abs(cleaned)
-		if err == nil {
-			cleaned = absolute
-		}
-	} else {
-		cleaned = ""
-	}
 	return Store{
-		root:   cleaned,
+		root:   root,
 		runner: execCommand{binary: "ssh-keygen"},
 	}
 }
@@ -263,7 +254,7 @@ func (store Store) ensureRoot() error {
 	if err != nil {
 		return fmt.Errorf("inspect SSH state directory: %w", err)
 	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+	if !info.IsDir() {
 		return errors.New("SSH state path is not a directory")
 	}
 	if info.Mode().Perm()&0o077 != 0 {
@@ -283,7 +274,7 @@ func readLimitedRegularFile(path string, limit int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 || before.Size() > limit {
+	if !before.Mode().IsRegular() || before.Size() > limit {
 		return nil, errors.New("file is not a bounded regular file")
 	}
 	file, err := os.Open(path)
@@ -313,7 +304,7 @@ func restrictRegularFile(path string, mode fs.FileMode) error {
 	if err != nil {
 		return err
 	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+	if !info.Mode().IsRegular() {
 		return errors.New("path is not a regular file")
 	}
 	if err := os.Chmod(path, mode); err != nil {

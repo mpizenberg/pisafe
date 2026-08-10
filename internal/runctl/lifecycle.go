@@ -370,7 +370,7 @@ func (controller Controller) inspectContainer(
 	if len(output) > 2<<20 {
 		return nil, errors.New("run container inspection exceeds size limit")
 	}
-	decoder := json.NewDecoder(io.LimitReader(bytes.NewReader(output), 2<<20))
+	decoder := json.NewDecoder(bytes.NewReader(output))
 	var inspections []containerInspection
 	if bytes.Equal(bytes.TrimSpace(output), []byte("null")) {
 		return nil, nil

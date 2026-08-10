@@ -58,14 +58,14 @@ func TestLiveInstallAndReuseManagedImage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.ImageID == "" {
+	if first == "" {
 		t.Fatal("installer returned no immutable image ID")
 	}
 	second, err := installer.Ensure(ctx, artifacts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.Built || second.ImageID != first.ImageID || second.Recipe != first.Recipe {
-		t.Fatalf("managed image was not reused: first=%#v second=%#v", first, second)
+	if second != first {
+		t.Fatalf("managed image was not reused: first=%q second=%q", first, second)
 	}
 }
