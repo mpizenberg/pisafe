@@ -25,9 +25,9 @@ func TestTransportRunningRunsReadsOnlyRunsItCouldHaveStarted(t *testing.T) {
 	runner := &fakeRunner{outputs: [][]byte{
 		[]byte("safe-run\n\nother-run\n../escape\n" + strings.Repeat("x", 65) + "\n"),
 	}}
-	transport := Transport{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 
-	running, err := transport.RunningRuns(context.Background())
+	running, err := vm.RunningRuns(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestTransportCreateStageStreamsVerifiedArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := &fakeRunner{}
-	transport := Transport{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 	prepared := gitstage.PreparedStage{
 		Snapshot: gitstage.Snapshot{
 			RunID:      "safe-run",
@@ -70,7 +70,7 @@ func TestTransportCreateStageStreamsVerifiedArtifacts(t *testing.T) {
 	}
 
 	runner.outputs = [][]byte{[]byte("/home/piz/.local/share/pisafe/runs/safe-run/stage\n")}
-	stagePath, err := transport.CreateStage(context.Background(), prepared)
+	stagePath, err := vm.CreateStage(context.Background(), prepared)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,8 +105,8 @@ func TestTransportCreateStageStreamsVerifiedArtifacts(t *testing.T) {
 
 func TestTransportRejectsUnsafeRunBeforeCallingLima(t *testing.T) {
 	runner := &fakeRunner{}
-	transport := Transport{instance: InstanceName, runner: runner}
-	_, err := transport.CreateStage(context.Background(), gitstage.PreparedStage{
+	vm := VM{instance: InstanceName, runner: runner}
+	_, err := vm.CreateStage(context.Background(), gitstage.PreparedStage{
 		Snapshot: gitstage.Snapshot{RunID: "../escape"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "invalid run ID") {
@@ -119,8 +119,8 @@ func TestTransportRejectsUnsafeRunBeforeCallingLima(t *testing.T) {
 
 func TestTransportRemoveRunUsesPositionalArgument(t *testing.T) {
 	runner := &fakeRunner{}
-	transport := Transport{instance: InstanceName, runner: runner}
-	if err := transport.RemoveRun(context.Background(), "run-123"); err != nil {
+	vm := VM{instance: InstanceName, runner: runner}
+	if err := vm.RemoveRun(context.Background(), "run-123"); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 1 {
@@ -138,8 +138,8 @@ func TestTransportRemoveRunUsesPositionalArgument(t *testing.T) {
 
 func TestTransportImportStageIsRunScoped(t *testing.T) {
 	runner := &fakeRunner{}
-	transport := Transport{instance: InstanceName, runner: runner}
-	if err := transport.ImportStage(
+	vm := VM{instance: InstanceName, runner: runner}
+	if err := vm.ImportStage(
 		context.Background(),
 		"run-123",
 	); err != nil {
@@ -154,7 +154,7 @@ func TestTransportImportStageIsRunScoped(t *testing.T) {
 		"run-123" {
 		t.Fatalf("positional arguments = %#v", got)
 	}
-	if err := transport.ImportStage(
+	if err := vm.ImportStage(
 		context.Background(),
 		"../escape",
 	); err == nil {
@@ -164,7 +164,7 @@ func TestTransportImportStageIsRunScoped(t *testing.T) {
 
 func TestTransportStorageUsesFixedPrivilegedHelper(t *testing.T) {
 	runner := &fakeRunner{}
-	transport := Transport{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 	for _, operation := range []struct {
 		action string
 		scope  string
@@ -172,16 +172,16 @@ func TestTransportStorageUsesFixedPrivilegedHelper(t *testing.T) {
 		call   func() error
 	}{
 		{action: "create", scope: "run", id: "run-123", call: func() error {
-			return transport.CreateRunStorage(context.Background(), "run-123")
+			return vm.CreateRunStorage(context.Background(), "run-123")
 		}},
 		{action: "verify", scope: "run", id: "run-123", call: func() error {
-			return transport.VerifyRunStorage(context.Background(), "run-123")
+			return vm.VerifyRunStorage(context.Background(), "run-123")
 		}},
 		{action: "remove", scope: "run", id: "run-123", call: func() error {
-			return transport.RemoveRunStorage(context.Background(), "run-123")
+			return vm.RemoveRunStorage(context.Background(), "run-123")
 		}},
 		{action: "ensure", scope: "project", id: "api-3f9c2a1b", call: func() error {
-			return transport.EnsureProjectStorage(context.Background(), "api-3f9c2a1b")
+			return vm.EnsureProjectStorage(context.Background(), "api-3f9c2a1b")
 		}},
 	} {
 		if err := operation.call(); err != nil {
@@ -203,8 +203,8 @@ func TestTransportReturnsLimaSSHGateway(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := &fakeRunner{outputs: [][]byte{[]byte(config + "\n")}}
-	transport := Transport{instance: InstanceName, runner: runner}
-	gateway, err := transport.SSHGateway(context.Background())
+	vm := VM{instance: InstanceName, runner: runner}
+	gateway, err := vm.SSHGateway(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +248,7 @@ func TestTransportStreamsSubmoduleAndInputArtifacts(t *testing.T) {
 	runner := &fakeRunner{
 		outputs: [][]byte{[]byte("/home/piz/.local/share/pisafe/runs/safe-run/stage\n")},
 	}
-	transport := Transport{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 	prepared := gitstage.PreparedStage{
 		Snapshot: gitstage.Snapshot{
 			RunID:      "safe-run",
@@ -268,7 +268,7 @@ func TestTransportStreamsSubmoduleAndInputArtifacts(t *testing.T) {
 		}},
 	}
 
-	if _, err := transport.CreateStage(context.Background(), prepared); err != nil {
+	if _, err := vm.CreateStage(context.Background(), prepared); err != nil {
 		t.Fatal(err)
 	}
 	uploaded := map[string]string{}
@@ -299,10 +299,10 @@ func TestFetchApplyArtifactKeepsOnlyAVerifiedTransfer(t *testing.T) {
 		SHA256: hex.EncodeToString(digest[:]),
 	}
 	runner := &fakeRunner{outputs: [][]byte{content}}
-	transport := Transport{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 	destination := filepath.Join(t.TempDir(), artifact.Name)
 
-	if err := transport.FetchApplyArtifact(
+	if err := vm.FetchApplyArtifact(
 		context.Background(),
 		"safe-run",
 		artifact,
@@ -331,8 +331,8 @@ func TestFetchApplyArtifactKeepsOnlyAVerifiedTransfer(t *testing.T) {
 	// A transfer that does not hash to what the run declared leaves nothing
 	// behind for the import to read.
 	corrupted := filepath.Join(t.TempDir(), artifact.Name)
-	transport.runner = &fakeRunner{outputs: [][]byte{[]byte("tampered")}}
-	err = transport.FetchApplyArtifact(context.Background(), "safe-run", artifact, corrupted)
+	vm.runner = &fakeRunner{outputs: [][]byte{[]byte("tampered")}}
+	err = vm.FetchApplyArtifact(context.Background(), "safe-run", artifact, corrupted)
 	if err == nil || !strings.Contains(err.Error(), "changed in transfer") {
 		t.Fatalf("error = %v", err)
 	}
@@ -343,7 +343,7 @@ func TestFetchApplyArtifactKeepsOnlyAVerifiedTransfer(t *testing.T) {
 
 func TestFetchApplyArtifactRejectsNamesOutsideTheApplyContract(t *testing.T) {
 	runner := &fakeRunner{}
-	transport := Transport{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 	hash := strings.Repeat("a", 64)
 	for _, artifact := range []gitstage.ApplyArtifact{
 		{Name: "../escape", SHA256: hash},
@@ -353,7 +353,7 @@ func TestFetchApplyArtifactRejectsNamesOutsideTheApplyContract(t *testing.T) {
 		{Name: "apply.bundle", SHA256: "not-a-hash"},
 		{Name: "apply.bundle"},
 	} {
-		err := transport.FetchApplyArtifact(
+		err := vm.FetchApplyArtifact(
 			context.Background(),
 			"safe-run",
 			artifact,
@@ -369,12 +369,12 @@ func TestFetchApplyArtifactRejectsNamesOutsideTheApplyContract(t *testing.T) {
 }
 
 func TestUploadArtifactRejectsNamesOutsideTheStageContract(t *testing.T) {
-	transport := Transport{instance: InstanceName, runner: &fakeRunner{}}
+	vm := VM{instance: InstanceName, runner: &fakeRunner{}}
 	for _, name := range []string{
 		"../escape", "submodule-.bundle", "submodule-0.tar", "submodule-99999.patch",
 		"submodule-0.bundle.extra", "source.bundle.bak",
 	} {
-		err := transport.uploadArtifact(context.Background(), "safe-run", name, "", []byte("x"))
+		err := vm.uploadArtifact(context.Background(), "safe-run", name, "", []byte("x"))
 		if err == nil || !strings.Contains(err.Error(), "unsupported stage artifact") {
 			t.Errorf("uploadArtifact(%q) error = %v", name, err)
 		}
@@ -385,14 +385,14 @@ func TestSelectCacheSnapshotsPairsEveryCacheWithItsGeneration(t *testing.T) {
 	runner := &fakeRunner{outputs: [][]byte{
 		[]byte("0123456789abcdef\n\nfedcba9876543210\n"),
 	}}
-	transport := Transport{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 	requested := []runcontainer.CacheMount{
 		{Name: "npm", Env: []string{"npm_config_cache"}, Key: "0123456789abcdef"},
 		{Name: "cargo", Env: []string{"CARGO_HOME"}, Key: "1111111111111111"},
 		{Name: "go", Env: []string{"GOMODCACHE"}, Key: "2222222222222222"},
 	}
 
-	selected, err := transport.SelectCacheSnapshots(context.Background(), "project-3f9c2a1b", requested)
+	selected, err := vm.SelectCacheSnapshots(context.Background(), "project-3f9c2a1b", requested)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +415,7 @@ func TestSelectCacheSnapshotsPairsEveryCacheWithItsGeneration(t *testing.T) {
 // would publish one run's work into another's history.
 func TestPublishCacheSnapshotNamesTheRunItReads(t *testing.T) {
 	runner := &fakeRunner{}
-	transport := Transport{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 	spec := runcontainer.DefaultSpec("run-1", "project-3f9c2a1b", testRunImage)
 	cache := runcontainer.CacheMount{
 		Name:     "npm",
@@ -425,7 +425,7 @@ func TestPublishCacheSnapshotNamesTheRunItReads(t *testing.T) {
 	}
 	spec.Caches = []runcontainer.CacheMount{cache}
 
-	if err := transport.PublishCacheSnapshot(context.Background(), spec, cache); err != nil {
+	if err := vm.PublishCacheSnapshot(context.Background(), spec, cache); err != nil {
 		t.Fatal(err)
 	}
 	arguments := runner.calls[0].args
@@ -445,8 +445,8 @@ func TestPublishCacheSnapshotNamesTheRunItReads(t *testing.T) {
 
 func TestPublishAndEvictionRefuseWhatTheyCannotAddress(t *testing.T) {
 	spec := runcontainer.DefaultSpec("run-1", "project-3f9c2a1b", testRunImage)
-	transport := Transport{instance: InstanceName, runner: &fakeRunner{}}
-	if err := transport.PublishCacheSnapshot(
+	vm := VM{instance: InstanceName, runner: &fakeRunner{}}
+	if err := vm.PublishCacheSnapshot(
 		context.Background(),
 		spec,
 		runcontainer.CacheMount{Name: "npm", Env: []string{"npm_config_cache"}, Key: "not-a-key"},
@@ -457,15 +457,15 @@ func TestPublishAndEvictionRefuseWhatTheyCannotAddress(t *testing.T) {
 		// Keeping nothing would evict the generation the namespace was just
 		// published to, which is the one every later run starts from.
 		"keeping nothing": func() error {
-			return transport.EvictCacheSnapshots(context.Background(), "project-3f9c2a1b", "npm", 0, nil)
+			return vm.EvictCacheSnapshots(context.Background(), "project-3f9c2a1b", "npm", 0, nil)
 		},
 		"climbing held generation": func() error {
-			return transport.EvictCacheSnapshots(
+			return vm.EvictCacheSnapshots(
 				context.Background(), "project-3f9c2a1b", "npm", 3, []string{"../../sessions"},
 			)
 		},
 		"nested namespace": func() error {
-			return transport.EvictCacheSnapshots(context.Background(), "project-3f9c2a1b", "a/b", 3, nil)
+			return vm.EvictCacheSnapshots(context.Background(), "project-3f9c2a1b", "a/b", 3, nil)
 		},
 	} {
 		if err := evict(); err == nil {
@@ -478,14 +478,14 @@ func TestPublishAndEvictionRefuseWhatTheyCannotAddress(t *testing.T) {
 // a path. Both halves are directories the script writes into, and the project
 // key half names a store that other projects' runs have mounted.
 func TestPromoteSessionsRefusesWhatItCannotAddress(t *testing.T) {
-	transport := Transport{instance: InstanceName, runner: &fakeRunner{}}
+	vm := VM{instance: InstanceName, runner: &fakeRunner{}}
 	for name, arguments := range map[string][2]string{
 		"climbing project": {"../../projects/other", "run-1"},
 		"climbing run":     {"project-3f9c2a1b", "../../runs/other"},
 		"empty project":    {"", "run-1"},
 		"empty run":        {"project-3f9c2a1b", ""},
 	} {
-		if err := transport.PromoteSessions(
+		if err := vm.PromoteSessions(
 			context.Background(), arguments[0], arguments[1],
 		); err == nil {
 			t.Errorf("%s was accepted", name)
@@ -498,14 +498,14 @@ func TestPromoteSessionsRefusesWhatItCannotAddress(t *testing.T) {
 // some other project's transcripts into this one, which is the one way the
 // isolation between projects could be undone by a command meant to preserve it.
 func TestAdoptSessionsRefusesWhatItCannotAddress(t *testing.T) {
-	transport := Transport{instance: InstanceName, runner: &fakeRunner{}}
+	vm := VM{instance: InstanceName, runner: &fakeRunner{}}
 	for name, arguments := range map[string][2]string{
 		"climbing destination": {"../../projects/other", "project-3f9c2a1b"},
 		"climbing source":      {"project-3f9c2a1b", "../../projects/other"},
 		"empty destination":    {"", "project-3f9c2a1b"},
 		"empty source":         {"project-3f9c2a1b", ""},
 	} {
-		if err := transport.AdoptSessions(
+		if err := vm.AdoptSessions(
 			context.Background(), arguments[0], arguments[1],
 		); err == nil {
 			t.Errorf("%s was accepted", name)
@@ -518,14 +518,14 @@ func TestAdoptSessionsRefusesWhatItCannotAddress(t *testing.T) {
 // so one that could climb would read another project's transcripts into a
 // backup, or write a backup's transcripts into another project's store.
 func TestSessionArchivesRefuseAKeyTheyCannotAddress(t *testing.T) {
-	transport := Transport{instance: InstanceName, runner: &fakeRunner{}}
+	vm := VM{instance: InstanceName, runner: &fakeRunner{}}
 	for _, projectKey := range []string{"../../projects/other", "", "project/../other", "."} {
-		if err := transport.ArchiveSessions(
+		if err := vm.ArchiveSessions(
 			context.Background(), projectKey, io.Discard,
 		); err == nil {
 			t.Errorf("archiving %q was accepted", projectKey)
 		}
-		if err := transport.RestoreSessions(
+		if err := vm.RestoreSessions(
 			context.Background(), projectKey, strings.NewReader(""),
 		); err == nil {
 			t.Errorf("restoring %q was accepted", projectKey)
@@ -566,7 +566,7 @@ func TestResolveExtensionRefusesWhatItCannotPin(t *testing.T) {
 // TestExtensionCommandsRefuseAnUnpinnedPackage keeps anything the record could
 // not vouch for from becoming a container argument or half of a path.
 func TestExtensionCommandsRefuseAnUnpinnedPackage(t *testing.T) {
-	transport := Transport{instance: InstanceName, runner: &fakeRunner{}}
+	vm := VM{instance: InstanceName, runner: &fakeRunner{}}
 	integrity := "sha512-" + strings.Repeat("A", 86) + "=="
 	for name, extension := range map[string]profile.Pin{
 		"climbing name": {
@@ -586,12 +586,12 @@ func TestExtensionCommandsRefuseAnUnpinnedPackage(t *testing.T) {
 			Directory: "is-number-5e0e83b1",
 		},
 	} {
-		if err := transport.InstallExtension(
+		if err := vm.InstallExtension(
 			context.Background(), testRunImage, extension,
 		); err == nil {
 			t.Errorf("%s was installed", name)
 		}
-		if err := transport.RemoveExtension(context.Background(), extension); err == nil {
+		if err := vm.RemoveExtension(context.Background(), extension); err == nil {
 			t.Errorf("%s was removed", name)
 		}
 	}
@@ -608,11 +608,11 @@ func TestSelectCacheSnapshotsRefusesAnUnexpectedListing(t *testing.T) {
 		"unkeyed directory":  "not-a-key\n",
 		"extra lines":        "0123456789abcdef\nfedcba9876543210\n",
 	} {
-		transport := Transport{
+		vm := VM{
 			instance: InstanceName,
 			runner:   &fakeRunner{outputs: [][]byte{[]byte(output)}},
 		}
-		if _, err := transport.SelectCacheSnapshots(
+		if _, err := vm.SelectCacheSnapshots(
 			context.Background(),
 			"project-3f9c2a1b",
 			requested,
@@ -637,19 +637,19 @@ func TestToolCommandsRefuseANameTheyCannotVouchFor(t *testing.T) {
 		"hidden":    ".profile\n",
 		"separated": "rg rg;rm\n",
 	} {
-		transport := Transport{
+		vm := VM{
 			instance: InstanceName,
 			runner:   &fakeRunner{outputs: [][]byte{[]byte(reported)}},
 		}
-		if _, err := transport.ToolBinaries(context.Background(), pin); err == nil {
+		if _, err := vm.ToolBinaries(context.Background(), pin); err == nil {
 			t.Errorf("%s was accepted as a command name", name)
 		}
 	}
-	transport := Transport{
+	vm := VM{
 		instance: InstanceName,
 		runner:   &fakeRunner{outputs: [][]byte{[]byte("isnumber\n")}},
 	}
-	binaries, err := transport.ToolBinaries(context.Background(), pin)
+	binaries, err := vm.ToolBinaries(context.Background(), pin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,7 +663,7 @@ func TestToolCommandsRefuseANameTheyCannotVouchFor(t *testing.T) {
 		Pin:      pin,
 		Binaries: []string{"../../../bin/sh"},
 	}}}
-	if err := transport.LinkToolBinaries(context.Background(), escaping); err == nil {
+	if err := vm.LinkToolBinaries(context.Background(), escaping); err == nil {
 		t.Error("a link escaping the profile was accepted")
 	}
 }

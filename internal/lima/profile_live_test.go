@@ -80,7 +80,7 @@ cat >"`+path+`" <<'JSON'
 chown 1000:1000 "`+path+`"
 `)
 	}
-	previous, err := lima.NewTransport().ReadProfileRecord(ctx)
+	previous, err := lima.New().ReadProfileRecord(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ chown 1000:1000 "`+path+`"
 // so a test that asks npm a question does not leave its answer standing.
 func preserveProfileOffers(t *testing.T, ctx context.Context) {
 	t.Helper()
-	previous, err := lima.NewTransport().ReadProfileOffers(ctx)
+	previous, err := lima.New().ReadProfileOffers(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func preserveProfileOffers(t *testing.T, ctx context.Context) {
 			)
 			return
 		}
-		if err := lima.NewTransport().WriteProfileOffers(context.Background(), previous); err != nil {
+		if err := lima.New().WriteProfileOffers(context.Background(), previous); err != nil {
 			t.Errorf("restore profile offers: %v", err)
 		}
 	})
@@ -142,35 +142,35 @@ func TestLiveAnAvailableUpdateIsOfferedAndNeverApplied(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	transport := lima.NewTransport()
-	if err := transport.EnsureGlobalStorage(ctx); err != nil {
+	vm := lima.New()
+	if err := vm.EnsureGlobalStorage(ctx); err != nil {
 		t.Fatal(err)
 	}
 	seedProfileRecord(t, ctx, profile.Record{Version: profile.RecordVersion})
 	preserveProfileOffers(t, ctx)
 
-	superseded, err := transport.ResolvePackage(ctx, imageID, liveIsNumberOld)
+	superseded, err := vm.ResolvePackage(ctx, imageID, liveIsNumberOld)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if superseded.Version != "6.0.0" {
 		t.Fatalf("resolved %+v, want the exact version asked for", superseded)
 	}
-	if err := transport.InstallExtension(ctx, imageID, superseded); err != nil {
+	if err := vm.InstallExtension(ctx, imageID, superseded); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := transport.RemoveExtension(context.Background(), superseded); err != nil {
+		if err := vm.RemoveExtension(context.Background(), superseded); err != nil {
 			t.Errorf("remove live extension: %v", err)
 		}
 	})
 	record := profile.Record{Version: profile.RecordVersion}.With(superseded)
-	if err := transport.WriteProfileRecord(ctx, record); err != nil {
+	if err := vm.WriteProfileRecord(ctx, record); err != nil {
 		t.Fatal(err)
 	}
 
 	checkedAt := time.Now()
-	offers, err := transport.ResolveExtensionUpdates(ctx, imageID, record, checkedAt)
+	offers, err := vm.ResolveExtensionUpdates(ctx, imageID, record, checkedAt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestLiveAnAvailableUpdateIsOfferedAndNeverApplied(t *testing.T) {
 	if got := runLive(t, ctx, "podman", "unshare", "grep", "-c", `"version": "6.0.0"`, installedManifest); got != "1" {
 		t.Errorf("the check changed the installed tree: %q", got)
 	}
-	unchanged, err := transport.ReadProfileRecord(ctx)
+	unchanged, err := vm.ReadProfileRecord(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,10 +203,10 @@ func TestLiveAnAvailableUpdateIsOfferedAndNeverApplied(t *testing.T) {
 
 	// What was found survives storage, because the offer is repeated to the user
 	// long after the check that found it.
-	if err := transport.WriteProfileOffers(ctx, offers); err != nil {
+	if err := vm.WriteProfileOffers(ctx, offers); err != nil {
 		t.Fatal(err)
 	}
-	stored, err := transport.ReadProfileOffers(ctx)
+	stored, err := vm.ReadProfileOffers(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestLiveAnAvailableUpdateIsOfferedAndNeverApplied(t *testing.T) {
 
 	// The end of a run speaks only when a check moved the answer, so the registry
 	// answering the same thing twice has to leave nothing to say.
-	again, err := transport.ResolveExtensionUpdates(ctx, imageID, record, time.Now())
+	again, err := vm.ResolveExtensionUpdates(ctx, imageID, record, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,18 +234,18 @@ func TestLiveAnAvailableUpdateIsOfferedAndNeverApplied(t *testing.T) {
 
 	// Applying is an install: the offer names a version, and the bytes are still
 	// checked against what the registry answers when they are fetched.
-	resolved, err := transport.ResolvePackage(ctx, imageID, "is-number")
+	resolved, err := vm.ResolvePackage(ctx, imageID, "is-number")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resolved.Version != "7.0.0" || resolved.Integrity != liveIsNumberIntegrity {
 		t.Fatalf("resolved %+v", resolved)
 	}
-	if err := transport.InstallExtension(ctx, imageID, resolved); err != nil {
+	if err := vm.InstallExtension(ctx, imageID, resolved); err != nil {
 		t.Fatal(err)
 	}
 	updated := record.With(resolved)
-	if err := transport.WriteProfileRecord(ctx, updated); err != nil {
+	if err := vm.WriteProfileRecord(ctx, updated); err != nil {
 		t.Fatal(err)
 	}
 	if got := runLive(t, ctx, "podman", "unshare", "grep", "-c", `"version": "7.0.0"`, installedManifest); got != "1" {
@@ -270,13 +270,13 @@ func TestLiveAnInstalledExtensionIsPinnedToWhatWasFetched(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	transport := lima.NewTransport()
-	if err := transport.EnsureGlobalStorage(ctx); err != nil {
+	vm := lima.New()
+	if err := vm.EnsureGlobalStorage(ctx); err != nil {
 		t.Fatal(err)
 	}
 	seedProfileRecord(t, ctx, profile.Record{Version: profile.RecordVersion})
 
-	extension, err := transport.ResolvePackage(ctx, imageID, liveIsNumber)
+	extension, err := vm.ResolvePackage(ctx, imageID, liveIsNumber)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestLiveAnInstalledExtensionIsPinnedToWhatWasFetched(t *testing.T) {
 	// anything else have to stay out of the profile.
 	tampered := extension
 	tampered.Integrity = "sha512-" + strings.Repeat("B", 86) + "=="
-	if err := transport.InstallExtension(ctx, imageID, tampered); err == nil {
+	if err := vm.InstallExtension(ctx, imageID, tampered); err == nil {
 		t.Fatal("a package that did not match its pin was installed")
 	}
 	if listed := runLive(
@@ -298,15 +298,15 @@ func TestLiveAnInstalledExtensionIsPinnedToWhatWasFetched(t *testing.T) {
 		t.Fatalf("the profile holds %q after a refused install", listed)
 	}
 
-	if err := transport.InstallExtension(ctx, imageID, extension); err != nil {
+	if err := vm.InstallExtension(ctx, imageID, extension); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := transport.RemoveExtension(context.Background(), extension); err != nil {
+		if err := vm.RemoveExtension(context.Background(), extension); err != nil {
 			t.Errorf("remove live extension: %v", err)
 		}
 	})
-	if err := transport.WriteProfileRecord(
+	if err := vm.WriteProfileRecord(
 		ctx,
 		profile.Record{Version: profile.RecordVersion}.With(extension),
 	); err != nil {
@@ -320,7 +320,7 @@ func TestLiveAnInstalledExtensionIsPinnedToWhatWasFetched(t *testing.T) {
 
 	// Installing again replaces rather than accumulates, and leaves no
 	// half-installed directory behind for a run to mount.
-	if err := transport.InstallExtension(ctx, imageID, extension); err != nil {
+	if err := vm.InstallExtension(ctx, imageID, extension); err != nil {
 		t.Fatal(err)
 	}
 	if listed := runLive(
@@ -328,7 +328,7 @@ func TestLiveAnInstalledExtensionIsPinnedToWhatWasFetched(t *testing.T) {
 	); listed != extension.Directory {
 		t.Errorf("the profile holds %q, want only %q", listed, extension.Directory)
 	}
-	record, err := transport.ReadProfileRecord(ctx)
+	record, err := vm.ReadProfileRecord(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,11 +340,11 @@ func TestLiveAnInstalledExtensionIsPinnedToWhatWasFetched(t *testing.T) {
 	// is what makes an installed extension one Pi loads rather than one that
 	// merely exists.
 	stamp := time.Now().UTC().Format("20060102150405")
-	projectKey := liveProject(t, transport, "liveinstall")
-	spec := liveRun(t, ctx, transport, projectKey, imageID, "liveinstall-"+stamp)
-	inContainer(t, ctx, transport, spec, "mkdir -p /work/project")
-	configureRunProfile(t, ctx, transport, spec, record)
-	listed := inContainer(t, ctx, transport, spec, "cd /work/project && pi list")
+	projectKey := liveProject(t, vm, "liveinstall")
+	spec := liveRun(t, ctx, vm, projectKey, imageID, "liveinstall-"+stamp)
+	inContainer(t, ctx, vm, spec, "mkdir -p /work/project")
+	configureRunProfile(t, ctx, vm, spec, record)
+	listed := inContainer(t, ctx, vm, spec, "cd /work/project && pi list")
 	path := runcontainer.ProfileMount().Destination + "/" +
 		extension.Directory + "/node_modules/is-number"
 	if strings.Count(listed, path) != 2 {
@@ -357,7 +357,7 @@ func TestLiveAnInstalledExtensionIsPinnedToWhatWasFetched(t *testing.T) {
 func configureRunProfile(
 	t *testing.T,
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	spec runcontainer.Spec,
 	record profile.Record,
 ) {
@@ -372,7 +372,7 @@ func configureRunProfile(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := transport.Execute(
+	if _, err := vm.Execute(
 		ctx,
 		bytes.NewReader(configuration),
 		append([]string{"podman"}, args...)...,
@@ -395,14 +395,14 @@ func TestLiveTheProfileLoadsAndStaysReadOnlyToTheRun(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	transport := lima.NewTransport()
-	if err := transport.EnsureGlobalStorage(ctx); err != nil {
+	vm := lima.New()
+	if err := vm.EnsureGlobalStorage(ctx); err != nil {
 		t.Fatal(err)
 	}
 	installed := seedProfileExtension(t, ctx, "probe-ext", "probe-flag")
 	seedProfileRecord(t, ctx, profile.Record{Version: profile.RecordVersion}.With(installed))
 
-	record, err := transport.ReadProfileRecord(ctx)
+	record, err := vm.ReadProfileRecord(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,12 +411,12 @@ func TestLiveTheProfileLoadsAndStaysReadOnlyToTheRun(t *testing.T) {
 	}
 
 	stamp := time.Now().UTC().Format("20060102150405")
-	projectKey := liveProject(t, transport, "liveprofile")
-	spec := liveRun(t, ctx, transport, projectKey, imageID, "liveprofile-"+stamp)
+	projectKey := liveProject(t, vm, "liveprofile")
+	spec := liveRun(t, ctx, vm, projectKey, imageID, "liveprofile-"+stamp)
 
 	// A repository's own extension stands in for everything project trust
 	// gates, and the file the run tries for one session stands in for pi -e.
-	inContainer(t, ctx, transport, spec, `
+	inContainer(t, ctx, vm, spec, `
 mkdir -p /work/project/.pi/extensions
 cat >/work/project/.pi/extensions/local.ts <<'TS'
 export default function (pi) {
@@ -426,25 +426,25 @@ TS
 sed 's/local-flag/temporary-flag/' /work/project/.pi/extensions/local.ts >/tmp/try.ts
 `)
 
-	configureRunProfile(t, ctx, transport, spec, record)
+	configureRunProfile(t, ctx, vm, spec, record)
 
 	// A flag in the help is an extension module that was loaded and run, which
 	// is what the profile is for. Pi needs no provider and no network to get
 	// this far, so the assertion is about loading and nothing else.
-	help := inContainer(t, ctx, transport, spec, "cd /work/project && pi --help")
+	help := inContainer(t, ctx, vm, spec, "cd /work/project && pi --help")
 	for _, expected := range []string{"--probe-flag", "--local-flag"} {
 		if !strings.Contains(help, expected) {
 			t.Errorf("pi --help lacks %s:\n%s", expected, help)
 		}
 	}
-	tried := inContainer(t, ctx, transport, spec, "cd /work/project && pi -e /tmp/try.ts --help")
+	tried := inContainer(t, ctx, vm, spec, "cd /work/project && pi -e /tmp/try.ts --help")
 	if !strings.Contains(tried, "--temporary-flag") {
 		t.Errorf("an extension tried for one run did not load:\n%s", tried)
 	}
 
 	// The profile itself refuses every write, from anywhere in the run.
 	profileRoot := runcontainer.ProfileMount().Destination
-	written := inContainer(t, ctx, transport, spec,
+	written := inContainer(t, ctx, vm, spec,
 		"touch "+profileRoot+"/canary 2>&1 || true")
 	if !strings.Contains(written, "Read-only file system") {
 		t.Errorf("the profile accepted a write from the run: %q", written)
@@ -452,24 +452,24 @@ sed 's/local-flag/temporary-flag/' /work/project/.pi/extensions/local.ts >/tmp/t
 	// Pi's own package store is the run's, so installing globally succeeds and
 	// the package loads. An agent that cannot install globally installs into
 	// the repository instead, which is the run's work rather than its tooling.
-	installOutput := inContainer(t, ctx, transport, spec,
+	installOutput := inContainer(t, ctx, vm, spec,
 		"cd /work/project && pi install npm:is-number@7.0.0 2>&1")
 	if strings.Contains(installOutput, "EROFS") ||
 		strings.Contains(installOutput, "read-only") {
 		t.Errorf("pi install was refused inside a run:\n%s", installOutput)
 	}
 	if listed := inContainer(
-		t, ctx, transport, spec, "ls -A /home/node/.pi/agent/npm/node_modules",
+		t, ctx, vm, spec, "ls -A /home/node/.pi/agent/npm/node_modules",
 	); !strings.Contains(listed, "is-number") {
 		t.Errorf("a global install left nothing in the run's own store: %q", listed)
 	}
 	// What stopping reports: the run's own package, and not the profile's.
-	selfInstalled := transport.ReadSelfInstalled(ctx, spec.RunID)
+	selfInstalled := vm.ReadSelfInstalled(ctx, spec.RunID)
 	if len(selfInstalled) != 1 || selfInstalled[0].Name != "is-number" {
 		t.Errorf("the run's own packages read back as %#v", selfInstalled)
 	}
 	// Only the packages are mounted. What pisafe pinned them to is its own.
-	if listed := inContainer(t, ctx, transport, spec, "ls -A "+profileRoot); listed != installed.Directory {
+	if listed := inContainer(t, ctx, vm, spec, "ls -A "+profileRoot); listed != installed.Directory {
 		t.Errorf("the run sees %q in the profile, want only %q", listed, installed.Directory)
 	}
 	// The point of all of it: what the run installed reached the run and

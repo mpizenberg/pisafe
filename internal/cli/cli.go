@@ -345,7 +345,7 @@ func listedState(run runstate.Manifest, running map[string]bool, asked bool) str
 // reached, or one in a state Lima cannot classify, may hold any of them, and
 // nothing acts on a guess about that.
 func runningRuns(ctx context.Context) (map[string]bool, bool) {
-	status, err := lima.NewManager().Status(ctx)
+	status, err := lima.New().Status(ctx)
 	if err != nil {
 		return nil, false
 	}
@@ -355,7 +355,7 @@ func runningRuns(ctx context.Context) (map[string]bool, bool) {
 	if status != lima.StatusRunning {
 		return nil, false
 	}
-	running, err := lima.NewTransport().RunningRuns(ctx)
+	running, err := lima.New().RunningRuns(ctx)
 	if err != nil {
 		return nil, false
 	}

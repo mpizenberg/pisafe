@@ -70,9 +70,9 @@ func TestManagerCreateValidatesBeforeCreating(t *testing.T) {
 		nil,
 		nil,
 	}}
-	manager := Manager{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 
-	if err := manager.create(context.Background(), "/tmp/pisafe.yaml"); err != nil {
+	if err := vm.create(context.Background(), "/tmp/pisafe.yaml"); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 2 {
@@ -99,9 +99,9 @@ func TestManagerEnsureCreatesStartsAndVerifiesAbsentVM(t *testing.T) {
 		nil,
 		[]byte(prefix.String() + "\n"),
 	}}
-	manager := Manager{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 
-	if err := manager.Ensure(context.Background(), []netip.Prefix{prefix}); err != nil {
+	if err := vm.Ensure(context.Background(), []netip.Prefix{prefix}); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 9 {
@@ -133,9 +133,9 @@ func TestManagerEnsureAdoptsAnExistingStateDisk(t *testing.T) {
 		nil,
 		[]byte(prefix.String() + "\n"),
 	}}
-	manager := Manager{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 
-	if err := manager.Ensure(context.Background(), []netip.Prefix{prefix}); err != nil {
+	if err := vm.Ensure(context.Background(), []netip.Prefix{prefix}); err != nil {
 		t.Fatal(err)
 	}
 	for _, call := range runner.calls {
@@ -159,9 +159,9 @@ func TestManagerEnsureLeavesDisksAloneWhenTheVMExists(t *testing.T) {
 		nil,
 		[]byte(prefix.String() + "\n"),
 	}}
-	manager := Manager{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 
-	if err := manager.Ensure(context.Background(), []netip.Prefix{prefix}); err != nil {
+	if err := vm.Ensure(context.Background(), []netip.Prefix{prefix}); err != nil {
 		t.Fatal(err)
 	}
 	for _, call := range runner.calls {
@@ -178,9 +178,9 @@ func TestManagerStartIsIdempotent(t *testing.T) {
 		nil,
 		[]byte("192.168.2.0/24\n"),
 	}}
-	manager := Manager{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 
-	if err := manager.Start(context.Background(), testPrefixes("192.168.2.0/24")); err != nil {
+	if err := vm.Start(context.Background(), testPrefixes("192.168.2.0/24")); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 4 {
@@ -206,9 +206,9 @@ func TestManagerStartRefreshesAfterResume(t *testing.T) {
 		nil,
 		[]byte("192.168.2.0/24\n"),
 	}}
-	manager := Manager{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 
-	if err := manager.Start(context.Background(), testPrefixes("192.168.2.0/24")); err != nil {
+	if err := vm.Start(context.Background(), testPrefixes("192.168.2.0/24")); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 5 {
@@ -235,9 +235,9 @@ func TestManagerStartUnverifiedSkipsBoundaryVerification(t *testing.T) {
 		[]byte("pisafe\tRunning\n"),
 		nil,
 	}}
-	manager := Manager{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 
-	if err := manager.StartUnverified(context.Background()); err != nil {
+	if err := vm.StartUnverified(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 2 {
@@ -252,9 +252,9 @@ func TestManagerStartUnverifiedStartsStoppedInstance(t *testing.T) {
 		nil,
 		nil,
 	}}
-	manager := Manager{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 
-	if err := manager.StartUnverified(context.Background()); err != nil {
+	if err := vm.StartUnverified(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 3 {
@@ -266,9 +266,9 @@ func TestManagerStartUnverifiedStartsStoppedInstance(t *testing.T) {
 
 func TestManagerStartUnverifiedRefusesAbsentInstance(t *testing.T) {
 	runner := &fakeRunner{outputs: [][]byte{nil}}
-	manager := Manager{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 
-	err := manager.StartUnverified(context.Background())
+	err := vm.StartUnverified(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "has not been created") {
 		t.Fatalf("error = %v", err)
 	}
@@ -279,9 +279,9 @@ func TestManagerStartFailsClosedOnSecurityProfileDrift(t *testing.T) {
 		[]byte("pisafe\tRunning\n"),
 		[]byte("sha256:stale\n"),
 	}}
-	manager := Manager{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 
-	err := manager.Start(context.Background(), testPrefixes("192.168.2.0/24"))
+	err := vm.Start(context.Background(), testPrefixes("192.168.2.0/24"))
 	if err == nil || !strings.Contains(err.Error(), "security profile is stale") {
 		t.Fatalf("error = %v", err)
 	}
@@ -295,9 +295,9 @@ func TestManagerStartFailsClosedWhenSecurityProfileIsMissing(t *testing.T) {
 		outputs: [][]byte{[]byte("pisafe\tRunning\n")},
 		errors:  []error{nil, fmt.Errorf("missing")},
 	}
-	manager := Manager{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 
-	err := manager.Start(context.Background(), testPrefixes("192.168.2.0/24"))
+	err := vm.Start(context.Background(), testPrefixes("192.168.2.0/24"))
 	if err == nil || !strings.Contains(err.Error(), "pisafe vm rebuild") {
 		t.Fatalf("error = %v", err)
 	}
@@ -305,9 +305,9 @@ func TestManagerStartFailsClosedWhenSecurityProfileIsMissing(t *testing.T) {
 
 func TestManagerStartFailsBeforeLimaWhenPrefixesAreMissing(t *testing.T) {
 	runner := &fakeRunner{}
-	manager := Manager{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 
-	if err := manager.Start(context.Background(), nil); err == nil {
+	if err := vm.Start(context.Background(), nil); err == nil {
 		t.Fatal("Start unexpectedly accepted an empty firewall set")
 	}
 	if len(runner.calls) != 0 {
@@ -319,7 +319,7 @@ func TestVerifyFirewallAcceptsCanonicalEquivalentPrefixes(t *testing.T) {
 	runner := &fakeRunner{outputs: [][]byte{
 		[]byte("203.0.113.9/32\n192.168.2.0/24\n"),
 	}}
-	manager := Manager{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 
 	prefixes, err := CanonicalIPv4Prefixes(
 		testPrefixes("192.168.2.0/24", "192.168.2.1/32", "203.0.113.9/32"),
@@ -327,7 +327,7 @@ func TestVerifyFirewallAcceptsCanonicalEquivalentPrefixes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.verifyFirewall(context.Background(), prefixes); err != nil {
+	if err := vm.verifyFirewall(context.Background(), prefixes); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 1 {
@@ -346,8 +346,8 @@ func TestVerifyFirewallRejectsInjectedPrefix(t *testing.T) {
 	runner := &fakeRunner{outputs: [][]byte{
 		[]byte("10.0.0.0/8 } delete table inet pisafe\n"),
 	}}
-	manager := Manager{instance: InstanceName, runner: runner}
-	err := manager.verifyFirewall(context.Background(), []string{"10.0.0.0/8"})
+	vm := VM{instance: InstanceName, runner: runner}
+	err := vm.verifyFirewall(context.Background(), []string{"10.0.0.0/8"})
 	if err == nil || !strings.Contains(err.Error(), "invalid IPv4 prefix") {
 		t.Fatalf("error = %v", err)
 	}
@@ -357,8 +357,8 @@ func TestVerifyFirewallFailsClosedOnNetworkChange(t *testing.T) {
 	runner := &fakeRunner{outputs: [][]byte{
 		[]byte("192.168.2.0/24\n"),
 	}}
-	manager := Manager{instance: InstanceName, runner: runner}
-	err := manager.verifyFirewall(context.Background(), []string{"10.20.30.0/24"})
+	vm := VM{instance: InstanceName, runner: runner}
+	err := vm.verifyFirewall(context.Background(), []string{"10.20.30.0/24"})
 	if err == nil || !strings.Contains(err.Error(), "stale") {
 		t.Fatalf("error = %v", err)
 	}
@@ -374,9 +374,9 @@ func TestManagerDeleteShutsTheInstanceDownBeforeRemovingIt(t *testing.T) {
 		nil,
 		[]byte(`{"name":"pisafe-state","instance":""}` + "\n"),
 	}}
-	manager := Manager{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 
-	if err := manager.Delete(context.Background()); err != nil {
+	if err := vm.Delete(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 4 {
@@ -402,9 +402,9 @@ func TestManagerDeleteKillsAnUnstoppableInstanceAndFreesItsDisk(t *testing.T) {
 		},
 		errors: []error{nil, fmt.Errorf("shutdown timed out")},
 	}
-	manager := Manager{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 
-	if err := manager.Delete(context.Background()); err != nil {
+	if err := vm.Delete(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 6 {
@@ -429,15 +429,15 @@ func TestManagerDeleteReplacesAnInstanceLimaCannotClassify(t *testing.T) {
 		},
 		errors: []error{nil, fmt.Errorf("no such process")},
 	}
-	manager := Manager{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 
-	if err := manager.Delete(context.Background()); err != nil {
+	if err := vm.Delete(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	assertArgs(t, runner.calls[2], "--tty=false", "stop", "--force", "pisafe")
 	assertArgs(t, runner.calls[5], "disk", "unlock", "pisafe-state")
 
-	broken := Manager{
+	broken := VM{
 		instance: InstanceName,
 		runner:   &fakeRunner{outputs: [][]byte{[]byte("pisafe\tBroken\n")}},
 	}
@@ -449,9 +449,9 @@ func TestManagerDeleteReplacesAnInstanceLimaCannotClassify(t *testing.T) {
 
 func TestManagerDeleteLeavesAnAbsentInstanceAlone(t *testing.T) {
 	runner := &fakeRunner{outputs: [][]byte{[]byte("other\tRunning\n")}}
-	manager := Manager{instance: InstanceName, runner: runner}
+	vm := VM{instance: InstanceName, runner: runner}
 
-	if err := manager.Delete(context.Background()); err != nil {
+	if err := vm.Delete(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 1 {
@@ -474,9 +474,9 @@ func TestManagerHasStateDiskDistinguishesTheDiskFromAnyOther(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			runner := &fakeRunner{outputs: [][]byte{[]byte(testCase.disks + "\n")}}
-			manager := Manager{instance: InstanceName, runner: runner}
+			vm := VM{instance: InstanceName, runner: runner}
 
-			has, err := manager.HasStateDisk(context.Background())
+			has, err := vm.HasStateDisk(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -25,10 +25,11 @@ func runBackup(ctx context.Context, args []string, out io.Writer) error {
 	// Backing up reads the VM and writes only here. A VM whose boundary records
 	// no longer hold still holds transcripts nothing can refetch, and refusing
 	// to copy them to the Mac protects nothing either record describes.
-	if err := lima.NewManager().StartUnverified(ctx); err != nil {
+	vm := lima.New()
+	if err := vm.StartUnverified(ctx); err != nil {
 		return err
 	}
-	return writeBackup(ctx, lima.NewTransport(), args[0], out)
+	return writeBackup(ctx, vm, args[0], out)
 }
 
 func runRestore(ctx context.Context, args []string, out io.Writer) error {
@@ -48,7 +49,7 @@ func runRestore(ctx context.Context, args []string, out io.Writer) error {
 	if err := restoreProjects(ctx, controller, held, args[0], out); err != nil {
 		return err
 	}
-	return restoreProfile(ctx, lima.NewTransport(), held, out)
+	return restoreProfile(ctx, lima.New(), held, out)
 }
 
 // writeBackup copies out what nothing can refetch. A project that has no
@@ -57,7 +58,7 @@ func runRestore(ctx context.Context, args []string, out io.Writer) error {
 // its next run creates anyway.
 func writeBackup(
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	directory string,
 	out io.Writer,
 ) error {
@@ -69,14 +70,14 @@ func writeBackup(
 	if err != nil {
 		return err
 	}
-	if err := transport.EnsureGlobalStorage(ctx); err != nil {
+	if err := vm.EnsureGlobalStorage(ctx); err != nil {
 		return err
 	}
-	extensions, err := transport.ReadProfileRecord(ctx)
+	extensions, err := vm.ReadProfileRecord(ctx)
 	if err != nil {
 		return err
 	}
-	tools, err := transport.ReadProfileTools(ctx)
+	tools, err := vm.ReadProfileTools(ctx)
 	if err != nil {
 		return err
 	}
@@ -91,10 +92,10 @@ func writeBackup(
 		// is not mounted finds no session directory and reports no transcripts.
 		// Nothing else here would fail, so the backup would claim to hold a
 		// store it had not read.
-		if err := transport.EnsureProjectStorage(ctx, project.Key); err != nil {
+		if err := vm.EnsureProjectStorage(ctx, project.Key); err != nil {
 			return err
 		}
-		refused, err := backupSessions(ctx, transport, directory, project.Key)
+		refused, err := backupSessions(ctx, vm, directory, project.Key)
 		if err != nil {
 			return err
 		}
@@ -137,14 +138,14 @@ func writeBackup(
 // memory is never held in it.
 func backupSessions(
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	directory string,
 	projectKey string,
 ) (int, error) {
 	reader, writer := io.Pipe()
 	streamed := make(chan error, 1)
 	go func() {
-		err := transport.ArchiveSessions(ctx, projectKey, writer)
+		err := vm.ArchiveSessions(ctx, projectKey, writer)
 		writer.CloseWithError(err)
 		streamed <- err
 	}()
@@ -202,7 +203,7 @@ func restoreProjects(
 // package is not a reason to hand back none of a profile.
 func restoreProfile(
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	held backup.Backup,
 	out io.Writer,
 ) error {
@@ -210,15 +211,15 @@ func restoreProfile(
 		fmt.Fprintln(out, "The backup recorded no extension and no tool.")
 		return nil
 	}
-	imageID, err := ensureRunImage(ctx, transport)
+	imageID, err := ensureRunImage(ctx, vm)
 	if err != nil {
 		return err
 	}
 	var failures []error
-	if err := restoreExtensions(ctx, transport, imageID, held, out); err != nil {
+	if err := restoreExtensions(ctx, vm, imageID, held, out); err != nil {
 		failures = append(failures, err)
 	}
-	if err := restoreTools(ctx, transport, imageID, held, out); err != nil {
+	if err := restoreTools(ctx, vm, imageID, held, out); err != nil {
 		failures = append(failures, err)
 	}
 	return errors.Join(failures...)
@@ -230,12 +231,12 @@ func restoreProfile(
 // rather than making the profile identical to the backup.
 func restoreExtensions(
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	imageID string,
 	held backup.Backup,
 	out io.Writer,
 ) error {
-	record, err := transport.ReadProfileRecord(ctx)
+	record, err := vm.ReadProfileRecord(ctx)
 	if err != nil {
 		return err
 	}
@@ -245,14 +246,14 @@ func restoreExtensions(
 			fmt.Fprintf(out, "%s is already installed at %s\n", pin.Name, installed.Version)
 			continue
 		}
-		if err := transport.InstallExtension(ctx, imageID, pin); err != nil {
+		if err := vm.InstallExtension(ctx, imageID, pin); err != nil {
 			failures = append(failures, err)
 			continue
 		}
 		record = record.With(pin)
 		// The record is written per package, so a restore that stops partway
 		// leaves a profile describing exactly what is in it.
-		if err := transport.WriteProfileRecord(ctx, record); err != nil {
+		if err := vm.WriteProfileRecord(ctx, record); err != nil {
 			return errors.Join(append(failures, err)...)
 		}
 		fmt.Fprintf(out, "Installed %s@%s\n", pin.Name, pin.Version)
@@ -266,12 +267,12 @@ func restoreExtensions(
 // tool has taken since is refused rather than shadowed.
 func restoreTools(
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	imageID string,
 	held backup.Backup,
 	out io.Writer,
 ) error {
-	installed, err := transport.ReadProfileTools(ctx)
+	installed, err := vm.ReadProfileTools(ctx)
 	if err != nil {
 		return err
 	}
@@ -281,16 +282,16 @@ func restoreTools(
 			fmt.Fprintf(out, "%s is already installed at %s\n", backedUp.Name, existing.Version)
 			continue
 		}
-		tool, err := claimTool(ctx, transport, imageID, installed, backedUp.Pin)
+		tool, err := claimTool(ctx, vm, imageID, installed, backedUp.Pin)
 		if err != nil {
 			failures = append(failures, err)
 			continue
 		}
 		installed = installed.With(tool)
-		if err := transport.LinkToolBinaries(ctx, installed); err != nil {
+		if err := vm.LinkToolBinaries(ctx, installed); err != nil {
 			return errors.Join(append(failures, err)...)
 		}
-		if err := transport.WriteProfileTools(ctx, installed); err != nil {
+		if err := vm.WriteProfileTools(ctx, installed); err != nil {
 			return errors.Join(append(failures, err)...)
 		}
 		fmt.Fprintf(out, "Installed %s@%s\n", tool.Name, tool.Version)

@@ -38,8 +38,8 @@ func runBroker(ctx context.Context, out io.Writer) error {
 	if err := startBoundary(ctx); err != nil {
 		return err
 	}
-	transport := lima.NewTransport()
-	gateway, err := transport.SSHGateway(ctx)
+	vm := lima.New()
+	gateway, err := vm.SSHGateway(ctx)
 	if err != nil {
 		return err
 	}
@@ -72,7 +72,7 @@ func runBroker(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	defer forward.Close()
-	if err := waitForRelay(ctx, transport, forward); err != nil {
+	if err := waitForRelay(ctx, vm, forward); err != nil {
 		return err
 	}
 
@@ -119,7 +119,7 @@ func runBroker(ctx context.Context, out io.Writer) error {
 // accepting connections before reporting the broker as available.
 func waitForRelay(
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	forward *lima.ReverseForward,
 ) error {
 	deadline := time.Now().Add(30 * time.Second)
@@ -133,7 +133,7 @@ func waitForRelay(
 		default:
 		}
 		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		lastErr = transport.ProbeBrokerListener(probeCtx)
+		lastErr = vm.ProbeBrokerListener(probeCtx)
 		cancel()
 		if lastErr == nil {
 			return nil

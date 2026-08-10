@@ -451,27 +451,13 @@ var applyArtifactPattern = regexp.MustCompile(`^apply(-submodule-[0-9]{1,4})?\.b
 
 var sha256Pattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
-// Transport executes commands and streams artifacts through Lima's control
-// SSH connection. It does not use a host mount, guest agent, or Podman socket.
-type Transport struct {
-	instance string
-	runner   Runner
-}
-
-func NewTransport() Transport {
-	return Transport{
-		instance: InstanceName,
-		runner:   execRunner{binary: "limactl"},
-	}
-}
-
-func (transport Transport) SSHGateway(ctx context.Context) (runssh.Gateway, error) {
-	output, err := transport.runner.Run(
+func (vm VM) SSHGateway(ctx context.Context) (runssh.Gateway, error) {
+	output, err := vm.runner.Run(
 		ctx,
 		nil,
 		"list",
 		"--format", "{{.SSHConfigFile}}",
-		transport.instance,
+		vm.instance,
 	)
 	if err != nil {
 		return runssh.Gateway{}, fmt.Errorf("locate Lima SSH config: %w", err)
@@ -491,17 +477,17 @@ func (transport Transport) SSHGateway(ctx context.Context) (runssh.Gateway, erro
 	}
 	return runssh.Gateway{
 		ConfigFile: configFile,
-		Alias:      "lima-" + transport.instance,
+		Alias:      "lima-" + vm.instance,
 	}, nil
 }
 
 // Execute runs one argv-style command in the dedicated VM.
-func (transport Transport) Execute(
+func (vm VM) Execute(
 	ctx context.Context,
 	stdin io.Reader,
 	args ...string,
 ) ([]byte, error) {
-	output, err := transport.runner.Run(ctx, stdin, transport.inVM(args)...)
+	output, err := vm.runner.Run(ctx, stdin, vm.inVM(args)...)
 	if err != nil {
 		return nil, fmt.Errorf("execute in Lima VM: %w", err)
 	}
@@ -511,27 +497,27 @@ func (transport Transport) Execute(
 // StreamExecute runs one argv-style command in the dedicated VM, writing its
 // standard output as it arrives so an artifact leaving a run is never held in
 // memory as a whole.
-func (transport Transport) StreamExecute(
+func (vm VM) StreamExecute(
 	ctx context.Context,
 	stdout io.Writer,
 	args ...string,
 ) error {
-	if err := transport.runner.Stream(ctx, stdout, transport.inVM(args)...); err != nil {
+	if err := vm.runner.Stream(ctx, stdout, vm.inVM(args)...); err != nil {
 		return fmt.Errorf("stream from Lima VM: %w", err)
 	}
 	return nil
 }
 
-func (transport Transport) inVM(args []string) []string {
+func (vm VM) inVM(args []string) []string {
 	command := make([]string, 0, len(args)+2)
-	command = append(command, "shell", transport.instance)
+	command = append(command, "shell", vm.instance)
 	return append(command, args...)
 }
 
 // CreateStage allocates a new, private VM-side run directory and streams the
 // Git bundle, tracked patch, and a sanitized snapshot into it. Each upload is
 // size- and SHA-256-verified before an atomic rename.
-func (transport Transport) CreateStage(
+func (vm VM) CreateStage(
 	ctx context.Context,
 	prepared gitstage.PreparedStage,
 ) (string, error) {
@@ -539,7 +525,7 @@ func (transport Transport) CreateStage(
 	if err := runid.Validate(runID); err != nil {
 		return "", err
 	}
-	output, err := transport.shellScript(ctx, nil, createStageScript, runID)
+	output, err := vm.shellScript(ctx, nil, createStageScript, runID)
 	if err != nil {
 		return "", fmt.Errorf("create remote stage: %w", err)
 	}
@@ -560,11 +546,11 @@ func (transport Transport) CreateStage(
 	snapshotJSON = append(snapshotJSON, '\n')
 
 	for _, artifact := range prepared.Artifacts() {
-		if err := transport.uploadArtifact(ctx, runID, artifact.Name, artifact.Path, nil); err != nil {
+		if err := vm.uploadArtifact(ctx, runID, artifact.Name, artifact.Path, nil); err != nil {
 			return "", fmt.Errorf("upload %s: %w", artifact.Name, err)
 		}
 	}
-	if err := transport.uploadArtifact(
+	if err := vm.uploadArtifact(
 		ctx, runID, gitstage.StageSnapshotName, "", snapshotJSON,
 	); err != nil {
 		return "", fmt.Errorf("upload %s: %w", gitstage.StageSnapshotName, err)
@@ -580,8 +566,8 @@ func (transport Transport) CreateStage(
 // It answers whether there is anything to reach, not whether a container is
 // exactly the one a manifest describes. Every route into a run settles that
 // afterwards with the run's own host key, which no other container has.
-func (transport Transport) RunningRuns(ctx context.Context) (map[string]bool, error) {
-	output, err := transport.shellScript(ctx, nil, runningRunsScript)
+func (vm VM) RunningRuns(ctx context.Context) (map[string]bool, error) {
+	output, err := vm.shellScript(ctx, nil, runningRunsScript)
 	if err != nil {
 		return nil, fmt.Errorf("list running runs: %w", err)
 	}
@@ -602,11 +588,11 @@ func (transport Transport) RunningRuns(ctx context.Context) (map[string]bool, er
 // RemoveRun removes one exact VM-side run directory. Callers are responsible
 // for enforcing lifecycle confirmation before using it for user-facing
 // cleanup.
-func (transport Transport) RemoveRun(ctx context.Context, runID string) error {
+func (vm VM) RemoveRun(ctx context.Context, runID string) error {
 	if err := runid.Validate(runID); err != nil {
 		return err
 	}
-	if _, err := transport.shellScript(ctx, nil, removeRunScript, runID); err != nil {
+	if _, err := vm.shellScript(ctx, nil, removeRunScript, runID); err != nil {
 		return fmt.Errorf("remove remote run: %w", err)
 	}
 	return nil
@@ -615,38 +601,38 @@ func (transport Transport) RemoveRun(ctx context.Context, runID string) error {
 // CreateRunStorage allocates one root-owned, fixed-capacity filesystem. The
 // privileged helper accepts only validated identifiers, two fixed scopes, and
 // a fixed size policy per scope.
-func (transport Transport) CreateRunStorage(ctx context.Context, runID string) error {
-	return transport.storage(ctx, "create", "run", runID)
+func (vm VM) CreateRunStorage(ctx context.Context, runID string) error {
+	return vm.storage(ctx, "create", "run", runID)
 }
 
-func (transport Transport) VerifyRunStorage(ctx context.Context, runID string) error {
-	return transport.storage(ctx, "verify", "run", runID)
+func (vm VM) VerifyRunStorage(ctx context.Context, runID string) error {
+	return vm.storage(ctx, "verify", "run", runID)
 }
 
-func (transport Transport) RemoveRunStorage(ctx context.Context, runID string) error {
-	return transport.storage(ctx, "remove", "run", runID)
+func (vm VM) RemoveRunStorage(ctx context.Context, runID string) error {
+	return vm.storage(ctx, "remove", "run", runID)
 }
 
 // EnsureProjectStorage allocates the filesystem holding one project's shared
 // layers, or verifies the one already there. A project outlives every run of
 // it, so no run may assume it is creating it.
-func (transport Transport) EnsureProjectStorage(ctx context.Context, projectKey string) error {
-	return transport.storage(ctx, "ensure", "project", projectKey)
+func (vm VM) EnsureProjectStorage(ctx context.Context, projectKey string) error {
+	return vm.storage(ctx, "ensure", "project", projectKey)
 }
 
 // RemoveProjectStorage releases a project's whole filesystem: its shared cache,
 // its session store, and the image behind them. Nothing here decides that a
 // project is finished with; a store is unmounted and dropped only once the
 // checkout it is keyed by has been gone for a whole retention window.
-func (transport Transport) RemoveProjectStorage(ctx context.Context, projectKey string) error {
-	return transport.storage(ctx, "remove", "project", projectKey)
+func (vm VM) RemoveProjectStorage(ctx context.Context, projectKey string) error {
+	return vm.storage(ctx, "remove", "project", projectKey)
 }
 
 // SelectCacheSnapshots names the generation each declared cache starts from.
 // Falling back to the newest generation in a namespace is what keeps a changed
 // lockfile from costing a cold fetch: the tool restores the previous
 // generation and fetches only the delta.
-func (transport Transport) SelectCacheSnapshots(
+func (vm VM) SelectCacheSnapshots(
 	ctx context.Context,
 	projectKey string,
 	caches []runcontainer.CacheMount,
@@ -664,7 +650,7 @@ func (transport Transport) SelectCacheSnapshots(
 		}
 		arguments = append(arguments, cache.Name, cache.Key)
 	}
-	output, err := transport.shellScript(ctx, nil, selectSnapshotsScript, arguments...)
+	output, err := vm.shellScript(ctx, nil, selectSnapshotsScript, arguments...)
 	if err != nil {
 		return nil, fmt.Errorf("select project cache snapshots: %w", err)
 	}
@@ -694,7 +680,7 @@ func (transport Transport) SelectCacheSnapshots(
 // binds onto. They sit inside directories the privileged helper already owns to
 // the mapped UID, so the set of cache names — which comes from the repository —
 // never reaches the helper.
-func (transport Transport) PrepareRunLayout(
+func (vm VM) PrepareRunLayout(
 	ctx context.Context,
 	runID string,
 	caches []runcontainer.CacheMount,
@@ -709,7 +695,7 @@ func (transport Transport) PrepareRunLayout(
 		}
 		arguments = append(arguments, cache.Name)
 	}
-	if _, err := transport.shellScript(ctx, nil, prepareRunLayoutScript, arguments...); err != nil {
+	if _, err := vm.shellScript(ctx, nil, prepareRunLayoutScript, arguments...); err != nil {
 		return fmt.Errorf("prepare run directories: %w", err)
 	}
 	return nil
@@ -718,15 +704,15 @@ func (transport Transport) PrepareRunLayout(
 // EnsureGlobalStorage allocates the filesystem holding the profile every run
 // mounts, or verifies the one already there. Like a project, it outlives every
 // run, so no run may assume it is creating it.
-func (transport Transport) EnsureGlobalStorage(ctx context.Context) error {
-	return transport.storage(ctx, "ensure", "global", runcontainer.ProfileName)
+func (vm VM) EnsureGlobalStorage(ctx context.Context) error {
+	return vm.storage(ctx, "ensure", "global", runcontainer.ProfileName)
 }
 
 // ReadProfileRecord reports what the profile has installed. It is read at every
 // run start, because a run's copy of what the profile says does not survive the
 // run and the profile may have changed since the last one.
-func (transport Transport) ReadProfileRecord(ctx context.Context) (profile.Record, error) {
-	output, err := transport.readProfileFile(ctx, profile.RecordFile)
+func (vm VM) ReadProfileRecord(ctx context.Context) (profile.Record, error) {
+	output, err := vm.readProfileFile(ctx, profile.RecordFile)
 	if err != nil {
 		return profile.Record{}, fmt.Errorf("read profile record: %w", err)
 	}
@@ -735,8 +721,8 @@ func (transport Transport) ReadProfileRecord(ctx context.Context) (profile.Recor
 
 // ReadProfileOffers reports what npm last said the installed extensions
 // resolve to.
-func (transport Transport) ReadProfileOffers(ctx context.Context) (profile.Offers, error) {
-	output, err := transport.readProfileFile(ctx, profile.OffersFile)
+func (vm VM) ReadProfileOffers(ctx context.Context) (profile.Offers, error) {
+	output, err := vm.readProfileFile(ctx, profile.OffersFile)
 	if err != nil {
 		return profile.Offers{}, fmt.Errorf("read profile offers: %w", err)
 	}
@@ -746,16 +732,16 @@ func (transport Transport) ReadProfileOffers(ctx context.Context) (profile.Offer
 // ReadProfileTools reports what commands the profile has installed. It is what
 // the directory a run searches is rebuilt from, so it is the authority on that
 // directory's contents rather than a description of them.
-func (transport Transport) ReadProfileTools(ctx context.Context) (profile.Tools, error) {
-	output, err := transport.readProfileFile(ctx, profile.ToolsFile)
+func (vm VM) ReadProfileTools(ctx context.Context) (profile.Tools, error) {
+	output, err := vm.readProfileFile(ctx, profile.ToolsFile)
 	if err != nil {
 		return profile.Tools{}, fmt.Errorf("read profile tool record: %w", err)
 	}
 	return profile.ParseTools(output)
 }
 
-func (transport Transport) readProfileFile(ctx context.Context, name string) ([]byte, error) {
-	return transport.shellScript(
+func (vm VM) readProfileFile(ctx context.Context, name string) ([]byte, error) {
+	return vm.shellScript(
 		ctx, nil, readProfileFileScript, runcontainer.ProfilePinsPath(), name,
 	)
 }
@@ -764,14 +750,14 @@ func (transport Transport) readProfileFile(ctx context.Context, name string) ([]
 // A run that installed nothing, or whose storage is already gone, reports
 // nothing rather than failing: this is something to mention, never a reason to
 // fail the command that asked.
-func (transport Transport) ReadSelfInstalled(
+func (vm VM) ReadSelfInstalled(
 	ctx context.Context,
 	runID string,
 ) []profile.SelfInstalled {
 	if err := runid.Validate(runID); err != nil {
 		return nil
 	}
-	settings, err := transport.shellScript(ctx, nil, readRunSettingsScript, runID)
+	settings, err := vm.shellScript(ctx, nil, readRunSettingsScript, runID)
 	if err != nil {
 		return nil
 	}
@@ -783,7 +769,7 @@ func (transport Transport) ReadSelfInstalled(
 // generation or when the run added nothing, so a namespace never gains a
 // duplicate or an empty entry that a later run would restore in preference to
 // a usable one.
-func (transport Transport) PublishCacheSnapshot(
+func (vm VM) PublishCacheSnapshot(
 	ctx context.Context,
 	spec runcontainer.Spec,
 	cache runcontainer.CacheMount,
@@ -796,7 +782,7 @@ func (transport Transport) PublishCacheSnapshot(
 		[]string{spec.ProjectKey, cache.Name, cache.Key, spec.RunID},
 		publishArgs...,
 	)
-	if err := transport.bashScript(
+	if err := vm.bashScript(
 		ctx,
 		publishSnapshotScript,
 		"pisafe-publish",
@@ -810,7 +796,7 @@ func (transport Transport) PublishCacheSnapshot(
 // EvictCacheSnapshots trims one namespace to the newest keep generations, plus
 // every generation held names, which are the ones a recorded run may still
 // mount.
-func (transport Transport) EvictCacheSnapshots(
+func (vm VM) EvictCacheSnapshots(
 	ctx context.Context,
 	projectKey string,
 	name string,
@@ -833,7 +819,7 @@ func (transport Transport) EvictCacheSnapshots(
 		}
 		arguments = append(arguments, snapshot)
 	}
-	if _, err := transport.shellScript(ctx, nil, evictSnapshotsScript, arguments...); err != nil {
+	if _, err := vm.shellScript(ctx, nil, evictSnapshotsScript, arguments...); err != nil {
 		return fmt.Errorf("evict generations of cache %q: %w", name, err)
 	}
 	return nil
@@ -841,11 +827,11 @@ func (transport Transport) EvictCacheSnapshots(
 
 // ResetProjectCache empties one project's shared cache. Nothing a run needs
 // for correctness lives there, so throwing all of it away is always allowed.
-func (transport Transport) ResetProjectCache(ctx context.Context, projectKey string) error {
+func (vm VM) ResetProjectCache(ctx context.Context, projectKey string) error {
 	if err := runid.Validate(projectKey); err != nil {
 		return err
 	}
-	if _, err := transport.shellScript(ctx, nil, resetProjectCacheScript, projectKey); err != nil {
+	if _, err := vm.shellScript(ctx, nil, resetProjectCacheScript, projectKey); err != nil {
 		return fmt.Errorf("reset project cache: %w", err)
 	}
 	return nil
@@ -855,7 +841,7 @@ func (transport Transport) ResetProjectCache(ctx context.Context, projectKey str
 // store, where the project's later runs can read them. Sessions are not a
 // cache: they have no key, nothing is implied by a transcript's absence, and
 // nothing already promoted is ever replaced or evicted.
-func (transport Transport) PromoteSessions(
+func (vm VM) PromoteSessions(
 	ctx context.Context,
 	projectKey string,
 	runID string,
@@ -863,7 +849,7 @@ func (transport Transport) PromoteSessions(
 	if err := runid.Validate(runID); err != nil {
 		return err
 	}
-	if err := transport.promoteSessions(
+	if err := vm.promoteSessions(
 		ctx, projectKey, runcontainer.RunSessionUpperPath(runID), runID,
 	); err != nil {
 		return fmt.Errorf("promote run sessions: %w", err)
@@ -875,7 +861,7 @@ func (transport Transport) PromoteSessions(
 // checkout that moved keeps its history: a project key is a digest of the
 // checkout path, so a move needs the transcripts under a different key, and
 // promotion is already additive and needs no merge.
-func (transport Transport) AdoptSessions(
+func (vm VM) AdoptSessions(
 	ctx context.Context,
 	projectKey string,
 	fromKey string,
@@ -883,7 +869,7 @@ func (transport Transport) AdoptSessions(
 	if err := runid.Validate(fromKey); err != nil {
 		return err
 	}
-	if err := transport.promoteSessions(
+	if err := vm.promoteSessions(
 		ctx, projectKey, runcontainer.ProjectSessionsPath(fromKey), fromKey,
 	); err != nil {
 		return fmt.Errorf("adopt sessions of project %q: %w", fromKey, err)
@@ -891,7 +877,7 @@ func (transport Transport) AdoptSessions(
 	return nil
 }
 
-func (transport Transport) promoteSessions(
+func (vm VM) promoteSessions(
 	ctx context.Context,
 	projectKey string,
 	source string,
@@ -900,13 +886,13 @@ func (transport Transport) promoteSessions(
 	if err := runid.Validate(projectKey); err != nil {
 		return err
 	}
-	_, err := transport.shellScript(ctx, nil, promoteSessionsScript, projectKey, source, tag)
+	_, err := vm.shellScript(ctx, nil, promoteSessionsScript, projectKey, source, tag)
 	return err
 }
 
 // ArchiveSessions streams one project's transcripts out of the VM as a tar,
 // which is the half of a project store nothing can refetch.
-func (transport Transport) ArchiveSessions(
+func (vm VM) ArchiveSessions(
 	ctx context.Context,
 	projectKey string,
 	out io.Writer,
@@ -914,7 +900,7 @@ func (transport Transport) ArchiveSessions(
 	if err := runid.Validate(projectKey); err != nil {
 		return err
 	}
-	if err := transport.streamScript(ctx, out, archiveSessionsScript, projectKey); err != nil {
+	if err := vm.streamScript(ctx, out, archiveSessionsScript, projectKey); err != nil {
 		return fmt.Errorf("archive sessions of project %q: %w", projectKey, err)
 	}
 	return nil
@@ -923,7 +909,7 @@ func (transport Transport) ArchiveSessions(
 // RestoreSessions puts a backup's transcripts back into a project's session
 // store. Like promotion it only adds, so restoring twice, or into a store that
 // has been used since, costs nothing and overwrites nothing.
-func (transport Transport) RestoreSessions(
+func (vm VM) RestoreSessions(
 	ctx context.Context,
 	projectKey string,
 	archive io.Reader,
@@ -931,7 +917,7 @@ func (transport Transport) RestoreSessions(
 	if err := runid.Validate(projectKey); err != nil {
 		return err
 	}
-	if _, err := transport.shellScript(
+	if _, err := vm.shellScript(
 		ctx, archive, restoreSessionsScript, projectKey,
 	); err != nil {
 		return fmt.Errorf("restore sessions of project %q: %w", projectKey, err)
@@ -942,8 +928,8 @@ func (transport Transport) RestoreSessions(
 // ResetProfile takes everything back out of the profile. What it removes is
 // refetchable from npm; what a user loses is the record of what they had, which
 // is why nothing calls this without being asked to.
-func (transport Transport) ResetProfile(ctx context.Context) error {
-	if _, err := transport.shellScript(
+func (vm VM) ResetProfile(ctx context.Context) error {
+	if _, err := vm.shellScript(
 		ctx,
 		nil,
 		resetProfileScript,
@@ -958,7 +944,7 @@ func (transport Transport) ResetProfile(ctx context.Context) error {
 // WriteProfileRecord replaces pisafe's record of what the profile holds. It is
 // what a run is configured from, so it is written after the tree it names and
 // before the tree it stops naming: a record can be ahead of nothing.
-func (transport Transport) WriteProfileRecord(
+func (vm VM) WriteProfileRecord(
 	ctx context.Context,
 	record profile.Record,
 ) error {
@@ -966,7 +952,7 @@ func (transport Transport) WriteProfileRecord(
 	if err != nil {
 		return err
 	}
-	if err := transport.writeProfileFile(ctx, profile.RecordFile, content); err != nil {
+	if err := vm.writeProfileFile(ctx, profile.RecordFile, content); err != nil {
 		return fmt.Errorf("write profile record: %w", err)
 	}
 	return nil
@@ -974,7 +960,7 @@ func (transport Transport) WriteProfileRecord(
 
 // WriteProfileOffers keeps what a check learned, so the offer can be repeated
 // to the user without asking npm again.
-func (transport Transport) WriteProfileOffers(
+func (vm VM) WriteProfileOffers(
 	ctx context.Context,
 	offers profile.Offers,
 ) error {
@@ -982,7 +968,7 @@ func (transport Transport) WriteProfileOffers(
 	if err != nil {
 		return err
 	}
-	if err := transport.writeProfileFile(ctx, profile.OffersFile, content); err != nil {
+	if err := vm.writeProfileFile(ctx, profile.OffersFile, content); err != nil {
 		return fmt.Errorf("write profile offers: %w", err)
 	}
 	return nil
@@ -991,7 +977,7 @@ func (transport Transport) WriteProfileOffers(
 // WriteProfileTools replaces pisafe's record of the installed commands. The
 // directory a run searches is rebuilt from it first, so the record is never
 // ahead of what a run would find.
-func (transport Transport) WriteProfileTools(
+func (vm VM) WriteProfileTools(
 	ctx context.Context,
 	tools profile.Tools,
 ) error {
@@ -999,18 +985,18 @@ func (transport Transport) WriteProfileTools(
 	if err != nil {
 		return err
 	}
-	if err := transport.writeProfileFile(ctx, profile.ToolsFile, content); err != nil {
+	if err := vm.writeProfileFile(ctx, profile.ToolsFile, content); err != nil {
 		return fmt.Errorf("write profile tool record: %w", err)
 	}
 	return nil
 }
 
-func (transport Transport) writeProfileFile(
+func (vm VM) writeProfileFile(
 	ctx context.Context,
 	name string,
 	content []byte,
 ) error {
-	_, err := transport.shellScript(
+	_, err := vm.shellScript(
 		ctx,
 		bytes.NewReader(content),
 		writeProfileFileScript,
@@ -1023,7 +1009,7 @@ func (transport Transport) writeProfileFile(
 // ResolvePackage asks npm what a package spec resolves to right now. The
 // exact version and the integrity of that release are the pin, and they come
 // from the registry's own answer rather than from anything pisafe composes.
-func (transport Transport) ResolvePackage(
+func (vm VM) ResolvePackage(
 	ctx context.Context,
 	imageID string,
 	packageSpec string,
@@ -1032,7 +1018,7 @@ func (transport Transport) ResolvePackage(
 	if err != nil {
 		return profile.Pin{}, err
 	}
-	output, err := transport.Execute(ctx, nil, append([]string{"podman"}, args...)...)
+	output, err := vm.Execute(ctx, nil, append([]string{"podman"}, args...)...)
 	if err != nil {
 		return profile.Pin{}, fmt.Errorf("resolve %s: %w", packageSpec, err)
 	}
@@ -1044,7 +1030,7 @@ func (transport Transport) ResolvePackage(
 // answer is only what an offer is made from, and applying one resolves again.
 // A package that cannot be resolved is left out rather than failing the check,
 // because one unpublished or renamed package should not hide the others.
-func (transport Transport) ResolveExtensionUpdates(
+func (vm VM) ResolveExtensionUpdates(
 	ctx context.Context,
 	imageID string,
 	record profile.Record,
@@ -1053,7 +1039,7 @@ func (transport Transport) ResolveExtensionUpdates(
 	latest := make([]profile.Offer, 0, len(record.Extensions))
 	var failures []error
 	for _, extension := range record.Extensions {
-		resolved, err := transport.ResolvePackage(ctx, imageID, extension.Name)
+		resolved, err := vm.ResolvePackage(ctx, imageID, extension.Name)
 		if err != nil {
 			failures = append(failures, err)
 			continue
@@ -1107,7 +1093,7 @@ func parseResolvedExtension(output []byte) (profile.Pin, error) {
 // root the caller names. The container fetches and builds the tree; this script
 // is what makes it the profile's, so nothing that ran with the network open
 // ever held the profile open for writing.
-func (transport Transport) installPackage(
+func (vm VM) installPackage(
 	ctx context.Context,
 	imageID string,
 	root string,
@@ -1123,7 +1109,7 @@ func (transport Transport) installPackage(
 		return err
 	}
 	arguments := append([]string{root}, installArgs...)
-	if err := transport.bashScript(
+	if err := vm.bashScript(
 		ctx,
 		installPackageScript,
 		"pisafe-package",
@@ -1135,8 +1121,8 @@ func (transport Transport) installPackage(
 }
 
 // removePackage takes one module root out of the profile.
-func (transport Transport) removePackage(ctx context.Context, root string) error {
-	if _, err := transport.shellScript(ctx, nil, removePackageScript, root); err != nil {
+func (vm VM) removePackage(ctx context.Context, root string) error {
+	if _, err := vm.shellScript(ctx, nil, removePackageScript, root); err != nil {
 		return fmt.Errorf("remove %s: %w", root, err)
 	}
 	return nil
@@ -1148,7 +1134,7 @@ func (transport Transport) removePackage(ctx context.Context, root string) error
 // does not describe itself consistently never becomes half of a path, whichever
 // namespace it was headed for.
 
-func (transport Transport) InstallExtension(
+func (vm VM) InstallExtension(
 	ctx context.Context,
 	imageID string,
 	extension profile.Pin,
@@ -1156,24 +1142,24 @@ func (transport Transport) InstallExtension(
 	if err := extension.Validate(); err != nil {
 		return err
 	}
-	return transport.installPackage(
+	return vm.installPackage(
 		ctx, imageID, runcontainer.ExtensionInstallRoot(extension.Directory), extension,
 	)
 }
 
-func (transport Transport) RemoveExtension(
+func (vm VM) RemoveExtension(
 	ctx context.Context,
 	extension profile.Pin,
 ) error {
 	if err := extension.Validate(); err != nil {
 		return err
 	}
-	return transport.removePackage(
+	return vm.removePackage(
 		ctx, runcontainer.ExtensionInstallRoot(extension.Directory),
 	)
 }
 
-func (transport Transport) InstallTool(
+func (vm VM) InstallTool(
 	ctx context.Context,
 	imageID string,
 	tool profile.Pin,
@@ -1181,30 +1167,30 @@ func (transport Transport) InstallTool(
 	if err := tool.Validate(); err != nil {
 		return err
 	}
-	return transport.installPackage(
+	return vm.installPackage(
 		ctx, imageID, runcontainer.ToolInstallRoot(tool.Directory), tool,
 	)
 }
 
-func (transport Transport) RemoveTool(ctx context.Context, tool profile.Pin) error {
+func (vm VM) RemoveTool(ctx context.Context, tool profile.Pin) error {
 	if err := tool.Validate(); err != nil {
 		return err
 	}
-	return transport.removePackage(ctx, runcontainer.ToolInstallRoot(tool.Directory))
+	return vm.removePackage(ctx, runcontainer.ToolInstallRoot(tool.Directory))
 }
 
 // ToolBinaries reports the commands one installed tool claims. Which names a
 // package installs is the package's own choice, so they are read back from the
 // tree rather than asked for, and every one of them is held to what pisafe can
 // put in a path and print.
-func (transport Transport) ToolBinaries(
+func (vm VM) ToolBinaries(
 	ctx context.Context,
 	tool profile.Pin,
 ) ([]string, error) {
 	if err := tool.Validate(); err != nil {
 		return nil, err
 	}
-	output, err := transport.shellScript(
+	output, err := vm.shellScript(
 		ctx,
 		nil,
 		toolBinariesScript,
@@ -1227,7 +1213,7 @@ func (transport Transport) ToolBinaries(
 
 // LinkToolBinaries rebuilds the directory a run searches so that it holds
 // exactly what the record names.
-func (transport Transport) LinkToolBinaries(
+func (vm VM) LinkToolBinaries(
 	ctx context.Context,
 	tools profile.Tools,
 ) error {
@@ -1242,17 +1228,17 @@ func (transport Transport) LinkToolBinaries(
 			runcontainer.ToolBinaryTarget(link.Directory, link.Binary),
 		)
 	}
-	if _, err := transport.shellScript(ctx, nil, linkToolBinariesScript, arguments...); err != nil {
+	if _, err := vm.shellScript(ctx, nil, linkToolBinariesScript, arguments...); err != nil {
 		return fmt.Errorf("link the profile's commands: %w", err)
 	}
 	return nil
 }
 
-func (transport Transport) storage(ctx context.Context, action, scope, id string) error {
+func (vm VM) storage(ctx context.Context, action, scope, id string) error {
 	if err := runid.Validate(id); err != nil {
 		return err
 	}
-	if _, err := transport.Execute(
+	if _, err := vm.Execute(
 		ctx,
 		nil,
 		"sudo", "/usr/local/sbin/pisafe-storage", action, scope, id,
@@ -1264,14 +1250,14 @@ func (transport Transport) storage(ctx context.Context, action, scope, id string
 
 // ImportStage copies the VM-side stage into the run's quota-limited workspace.
 // The source directory is never mounted into the container or onto the Mac.
-func (transport Transport) ImportStage(
+func (vm VM) ImportStage(
 	ctx context.Context,
 	runID string,
 ) error {
 	if err := runid.Validate(runID); err != nil {
 		return err
 	}
-	if err := transport.bashScript(ctx, importStageScript, "pisafe-import", runID); err != nil {
+	if err := vm.bashScript(ctx, importStageScript, "pisafe-import", runID); err != nil {
 		return fmt.Errorf("import stage into run workspace: %w", err)
 	}
 	return nil
@@ -1280,7 +1266,7 @@ func (transport Transport) ImportStage(
 // FetchApplyArtifact streams one bundle out of the run's private storage into
 // destination, which must not already exist. The transfer is kept only if the
 // received bytes hash to what the run declared.
-func (transport Transport) FetchApplyArtifact(
+func (vm VM) FetchApplyArtifact(
 	ctx context.Context,
 	runID string,
 	artifact gitstage.ApplyArtifact,
@@ -1312,7 +1298,7 @@ func (transport Transport) FetchApplyArtifact(
 		writer:    io.MultiWriter(file, digest),
 		remaining: maxApplyArtifactBytes,
 	}
-	if err := transport.streamScript(
+	if err := vm.streamScript(
 		ctx,
 		bounded,
 		fetchApplyScript,
@@ -1336,11 +1322,11 @@ func (transport Transport) FetchApplyArtifact(
 
 // RemoveApplyPackage deletes the bundles a run produced. The run rebuilds them
 // from its workspace whenever apply runs again.
-func (transport Transport) RemoveApplyPackage(ctx context.Context, runID string) error {
+func (vm VM) RemoveApplyPackage(ctx context.Context, runID string) error {
 	if err := runid.Validate(runID); err != nil {
 		return err
 	}
-	if _, err := transport.shellScript(ctx, nil, removeApplyScript, runID); err != nil {
+	if _, err := vm.shellScript(ctx, nil, removeApplyScript, runID); err != nil {
 		return fmt.Errorf("remove apply package: %w", err)
 	}
 	return nil
@@ -1361,7 +1347,7 @@ func (bounded *boundedWriter) Write(data []byte) (int, error) {
 	return bounded.writer.Write(data)
 }
 
-func (transport Transport) uploadArtifact(
+func (vm VM) uploadArtifact(
 	ctx context.Context,
 	runID string,
 	name string,
@@ -1409,7 +1395,7 @@ func (transport Transport) uploadArtifact(
 		hash = hex.EncodeToString(digest[:])
 	}
 
-	if _, err := transport.shellScript(
+	if _, err := vm.shellScript(
 		ctx,
 		reader,
 		uploadStageScript,
@@ -1433,22 +1419,22 @@ func scriptCommand(interpreter, script, name string, args []string) []string {
 	return append(command, args...)
 }
 
-func (transport Transport) shellScript(
+func (vm VM) shellScript(
 	ctx context.Context,
 	stdin io.Reader,
 	script string,
 	args ...string,
 ) ([]byte, error) {
-	return transport.Execute(ctx, stdin, scriptCommand("sh", script, "pisafe-remote", args)...)
+	return vm.Execute(ctx, stdin, scriptCommand("sh", script, "pisafe-remote", args)...)
 }
 
-func (transport Transport) streamScript(
+func (vm VM) streamScript(
 	ctx context.Context,
 	stdout io.Writer,
 	script string,
 	args ...string,
 ) error {
-	return transport.StreamExecute(
+	return vm.StreamExecute(
 		ctx,
 		stdout,
 		scriptCommand("sh", script, "pisafe-remote", args)...,
@@ -1458,12 +1444,12 @@ func (transport Transport) streamScript(
 // bashScript runs a script that needs more than POSIX sh — pipefail, in every
 // case there is one. Each names itself, because these are the scripts whose
 // diagnostics a user is most likely to see.
-func (transport Transport) bashScript(
+func (vm VM) bashScript(
 	ctx context.Context,
 	script string,
 	name string,
 	args ...string,
 ) error {
-	_, err := transport.Execute(ctx, nil, scriptCommand("bash", script, name, args)...)
+	_, err := vm.Execute(ctx, nil, scriptCommand("bash", script, name, args)...)
 	return err
 }

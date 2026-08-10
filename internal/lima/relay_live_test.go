@@ -51,8 +51,8 @@ func TestLiveBrokerReverseRelay(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	transport := lima.NewTransport()
-	gateway, err := transport.SSHGateway(ctx)
+	vm := lima.New()
+	gateway, err := vm.SSHGateway(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestLiveBrokerReverseRelay(t *testing.T) {
 			forward.Close()
 		}
 	}()
-	waitForLiveRelay(t, ctx, transport, forward)
+	waitForLiveRelay(t, ctx, vm, forward)
 
 	runLive(t, ctx, "bash", "-ec", `
 exec 3<>/dev/tcp/192.0.2.1/18080
@@ -92,7 +92,7 @@ fi
 	}
 	closed = true
 	deadline := time.Now().Add(15 * time.Second)
-	for liveBrokerPortIsBound(ctx, transport) {
+	for liveBrokerPortIsBound(ctx, vm) {
 		if time.Now().After(deadline) {
 			t.Fatal("broker listener survived relay shutdown")
 		}
@@ -105,10 +105,10 @@ fi
 // sshd still holds the forwarded port at all. It unbinds a moment after the
 // client owning the forward exits, so a test that returned as soon as the
 // relay stopped answering would leave the port taken for the next one.
-func liveBrokerPortIsBound(ctx context.Context, transport lima.Transport) bool {
+func liveBrokerPortIsBound(ctx context.Context, vm lima.VM) bool {
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	_, err := transport.Execute(probeCtx, nil, "bash", "-c", fmt.Sprintf(
+	_, err := vm.Execute(probeCtx, nil, "bash", "-c", fmt.Sprintf(
 		"exec 3<>/dev/tcp/%s/%d",
 		lima.BrokerAddress,
 		lima.BrokerPort,
@@ -119,7 +119,7 @@ func liveBrokerPortIsBound(ctx context.Context, transport lima.Transport) bool {
 func waitForLiveRelay(
 	t *testing.T,
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	forward *lima.ReverseForward,
 ) {
 	t.Helper()
@@ -132,7 +132,7 @@ func waitForLiveRelay(
 		default:
 		}
 		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		lastErr = transport.ProbeBrokerListener(probeCtx)
+		lastErr = vm.ProbeBrokerListener(probeCtx)
 		cancel()
 		if lastErr == nil {
 			return
@@ -154,8 +154,8 @@ func TestLiveSecondRelayFailsClosed(t *testing.T) {
 	defer cancel()
 	port := liveBrokerStub(t)
 
-	transport := lima.NewTransport()
-	gateway, err := transport.SSHGateway(ctx)
+	vm := lima.New()
+	gateway, err := vm.SSHGateway(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestLiveSecondRelayFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer first.Close()
-	waitForLiveRelay(t, ctx, transport, first)
+	waitForLiveRelay(t, ctx, vm, first)
 
 	second, err := lima.StartReverseForward(ctx, gateway, port)
 	if err != nil {

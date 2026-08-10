@@ -38,16 +38,16 @@ func runStop(ctx context.Context, runID string, out io.Writer) error {
 	if manifest.LastError != "" {
 		fmt.Fprintf(out, "Warning: %s\n", manifest.LastError)
 	}
-	transport := lima.NewTransport()
+	vm := lima.New()
 	// What the run installed into its own package store is reported because
 	// nothing else will: a run's home is reclaimed with the run. It is an offer
 	// in the same sense an update is — pisafe names the command and applies
 	// nothing, because installing into the profile is a decision about every
 	// later run of every project.
-	printSelfInstalled(out, runID, transport.ReadSelfInstalled(ctx, runID))
+	printSelfInstalled(out, runID, vm.ReadSelfInstalled(ctx, runID))
 	// The stopped run's own image is enough to ask npm a question, which keeps
 	// the check off the path that installs and verifies the current one.
-	notifyExtensionUpdates(ctx, transport, manifest.Image, out)
+	notifyExtensionUpdates(ctx, vm, manifest.Image, out)
 	return nil
 }
 
@@ -212,13 +212,13 @@ func runDiscard(ctx context.Context, runID string, out io.Writer) error {
 // prepareUnverified builds the controller for a command that starts no run:
 // one that reads or writes a run's workspace from outside it, or one that only
 // ends or removes what a run already holds. Such a command is not held to the
-// VM's boundary records, for the reasons on lima.Manager.StartUnverified.
+// VM's boundary records, for the reasons on lima.VM.StartUnverified.
 func prepareUnverified(ctx context.Context) (runctl.Controller, error) {
 	controller, _, err := newController(ctx)
 	if err != nil {
 		return runctl.Controller{}, err
 	}
-	if err := lima.NewManager().StartUnverified(ctx); err != nil {
+	if err := lima.New().StartUnverified(ctx); err != nil {
 		return runctl.Controller{}, err
 	}
 	return controller, nil
@@ -248,7 +248,7 @@ func ensureManagedRunImage(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	image, err := runimage.NewInstaller(lima.NewTransport()).Ensure(ctx, artifacts)
+	image, err := runimage.NewInstaller(lima.New()).Ensure(ctx, artifacts)
 	if err != nil {
 		return "", fmt.Errorf("install managed run image: %w", err)
 	}
@@ -297,7 +297,7 @@ func newController(ctx context.Context) (runctl.Controller, broker.Catalog, erro
 		return runctl.Controller{}, nil, err
 	}
 	return runctl.New(
-		lima.NewTransport(),
+		lima.New(),
 		runstate.NewStore(root),
 		runssh.NewStore(filepath.Join(root, "ssh")),
 		inferenceConfig(catalog),
@@ -313,5 +313,5 @@ func startBoundary(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("discover host networks: %w", err)
 	}
-	return lima.NewManager().Start(ctx, prefixes)
+	return lima.New().Start(ctx, prefixes)
 }

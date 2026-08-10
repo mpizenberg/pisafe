@@ -35,35 +35,35 @@ func runExtension(ctx context.Context, args []string, out io.Writer) error {
 	if len(args) == 0 {
 		return errExtensionUsage
 	}
-	transport := lima.NewTransport()
+	vm := lima.New()
 	switch args[0] {
 	case "list":
 		if len(args) != 1 {
 			return errExtensionUsage
 		}
-		return listExtensions(ctx, transport, out)
+		return listExtensions(ctx, vm, out)
 	case "install":
 		if len(args) != 2 {
 			return errExtensionUsage
 		}
-		return installExtension(ctx, transport, args[1], out)
+		return installExtension(ctx, vm, args[1], out)
 	case "update":
-		return updateExtensions(ctx, transport, args[1:], out)
+		return updateExtensions(ctx, vm, args[1:], out)
 	case "remove", "uninstall":
 		if len(args) != 2 {
 			return errExtensionUsage
 		}
-		return removeExtension(ctx, transport, args[1], out)
+		return removeExtension(ctx, vm, args[1], out)
 	default:
 		return errExtensionUsage
 	}
 }
 
-func listExtensions(ctx context.Context, transport lima.Transport, out io.Writer) error {
-	if err := transport.EnsureGlobalStorage(ctx); err != nil {
+func listExtensions(ctx context.Context, vm lima.VM, out io.Writer) error {
+	if err := vm.EnsureGlobalStorage(ctx); err != nil {
 		return err
 	}
-	record, err := transport.ReadProfileRecord(ctx)
+	record, err := vm.ReadProfileRecord(ctx)
 	if err != nil {
 		return err
 	}
@@ -74,7 +74,7 @@ func listExtensions(ctx context.Context, transport lima.Transport, out io.Writer
 	for _, extension := range record.Extensions {
 		fmt.Fprintf(out, "%s@%s\n  %s\n", extension.Name, extension.Version, extension.Integrity)
 	}
-	offers, err := transport.ReadProfileOffers(ctx)
+	offers, err := vm.ReadProfileOffers(ctx)
 	if err != nil {
 		return err
 	}
@@ -88,26 +88,26 @@ func listExtensions(ctx context.Context, transport lima.Transport, out io.Writer
 // description of whatever arrived.
 func installExtension(
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	packageSpec string,
 	out io.Writer,
 ) error {
 	if err := validatePackageSpec(packageSpec); err != nil {
 		return err
 	}
-	imageID, err := ensureRunImage(ctx, transport)
+	imageID, err := ensureRunImage(ctx, vm)
 	if err != nil {
 		return err
 	}
-	record, err := transport.ReadProfileRecord(ctx)
+	record, err := vm.ReadProfileRecord(ctx)
 	if err != nil {
 		return err
 	}
-	extension, err := transport.ResolvePackage(ctx, imageID, packageSpec)
+	extension, err := vm.ResolvePackage(ctx, imageID, packageSpec)
 	if err != nil {
 		return err
 	}
-	if _, err := pinExtension(ctx, transport, imageID, record, extension); err != nil {
+	if _, err := pinExtension(ctx, vm, imageID, record, extension); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "Installed %s@%s\n  %s\n", extension.Name, extension.Version, extension.Integrity)
@@ -124,7 +124,7 @@ func installExtension(
 // nothing.
 func updateExtensions(
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	names []string,
 	out io.Writer,
 ) error {
@@ -133,19 +133,19 @@ func updateExtensions(
 			return err
 		}
 	}
-	imageID, err := ensureRunImage(ctx, transport)
+	imageID, err := ensureRunImage(ctx, vm)
 	if err != nil {
 		return err
 	}
-	record, err := transport.ReadProfileRecord(ctx)
+	record, err := vm.ReadProfileRecord(ctx)
 	if err != nil {
 		return err
 	}
 	if len(names) == 0 {
-		return reportExtensionUpdates(ctx, transport, imageID, record, out)
+		return reportExtensionUpdates(ctx, vm, imageID, record, out)
 	}
 	for _, name := range names {
-		record, err = applyExtensionUpdate(ctx, transport, imageID, record, name, out)
+		record, err = applyExtensionUpdate(ctx, vm, imageID, record, name, out)
 		if err != nil {
 			return err
 		}
@@ -158,7 +158,7 @@ func updateExtensions(
 // asking again.
 func reportExtensionUpdates(
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	imageID string,
 	record profile.Record,
 	out io.Writer,
@@ -167,14 +167,14 @@ func reportExtensionUpdates(
 		fmt.Fprintln(out, "No extensions installed.")
 		return nil
 	}
-	offers, checkErr := transport.ResolveExtensionUpdates(ctx, imageID, record, time.Now())
+	offers, checkErr := vm.ResolveExtensionUpdates(ctx, imageID, record, time.Now())
 	if checkErr != nil {
 		fmt.Fprintf(out, "Warning: %s\n", checkErr)
 	}
 	if len(offers.Latest) == 0 {
 		return checkErr
 	}
-	if err := transport.WriteProfileOffers(ctx, offers); err != nil {
+	if err := vm.WriteProfileOffers(ctx, offers); err != nil {
 		return err
 	}
 	updates := record.Pending(offers)
@@ -191,7 +191,7 @@ func reportExtensionUpdates(
 // never what the fetched bytes are checked against.
 func applyExtensionUpdate(
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	imageID string,
 	record profile.Record,
 	name string,
@@ -205,7 +205,7 @@ func applyExtensionUpdate(
 			name,
 		)
 	}
-	resolved, err := transport.ResolvePackage(ctx, imageID, name)
+	resolved, err := vm.ResolvePackage(ctx, imageID, name)
 	if err != nil {
 		return record, err
 	}
@@ -213,7 +213,7 @@ func applyExtensionUpdate(
 		fmt.Fprintf(out, "%s is already at %s, which is what npm resolves it to.\n", name, installed.Version)
 		return record, nil
 	}
-	updated, err := pinExtension(ctx, transport, imageID, record, resolved)
+	updated, err := pinExtension(ctx, vm, imageID, record, resolved)
 	if err != nil {
 		return record, err
 	}
@@ -231,16 +231,16 @@ func applyExtensionUpdate(
 // here, so what is recorded is what the fetched bytes were checked against.
 func pinExtension(
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	imageID string,
 	record profile.Record,
 	pin profile.Pin,
 ) (profile.Record, error) {
-	if err := transport.InstallExtension(ctx, imageID, pin); err != nil {
+	if err := vm.InstallExtension(ctx, imageID, pin); err != nil {
 		return record, err
 	}
 	updated := record.With(pin)
-	if err := transport.WriteProfileRecord(ctx, updated); err != nil {
+	if err := vm.WriteProfileRecord(ctx, updated); err != nil {
 		return record, err
 	}
 	return updated, nil
@@ -254,19 +254,19 @@ func pinExtension(
 // being reachable.
 func notifyExtensionUpdates(
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	imageID string,
 	out io.Writer,
 ) {
-	record, err := transport.ReadProfileRecord(ctx)
+	record, err := vm.ReadProfileRecord(ctx)
 	if err != nil || len(record.Extensions) == 0 {
 		return
 	}
-	offers, err := transport.ReadProfileOffers(ctx)
+	offers, err := vm.ReadProfileOffers(ctx)
 	if err != nil || !offers.Stale(time.Now(), updateCheckInterval) {
 		return
 	}
-	refreshed := refreshExtensionOffers(ctx, transport, imageID, record, offers)
+	refreshed := refreshExtensionOffers(ctx, vm, imageID, record, offers)
 	printExtensionUpdates(out, record.PendingChange(offers, refreshed))
 }
 
@@ -275,7 +275,7 @@ func notifyExtensionUpdates(
 // check, so it neither replaces a standing offer nor counts as having happened.
 func refreshExtensionOffers(
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	imageID string,
 	record profile.Record,
 	offers profile.Offers,
@@ -285,11 +285,11 @@ func refreshExtensionOffers(
 	// A package that would not resolve is already left out of the result, so
 	// the error here says only that the offer may be short — which is not worth
 	// a line on a terminal the user is reading for a stop.
-	refreshed, _ := transport.ResolveExtensionUpdates(ctx, imageID, record, time.Now())
+	refreshed, _ := vm.ResolveExtensionUpdates(ctx, imageID, record, time.Now())
 	if len(refreshed.Latest) == 0 {
 		return offers
 	}
-	if err := transport.WriteProfileOffers(ctx, refreshed); err != nil {
+	if err := vm.WriteProfileOffers(ctx, refreshed); err != nil {
 		return offers
 	}
 	return refreshed
@@ -310,17 +310,17 @@ func printExtensionUpdates(out io.Writer, updates []profile.Update) {
 // so a run starting while the tree is being deleted was never going to load it.
 func removeExtension(
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	name string,
 	out io.Writer,
 ) error {
 	if err := profile.ValidatePackageName(name); err != nil {
 		return err
 	}
-	if err := transport.EnsureGlobalStorage(ctx); err != nil {
+	if err := vm.EnsureGlobalStorage(ctx); err != nil {
 		return err
 	}
-	record, err := transport.ReadProfileRecord(ctx)
+	record, err := vm.ReadProfileRecord(ctx)
 	if err != nil {
 		return err
 	}
@@ -328,10 +328,10 @@ func removeExtension(
 	if !found {
 		return fmt.Errorf("%s is not installed", name)
 	}
-	if err := transport.WriteProfileRecord(ctx, remaining); err != nil {
+	if err := vm.WriteProfileRecord(ctx, remaining); err != nil {
 		return err
 	}
-	if err := transport.RemoveExtension(ctx, removed); err != nil {
+	if err := vm.RemoveExtension(ctx, removed); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "Removed %s@%s\n", removed.Name, removed.Version)
@@ -356,7 +356,7 @@ func validatePackageSpec(packageSpec string) error {
 // ensureRunImage gives the extension commands the same image a run gets. The
 // package is fetched and installed by a container of that image, so a profile
 // built by one and loaded by another is never a question.
-func ensureRunImage(ctx context.Context, transport lima.Transport) (string, error) {
+func ensureRunImage(ctx context.Context, vm lima.VM) (string, error) {
 	artifacts, err := packagedRunArtifacts()
 	if err != nil {
 		return "", err
@@ -365,16 +365,16 @@ func ensureRunImage(ctx context.Context, transport lima.Transport) (string, erro
 	if err != nil {
 		return "", fmt.Errorf("discover host networks: %w", err)
 	}
-	if err := lima.NewManager().Ensure(ctx, prefixes); err != nil {
+	if err := vm.Ensure(ctx, prefixes); err != nil {
 		return "", fmt.Errorf("prepare Lima boundary: %w", err)
 	}
-	image, err := runimage.NewInstaller(transport).Ensure(ctx, artifacts)
+	image, err := runimage.NewInstaller(vm).Ensure(ctx, artifacts)
 	if err != nil {
 		return "", fmt.Errorf("install managed run image: %w", err)
 	}
 	// The profile filesystem is what every one of these commands then writes to,
 	// and it can only be laid out once the VM this just brought up is there.
-	if err := transport.EnsureGlobalStorage(ctx); err != nil {
+	if err := vm.EnsureGlobalStorage(ctx); err != nil {
 		return "", err
 	}
 	return image, nil

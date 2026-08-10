@@ -48,29 +48,29 @@ func TestLiveSSHStageAndContainerMaterialize(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	transport := NewTransport()
-	_, err = transport.CreateStage(ctx, prepared)
+	vm := New()
+	_, err = vm.CreateStage(ctx, prepared)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
-		if err := transport.RemoveRun(context.Background(), runID); err != nil {
+		if err := vm.RemoveRun(context.Background(), runID); err != nil {
 			t.Errorf("remove remote run: %v", err)
 		}
 	}()
 
 	spec := runcontainer.DefaultSpec(runID, liveProjectKey, imageID)
-	if err := transport.EnsureProjectStorage(ctx, liveProjectKey); err != nil {
+	if err := vm.EnsureProjectStorage(ctx, liveProjectKey); err != nil {
 		t.Fatal(err)
 	}
-	if err := transport.CreateRunStorage(ctx, runID); err != nil {
+	if err := vm.CreateRunStorage(ctx, runID); err != nil {
 		t.Fatal(err)
 	}
-	if err := transport.PrepareRunLayout(ctx, runID, spec.Caches); err != nil {
+	if err := vm.PrepareRunLayout(ctx, runID, spec.Caches); err != nil {
 		t.Fatal(err)
 	}
-	defer cleanupLiveContainer(t, transport, spec)
-	if err := transport.ImportStage(ctx, runID); err != nil {
+	defer cleanupLiveContainer(t, vm, spec)
+	if err := vm.ImportStage(ctx, runID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -88,7 +88,7 @@ func TestLiveSSHStageAndContainerMaterialize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hostPublicKey, err := transport.Execute(
+	hostPublicKey, err := vm.Execute(
 		ctx,
 		strings.NewReader(preparedSSH.PublicKey+"\n"),
 		append([]string{"podman"}, configureSSHArgs...)...,
@@ -101,10 +101,10 @@ func TestLiveSSHStageAndContainerMaterialize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := transport.Execute(ctx, nil, append([]string{"podman"}, runArgs...)...); err != nil {
+	if _, err := vm.Execute(ctx, nil, append([]string{"podman"}, runArgs...)...); err != nil {
 		t.Fatal(err)
 	}
-	publishedPorts, err := transport.Execute(
+	publishedPorts, err := vm.Execute(
 		ctx,
 		nil,
 		"podman", "port", spec.ContainerName(),
@@ -115,7 +115,7 @@ func TestLiveSSHStageAndContainerMaterialize(t *testing.T) {
 	if strings.TrimSpace(string(publishedPorts)) != "" {
 		t.Fatalf("run container exposed VM ports: %s", publishedPorts)
 	}
-	gateway, err := transport.SSHGateway(ctx)
+	gateway, err := vm.SSHGateway(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestLiveSSHStageAndContainerMaterialize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := transport.Execute(
+	if _, err := vm.Execute(
 		ctx,
 		nil,
 		append([]string{"podman"}, materializeArgs...)...,
@@ -143,7 +143,7 @@ func TestLiveSSHStageAndContainerMaterialize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := transport.Execute(
+	if _, err := vm.Execute(
 		ctx,
 		nil,
 		append([]string{"podman"}, cleanupStageArgs...)...,
@@ -169,7 +169,7 @@ func TestLiveSSHStageAndContainerMaterialize(t *testing.T) {
 		spec.ContainerName(),
 		"sh", "-ceu", strings.Join(assertions, "\n"),
 	}
-	if _, err := transport.Execute(ctx, nil, execArgs...); err != nil {
+	if _, err := vm.Execute(ctx, nil, execArgs...); err != nil {
 		t.Fatal(err)
 	}
 
@@ -182,12 +182,12 @@ printf 'from-zed-compatible-ssh\n' > /work/project/zed-visible.txt
 printf '%s\n' "$HOME"
 `)
 	if err != nil {
-		logs, _ := transport.Execute(
+		logs, _ := vm.Execute(
 			ctx,
 			nil,
 			"podman", "logs", spec.ContainerName(),
 		)
-		state, _ := transport.Execute(
+		state, _ := vm.Execute(
 			ctx,
 			nil,
 			"podman", "inspect",
@@ -199,7 +199,7 @@ printf '%s\n' "$HOME"
 	if strings.TrimSpace(sshOutput) != "/home/node" {
 		t.Fatalf("SSH HOME = %q", sshOutput)
 	}
-	if _, err := transport.Execute(
+	if _, err := vm.Execute(
 		ctx,
 		nil,
 		"podman", "exec",
@@ -212,9 +212,9 @@ pi --version >/dev/null`,
 	); err != nil {
 		t.Fatal(err)
 	}
-	assertLiveForward(t, ctx, transport, spec, endpoint)
+	assertLiveForward(t, ctx, vm, spec, endpoint)
 
-	if _, err := transport.Execute(
+	if _, err := vm.Execute(
 		ctx,
 		nil,
 		"podman", "exec",
@@ -243,14 +243,14 @@ pi --version >/dev/null`,
 func assertLiveForward(
 	t *testing.T,
 	ctx context.Context,
-	transport Transport,
+	vm VM,
 	spec runcontainer.Spec,
 	endpoint runssh.Endpoint,
 ) {
 	t.Helper()
 	const remotePort = 8099
 	const payload = "pisafe-forwarded"
-	if _, err := transport.Execute(
+	if _, err := vm.Execute(
 		ctx,
 		nil,
 		"podman", "exec", "--detach", "--user", "1000:1000",
@@ -460,16 +460,16 @@ func liveGit(t *testing.T, directory string, args ...string) string {
 	return strings.TrimSpace(string(output))
 }
 
-func cleanupLiveContainer(t *testing.T, transport Transport, spec runcontainer.Spec) {
+func cleanupLiveContainer(t *testing.T, vm VM, spec runcontainer.Spec) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, containerErr := transport.Execute(
+	_, containerErr := vm.Execute(
 		ctx,
 		nil,
 		"podman", "rm", "--force", spec.ContainerName(),
 	)
-	storageErr := transport.RemoveRunStorage(ctx, spec.RunID)
+	storageErr := vm.RemoveRunStorage(ctx, spec.RunID)
 	if containerErr != nil {
 		t.Errorf("remove live container: %v", containerErr)
 	}

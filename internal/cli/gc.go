@@ -32,7 +32,7 @@ func runGC(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	installer := runimage.NewInstaller(lima.NewTransport())
+	installer := runimage.NewInstaller(lima.New())
 	recipe := artifacts.RecipeDigest()
 
 	// Nothing is pruned without a complete set of images runs still need, so

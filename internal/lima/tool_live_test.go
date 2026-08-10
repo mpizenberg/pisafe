@@ -20,17 +20,17 @@ const liveCommitlint = "@commitlint/cli@20.1.0"
 // seedProfileTools puts back what was installed before the test when it ends.
 func seedProfileTools(t *testing.T, ctx context.Context, tools profile.Tools) {
 	t.Helper()
-	transport := lima.NewTransport()
-	previous, err := transport.ReadProfileTools(ctx)
+	vm := lima.New()
+	previous, err := vm.ReadProfileTools(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	write := func(ctx context.Context, tools profile.Tools) {
-		if err := transport.LinkToolBinaries(ctx, tools); err != nil {
+		if err := vm.LinkToolBinaries(ctx, tools); err != nil {
 			t.Errorf("link the profile's commands: %v", err)
 			return
 		}
-		if err := transport.WriteProfileTools(ctx, tools); err != nil {
+		if err := vm.WriteProfileTools(ctx, tools); err != nil {
 			t.Errorf("write the profile's tool record: %v", err)
 		}
 	}
@@ -53,31 +53,31 @@ func TestLiveAnInstalledToolIsOnEveryRunsPathAndNeverWritable(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	transport := lima.NewTransport()
-	if err := transport.EnsureGlobalStorage(ctx); err != nil {
+	vm := lima.New()
+	if err := vm.EnsureGlobalStorage(ctx); err != nil {
 		t.Fatal(err)
 	}
 	seedProfileTools(t, ctx, profile.Tools{Version: profile.ToolsVersion})
 
-	pin, err := transport.ResolvePackage(ctx, imageID, liveCommitlint)
+	pin, err := vm.ResolvePackage(ctx, imageID, liveCommitlint)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if pin.Name != "@commitlint/cli" || pin.Version != "20.1.0" {
 		t.Fatalf("resolved %+v", pin)
 	}
-	if err := transport.InstallTool(ctx, imageID, pin); err != nil {
+	if err := vm.InstallTool(ctx, imageID, pin); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := transport.RemoveTool(context.Background(), pin); err != nil {
+		if err := vm.RemoveTool(context.Background(), pin); err != nil {
 			t.Errorf("remove live tool: %v", err)
 		}
 	})
 
 	// The tree holds a link for every package in it that ships a command. Only
 	// the one the user named is the tool's to claim.
-	binaries, err := transport.ToolBinaries(ctx, pin)
+	binaries, err := vm.ToolBinaries(ctx, pin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,10 +86,10 @@ func TestLiveAnInstalledToolIsOnEveryRunsPathAndNeverWritable(t *testing.T) {
 	}
 	installed := profile.Tools{Version: profile.ToolsVersion}.
 		With(profile.Tool{Pin: pin, Binaries: binaries})
-	if err := transport.LinkToolBinaries(ctx, installed); err != nil {
+	if err := vm.LinkToolBinaries(ctx, installed); err != nil {
 		t.Fatal(err)
 	}
-	if err := transport.WriteProfileTools(ctx, installed); err != nil {
+	if err := vm.WriteProfileTools(ctx, installed); err != nil {
 		t.Fatal(err)
 	}
 	if listed := runLive(
@@ -99,22 +99,22 @@ func TestLiveAnInstalledToolIsOnEveryRunsPathAndNeverWritable(t *testing.T) {
 	}
 
 	stamp := time.Now().UTC().Format("20060102150405")
-	projectKey := liveProject(t, transport, "livetool")
-	spec := liveRun(t, ctx, transport, projectKey, imageID, "livetool-"+stamp)
+	projectKey := liveProject(t, vm, "livetool")
+	spec := liveRun(t, ctx, vm, projectKey, imageID, "livetool-"+stamp)
 
-	resolved := inContainer(t, ctx, transport, spec, "command -v commitlint")
+	resolved := inContainer(t, ctx, vm, spec, "command -v commitlint")
 	if resolved != runcontainer.ToolsMount().Destination+"/bin/commitlint" {
 		t.Errorf("commitlint resolves to %q", resolved)
 	}
 	if version := inContainer(
-		t, ctx, transport, spec, "commitlint --version",
+		t, ctx, vm, spec, "commitlint --version",
 	); !strings.Contains(version, "20.1.0") {
 		t.Errorf("the installed command did not run: %q", version)
 	}
 	// A dependency's command was linked in the tool's own module root and must
 	// not have reached the directory a run searches.
 	for _, dependency := range []string{"js-yaml", "semver", "jiti"} {
-		found := inContainer(t, ctx, transport, spec,
+		found := inContainer(t, ctx, vm, spec,
 			"command -v "+dependency+" || echo MISSING")
 		if !strings.Contains(found, "MISSING") {
 			t.Errorf("a dependency's command is on the run's PATH: %s -> %q", dependency, found)
@@ -130,7 +130,7 @@ func TestLiveAnInstalledToolIsOnEveryRunsPathAndNeverWritable(t *testing.T) {
 		"rm -f " + toolRoot + "/bin/commitlint",
 		"ln -sf /bin/true " + toolRoot + "/bin/commitlint",
 	} {
-		refused := inContainer(t, ctx, transport, spec, attempt+" 2>&1 || true")
+		refused := inContainer(t, ctx, vm, spec, attempt+" 2>&1 || true")
 		if !strings.Contains(refused, "Read-only file system") {
 			t.Errorf("the run was allowed to %s: %q", attempt, refused)
 		}
@@ -139,14 +139,14 @@ func TestLiveAnInstalledToolIsOnEveryRunsPathAndNeverWritable(t *testing.T) {
 	// Removing rebuilds the directory rather than editing it, so what a tool
 	// claimed stops being reachable even in a run that is already live.
 	empty := profile.Tools{Version: profile.ToolsVersion}
-	if err := transport.LinkToolBinaries(ctx, empty); err != nil {
+	if err := vm.LinkToolBinaries(ctx, empty); err != nil {
 		t.Fatal(err)
 	}
-	if err := transport.WriteProfileTools(ctx, empty); err != nil {
+	if err := vm.WriteProfileTools(ctx, empty); err != nil {
 		t.Fatal(err)
 	}
 	if found := inContainer(
-		t, ctx, transport, spec, "command -v commitlint || echo GONE",
+		t, ctx, vm, spec, "command -v commitlint || echo GONE",
 	); !strings.Contains(found, "GONE") {
 		t.Errorf("a removed tool is still reachable: %q", found)
 	}

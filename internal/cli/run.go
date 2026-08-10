@@ -65,12 +65,8 @@ func runCreate(ctx context.Context, args []string, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("discover host networks: %w", err)
 	}
-	service := runstart.New(
-		lima.NewManager(),
-		runimage.NewInstaller(lima.NewTransport()),
-		controller,
-		artifacts,
-	)
+	vm := lima.New()
+	service := runstart.New(vm, runimage.NewInstaller(vm), controller, artifacts)
 
 	fmt.Fprintln(out, "Preparing isolated run...")
 	result, err := service.Start(ctx, ".", prefixes, inputs)

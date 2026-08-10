@@ -24,7 +24,7 @@ func TestLiveInstallAndReuseManagedImage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := lima.NewManager().Start(ctx, prefixes); err != nil {
+	if err := lima.New().Start(ctx, prefixes); err != nil {
 		t.Fatal(err)
 	}
 
@@ -49,7 +49,7 @@ func TestLiveInstallAndReuseManagedImage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	installer := runimage.NewInstaller(lima.NewTransport())
+	installer := runimage.NewInstaller(lima.New())
 	first, err := installer.Ensure(ctx, artifacts)
 	if err != nil {
 		t.Fatal(err)

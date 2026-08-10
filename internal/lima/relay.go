@@ -162,8 +162,8 @@ esac
 // sshd accepts on the forwarded address as soon as it binds, and goes on
 // accepting while the client that owns the forward is exiting, so a bare
 // connect can succeed against a relay that is already gone.
-func (transport Transport) ProbeBrokerListener(ctx context.Context) error {
-	if _, err := transport.Execute(
+func (vm VM) ProbeBrokerListener(ctx context.Context) error {
+	if _, err := vm.Execute(
 		ctx,
 		nil,
 		"bash", "-ceu", brokerProbeScript, "pisafe-relay-probe",

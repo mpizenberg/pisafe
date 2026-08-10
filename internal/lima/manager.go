@@ -33,26 +33,30 @@ type Runner interface {
 	Stream(ctx context.Context, stdout io.Writer, args ...string) error
 }
 
-type Manager struct {
+// VM is the handle on the one Lima instance pisafe owns. It creates and
+// destroys the instance, holds a running one to the boundary it was built with,
+// and runs commands and streams artifacts inside it through Lima's control SSH
+// connection — no host mount, no guest agent, and no Podman socket in any of it.
+type VM struct {
 	instance string
 	runner   Runner
 }
 
-func NewManager() Manager {
-	return Manager{
+func New() VM {
+	return VM{
 		instance: InstanceName,
 		runner:   execRunner{binary: "limactl"},
 	}
 }
 
-func (manager Manager) Status(ctx context.Context) (Status, error) {
-	output, err := manager.runner.Run(ctx, nil, "list", "--format", "{{.Name}}\t{{.Status}}")
+func (vm VM) Status(ctx context.Context) (Status, error) {
+	output, err := vm.runner.Run(ctx, nil, "list", "--format", "{{.Name}}\t{{.Status}}")
 	if err != nil {
 		return "", fmt.Errorf("list Lima instances: %w", err)
 	}
 	for _, line := range strings.Split(string(output), "\n") {
 		name, status, found := strings.Cut(line, "\t")
-		if !found || name != manager.instance {
+		if !found || name != vm.instance {
 			continue
 		}
 		switch strings.ToLower(status) {
@@ -69,16 +73,16 @@ func (manager Manager) Status(ctx context.Context) (Status, error) {
 
 // create builds the instance from a configuration Lima has agreed to first, so
 // a definition Lima rejects never becomes an instance a rebuild has to clear.
-func (manager Manager) create(ctx context.Context, configPath string) error {
-	if _, err := manager.runner.Run(ctx, nil, "template", "validate", configPath); err != nil {
+func (vm VM) create(ctx context.Context, configPath string) error {
+	if _, err := vm.runner.Run(ctx, nil, "template", "validate", configPath); err != nil {
 		return fmt.Errorf("validate Lima configuration: %w", err)
 	}
-	if _, err := manager.runner.Run(
+	if _, err := vm.runner.Run(
 		ctx,
 		nil,
 		"--tty=false",
 		"create",
-		"--name="+manager.instance,
+		"--name="+vm.instance,
 		configPath,
 	); err != nil {
 		return fmt.Errorf("create Lima instance: %w", err)
@@ -88,29 +92,29 @@ func (manager Manager) create(ctx context.Context, configPath string) error {
 
 // Ensure creates the dedicated VM when absent, then starts and verifies it
 // against the current host-network boundary.
-func (manager Manager) Ensure(ctx context.Context, prefixes []netip.Prefix) error {
-	status, err := manager.Status(ctx)
+func (vm VM) Ensure(ctx context.Context, prefixes []netip.Prefix) error {
+	status, err := vm.Status(ctx)
 	if err != nil {
 		return err
 	}
 	if status == StatusAbsent {
-		if err := manager.provision(ctx, prefixes); err != nil {
+		if err := vm.provision(ctx, prefixes); err != nil {
 			return err
 		}
 	}
-	return manager.Start(ctx, prefixes)
+	return vm.Start(ctx, prefixes)
 }
 
 // provision renders the VM definition and builds an instance from it. The
 // configuration lives no longer than the call: what a running instance was
 // built from is Lima's copy, and rendering it again is how a stale one is
 // detected rather than quietly reconciled.
-func (manager Manager) provision(ctx context.Context, prefixes []netip.Prefix) error {
+func (vm VM) provision(ctx context.Context, prefixes []netip.Prefix) error {
 	config, err := RenderConfig(prefixes)
 	if err != nil {
 		return err
 	}
-	if err := manager.ensureStateDisk(ctx); err != nil {
+	if err := vm.ensureStateDisk(ctx); err != nil {
 		return err
 	}
 	temporary, err := os.MkdirTemp("", "pisafe-lima-config-*")
@@ -122,22 +126,22 @@ func (manager Manager) provision(ctx context.Context, prefixes []netip.Prefix) e
 	if err := WriteConfig(configPath, config); err != nil {
 		return err
 	}
-	return manager.create(ctx, configPath)
+	return vm.create(ctx, configPath)
 }
 
 // ensureStateDisk creates the disk that carries /var/lib/pisafe, unless Lima
 // already holds one. The disk belongs to Lima rather than to the instance, so
 // an instance that has to be recreated leaves every run, every project store,
 // and the profile where they are, and the new instance mounts them back.
-func (manager Manager) ensureStateDisk(ctx context.Context) error {
-	disk, err := manager.stateDisk(ctx)
+func (vm VM) ensureStateDisk(ctx context.Context) error {
+	disk, err := vm.stateDisk(ctx)
 	if err != nil {
 		return err
 	}
 	if disk != nil {
 		return nil
 	}
-	if _, err := manager.runner.Run(
+	if _, err := vm.runner.Run(
 		ctx,
 		nil,
 		"disk",
@@ -155,8 +159,8 @@ func (manager Manager) ensureStateDisk(ctx context.Context) error {
 // filesystem, every project's transcripts, and the profile. An instance
 // provisioned before the disk existed keeps all of it on its own disk instead,
 // where deleting the instance takes it too.
-func (manager Manager) HasStateDisk(ctx context.Context) (bool, error) {
-	disk, err := manager.stateDisk(ctx)
+func (vm VM) HasStateDisk(ctx context.Context) (bool, error) {
+	disk, err := vm.stateDisk(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -173,8 +177,8 @@ type limaDisk struct {
 
 // stateDisk finds the disk carrying /var/lib/pisafe, or reports that Lima has
 // none.
-func (manager Manager) stateDisk(ctx context.Context) (*limaDisk, error) {
-	output, err := manager.runner.Run(ctx, nil, "disk", "list", "--json")
+func (vm VM) stateDisk(ctx context.Context) (*limaDisk, error) {
+	output, err := vm.runner.Run(ctx, nil, "disk", "list", "--json")
 	if err != nil {
 		return nil, fmt.Errorf("list Lima disks: %w", err)
 	}
@@ -200,8 +204,8 @@ func (manager Manager) stateDisk(ctx context.Context) (*limaDisk, error) {
 // killed rather than waited on — refusing to delete it would withhold the
 // rebuild from the VM that most needs one — and the lock it leaves on the disk
 // is released here.
-func (manager Manager) Delete(ctx context.Context) error {
-	status, err := manager.Status(ctx)
+func (vm VM) Delete(ctx context.Context) error {
+	status, err := vm.Status(ctx)
 	if err != nil {
 		return err
 	}
@@ -212,47 +216,47 @@ func (manager Manager) Delete(ctx context.Context) error {
 	// one Lima cannot classify, which is the case where only the kill gets
 	// through.
 	if status != StatusStopped {
-		if _, err := manager.runner.Run(
+		if _, err := vm.runner.Run(
 			ctx,
 			nil,
 			"--tty=false",
 			"stop",
-			manager.instance,
+			vm.instance,
 		); err != nil {
-			if _, err := manager.runner.Run(
+			if _, err := vm.runner.Run(
 				ctx,
 				nil,
 				"--tty=false",
 				"stop",
 				"--force",
-				manager.instance,
+				vm.instance,
 			); err != nil {
 				return fmt.Errorf("stop Lima instance: %w", err)
 			}
 		}
 	}
-	if _, err := manager.runner.Run(
+	if _, err := vm.runner.Run(
 		ctx,
 		nil,
 		"--tty=false",
 		"delete",
 		"--force",
-		manager.instance,
+		vm.instance,
 	); err != nil {
 		return fmt.Errorf("delete Lima instance: %w", err)
 	}
-	return manager.unlockStateDisk(ctx)
+	return vm.unlockStateDisk(ctx)
 }
 
-func (manager Manager) unlockStateDisk(ctx context.Context) error {
-	disk, err := manager.stateDisk(ctx)
+func (vm VM) unlockStateDisk(ctx context.Context) error {
+	disk, err := vm.stateDisk(ctx)
 	if err != nil {
 		return err
 	}
 	if disk == nil || disk.Instance == "" {
 		return nil
 	}
-	if _, err := manager.runner.Run(ctx, nil, "disk", "unlock", StateDiskName); err != nil {
+	if _, err := vm.runner.Run(ctx, nil, "disk", "unlock", StateDiskName); err != nil {
 		return fmt.Errorf("unlock Lima state disk: %w", err)
 	}
 	return nil
@@ -261,21 +265,21 @@ func (manager Manager) unlockStateDisk(ctx context.Context) error {
 // Start starts (or reuses) the VM and verifies that its immutable host-network
 // deny set and generated security profile still match the controller. Callers
 // must not start run containers if this fails.
-func (manager Manager) Start(ctx context.Context, hostPrefixes []netip.Prefix) error {
+func (vm VM) Start(ctx context.Context, hostPrefixes []netip.Prefix) error {
 	prefixes, err := CanonicalIPv4Prefixes(hostPrefixes)
 	if err != nil {
 		return err
 	}
-	if err := manager.bringUp(ctx); err != nil {
+	if err := vm.bringUp(ctx); err != nil {
 		return err
 	}
-	if err := manager.verifySecurityProfile(ctx, prefixes); err != nil {
+	if err := vm.verifySecurityProfile(ctx, prefixes); err != nil {
 		return err
 	}
-	if err := manager.SyncClock(ctx); err != nil {
+	if err := vm.SyncClock(ctx); err != nil {
 		return err
 	}
-	return manager.verifyFirewall(ctx, prefixes)
+	return vm.verifyFirewall(ctx, prefixes)
 }
 
 // StartUnverified starts (or reuses) the VM without holding it to the boundary
@@ -286,33 +290,33 @@ func (manager Manager) Start(ctx context.Context, hostPrefixes []netip.Prefix) e
 // that fails either is a rebuild, which ends every run that is working. Holding
 // these commands to the records would make handing back a finished run's diff
 // cost every other run's session.
-func (manager Manager) StartUnverified(ctx context.Context) error {
-	if err := manager.bringUp(ctx); err != nil {
+func (vm VM) StartUnverified(ctx context.Context) error {
+	if err := vm.bringUp(ctx); err != nil {
 		return err
 	}
-	return manager.SyncClock(ctx)
+	return vm.SyncClock(ctx)
 }
 
 // bringUp starts the VM unless it is already running. It proves nothing about
 // the boundary: what a command must have proved before it reaches a run is its
 // caller's to decide.
-func (manager Manager) bringUp(ctx context.Context) error {
-	status, err := manager.Status(ctx)
+func (vm VM) bringUp(ctx context.Context) error {
+	status, err := vm.Status(ctx)
 	if err != nil {
 		return err
 	}
 	switch status {
 	case StatusAbsent:
-		return fmt.Errorf("Lima instance %q has not been created", manager.instance)
+		return fmt.Errorf("Lima instance %q has not been created", vm.instance)
 	case StatusRunning:
 		return nil
 	case StatusStopped:
-		if _, err := manager.runner.Run(
+		if _, err := vm.runner.Run(
 			ctx,
 			nil,
 			"--tty=false",
 			"start",
-			manager.instance,
+			vm.instance,
 		); err != nil {
 			return fmt.Errorf("start Lima instance: %w", err)
 		}
@@ -321,7 +325,7 @@ func (manager Manager) bringUp(ctx context.Context) error {
 		return fmt.Errorf(
 			"Lima instance %q is in no state it can be started from; "+
 				"replace it with pisafe vm rebuild",
-			manager.instance,
+			vm.instance,
 		)
 	}
 }
@@ -330,16 +334,11 @@ func (manager Manager) bringUp(ctx context.Context) error {
 // modified VM definition. The record is root-owned and immutable to the
 // unprivileged Lima user after provisioning. The prefixes are already canonical:
 // what the digest is taken over is decided once, by Start.
-func (manager Manager) verifySecurityProfile(ctx context.Context, prefixes []string) error {
+func (vm VM) verifySecurityProfile(ctx context.Context, prefixes []string) error {
 	expected := securityProfileDigest(prefixes)
-	output, err := manager.runner.Run(
-		ctx,
-		nil,
-		"shell",
-		manager.instance,
-		"cat",
-		"/etc/pisafe/security-profile",
-	)
+	output, err := vm.runner.Run(ctx, nil, vm.inVM([]string{
+		"cat", "/etc/pisafe/security-profile",
+	})...)
 	if err != nil {
 		return fmt.Errorf(
 			"read VM security profile: %w; rebuild the VM with pisafe vm rebuild",
@@ -356,15 +355,10 @@ func (manager Manager) verifySecurityProfile(ctx context.Context, prefixes []str
 
 // SyncClock steps a clock that drifted while the plain-mode VM was suspended.
 // Plain mode has no Lima guest agent to perform host/guest time correction.
-func (manager Manager) SyncClock(ctx context.Context) error {
-	if _, err := manager.runner.Run(
-		ctx,
-		nil,
-		"shell",
-		manager.instance,
-		"sudo",
-		"/usr/local/sbin/pisafe-clock-step",
-	); err != nil {
+func (vm VM) SyncClock(ctx context.Context) error {
+	if _, err := vm.runner.Run(ctx, nil, vm.inVM([]string{
+		"sudo", "/usr/local/sbin/pisafe-clock-step",
+	})...); err != nil {
 		return fmt.Errorf("synchronize VM clock: %w", err)
 	}
 	return nil
@@ -375,15 +369,10 @@ func (manager Manager) SyncClock(ctx context.Context) error {
 // user cannot use a privileged refresh operation to weaken it. The VM's copy is
 // the one deny set pisafe did not compose, so it is parsed rather than trusted:
 // a line that is not an IPv4 prefix fails the check instead of being skipped.
-func (manager Manager) verifyFirewall(ctx context.Context, prefixes []string) error {
-	output, err := manager.runner.Run(
-		ctx,
-		nil,
-		"shell",
-		manager.instance,
-		"cat",
-		"/etc/pisafe/host-prefixes",
-	)
+func (vm VM) verifyFirewall(ctx context.Context, prefixes []string) error {
+	output, err := vm.runner.Run(ctx, nil, vm.inVM([]string{
+		"cat", "/etc/pisafe/host-prefixes",
+	})...)
 	if err != nil {
 		return fmt.Errorf("read VM firewall networks: %w", err)
 	}

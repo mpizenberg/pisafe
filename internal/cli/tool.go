@@ -19,33 +19,33 @@ func runTool(ctx context.Context, args []string, out io.Writer) error {
 	if len(args) == 0 {
 		return errToolUsage
 	}
-	transport := lima.NewTransport()
+	vm := lima.New()
 	switch args[0] {
 	case "list":
 		if len(args) != 1 {
 			return errToolUsage
 		}
-		return listTools(ctx, transport, out)
+		return listTools(ctx, vm, out)
 	case "install":
 		if len(args) != 2 {
 			return errToolUsage
 		}
-		return installTool(ctx, transport, args[1], out)
+		return installTool(ctx, vm, args[1], out)
 	case "remove", "uninstall":
 		if len(args) != 2 {
 			return errToolUsage
 		}
-		return removeTool(ctx, transport, args[1], out)
+		return removeTool(ctx, vm, args[1], out)
 	default:
 		return errToolUsage
 	}
 }
 
-func listTools(ctx context.Context, transport lima.Transport, out io.Writer) error {
-	if err := transport.EnsureGlobalStorage(ctx); err != nil {
+func listTools(ctx context.Context, vm lima.VM, out io.Writer) error {
+	if err := vm.EnsureGlobalStorage(ctx); err != nil {
 		return err
 	}
-	tools, err := transport.ReadProfileTools(ctx)
+	tools, err := vm.ReadProfileTools(ctx)
 	if err != nil {
 		return err
 	}
@@ -72,34 +72,34 @@ func listTools(ctx context.Context, transport lima.Transport, out io.Writer) err
 // installed and refused when another tool already holds one.
 func installTool(
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	packageSpec string,
 	out io.Writer,
 ) error {
 	if err := validatePackageSpec(packageSpec); err != nil {
 		return err
 	}
-	imageID, err := ensureRunImage(ctx, transport)
+	imageID, err := ensureRunImage(ctx, vm)
 	if err != nil {
 		return err
 	}
-	installed, err := transport.ReadProfileTools(ctx)
+	installed, err := vm.ReadProfileTools(ctx)
 	if err != nil {
 		return err
 	}
-	pin, err := transport.ResolvePackage(ctx, imageID, packageSpec)
+	pin, err := vm.ResolvePackage(ctx, imageID, packageSpec)
 	if err != nil {
 		return err
 	}
-	tool, err := claimTool(ctx, transport, imageID, installed, pin)
+	tool, err := claimTool(ctx, vm, imageID, installed, pin)
 	if err != nil {
 		return err
 	}
 	updated := installed.With(tool)
-	if err := transport.LinkToolBinaries(ctx, updated); err != nil {
+	if err := vm.LinkToolBinaries(ctx, updated); err != nil {
 		return err
 	}
-	if err := transport.WriteProfileTools(ctx, updated); err != nil {
+	if err := vm.WriteProfileTools(ctx, updated); err != nil {
 		return err
 	}
 	fmt.Fprintf(
@@ -124,17 +124,17 @@ func installTool(
 // which is what makes taking it back out enough.
 func claimTool(
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	imageID string,
 	installed profile.Tools,
 	pin profile.Pin,
 ) (profile.Tool, error) {
-	if err := transport.InstallTool(ctx, imageID, pin); err != nil {
+	if err := vm.InstallTool(ctx, imageID, pin); err != nil {
 		return profile.Tool{}, err
 	}
-	tool, err := claimedTool(ctx, transport, installed, pin)
+	tool, err := claimedTool(ctx, vm, installed, pin)
 	if err != nil {
-		if removeErr := transport.RemoveTool(ctx, pin); removeErr != nil {
+		if removeErr := vm.RemoveTool(ctx, pin); removeErr != nil {
 			return profile.Tool{}, errors.Join(err, removeErr)
 		}
 		return profile.Tool{}, err
@@ -148,11 +148,11 @@ func claimTool(
 // would change what an unrelated command means.
 func claimedTool(
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	installed profile.Tools,
 	pin profile.Pin,
 ) (profile.Tool, error) {
-	binaries, err := transport.ToolBinaries(ctx, pin)
+	binaries, err := vm.ToolBinaries(ctx, pin)
 	if err != nil {
 		return profile.Tool{}, err
 	}
@@ -180,17 +180,17 @@ func claimedTool(
 // starting while the tree is being deleted was never going to reach it.
 func removeTool(
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	name string,
 	out io.Writer,
 ) error {
 	if err := profile.ValidatePackageName(name); err != nil {
 		return err
 	}
-	if err := transport.EnsureGlobalStorage(ctx); err != nil {
+	if err := vm.EnsureGlobalStorage(ctx); err != nil {
 		return err
 	}
-	installed, err := transport.ReadProfileTools(ctx)
+	installed, err := vm.ReadProfileTools(ctx)
 	if err != nil {
 		return err
 	}
@@ -198,13 +198,13 @@ func removeTool(
 	if !found {
 		return fmt.Errorf("%s is not installed", name)
 	}
-	if err := transport.LinkToolBinaries(ctx, remaining); err != nil {
+	if err := vm.LinkToolBinaries(ctx, remaining); err != nil {
 		return err
 	}
-	if err := transport.WriteProfileTools(ctx, remaining); err != nil {
+	if err := vm.WriteProfileTools(ctx, remaining); err != nil {
 		return err
 	}
-	if err := transport.RemoveTool(ctx, removed.Pin); err != nil {
+	if err := vm.RemoveTool(ctx, removed.Pin); err != nil {
 		return err
 	}
 	fmt.Fprintf(out, "Removed %s@%s\n", removed.Name, removed.Version)

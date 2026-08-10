@@ -67,7 +67,7 @@ func ensureLiveVM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := lima.NewManager().Ensure(ctx, prefixes); err != nil {
+	if err := lima.New().Ensure(ctx, prefixes); err != nil {
 		t.Fatal(err)
 	}
 }

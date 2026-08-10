@@ -16,7 +16,7 @@ func runProfile(ctx context.Context, args []string, out io.Writer) error {
 	if len(args) != 2 || args[0] != "reset" || args[1] != "--confirm" {
 		return errProfileUsage
 	}
-	return resetProfile(ctx, lima.NewTransport(), out)
+	return resetProfile(ctx, lima.New(), out)
 }
 
 // resetProfile takes every extension and every tool back out at once. The
@@ -24,25 +24,25 @@ func runProfile(ctx context.Context, args []string, out io.Writer) error {
 // through loads nothing rather than half a profile, and the directory of links
 // is rebuilt last so a run's PATH ends up pointing at an empty directory rather
 // than a missing one.
-func resetProfile(ctx context.Context, transport lima.Transport, out io.Writer) error {
-	if err := transport.EnsureGlobalStorage(ctx); err != nil {
+func resetProfile(ctx context.Context, vm lima.VM, out io.Writer) error {
+	if err := vm.EnsureGlobalStorage(ctx); err != nil {
 		return err
 	}
-	if err := transport.WriteProfileRecord(ctx, profile.Record{}); err != nil {
+	if err := vm.WriteProfileRecord(ctx, profile.Record{}); err != nil {
 		return err
 	}
-	if err := transport.WriteProfileTools(ctx, profile.Tools{}); err != nil {
+	if err := vm.WriteProfileTools(ctx, profile.Tools{}); err != nil {
 		return err
 	}
 	// What npm last resolved describes packages that are gone, and a check that
 	// never happened is what makes the next one happen.
-	if err := transport.WriteProfileOffers(ctx, profile.Offers{}); err != nil {
+	if err := vm.WriteProfileOffers(ctx, profile.Offers{}); err != nil {
 		return err
 	}
-	if err := transport.ResetProfile(ctx); err != nil {
+	if err := vm.ResetProfile(ctx); err != nil {
 		return err
 	}
-	if err := transport.LinkToolBinaries(ctx, profile.Tools{}); err != nil {
+	if err := vm.LinkToolBinaries(ctx, profile.Tools{}); err != nil {
 		return err
 	}
 	fmt.Fprintln(

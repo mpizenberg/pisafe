@@ -243,11 +243,12 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
 
 ### SSH transport and materialization
 
-- `lima.Transport` runs argv-style commands over Lima's control SSH, allocates a
-  private VM-side run directory, and uploads `source.bundle`, `tracked.patch`,
-  and `snapshot.json` independently — each streamed as binary, checked for exact
-  byte count and SHA-256 in the VM, then atomically renamed. The guest snapshot
-  omits the Mac source path and is rejected if it names one.
+- `lima.VM` is the one handle on the instance: it creates, starts, verifies, and
+  deletes it, and runs argv-style commands inside it over Lima's control SSH. It
+  allocates a private VM-side run directory and uploads `source.bundle`,
+  `tracked.patch`, and `snapshot.json` independently — each streamed as binary,
+  checked for exact byte count and SHA-256 in the VM, then atomically renamed.
+  The guest snapshot omits the Mac source path and is rejected if it names one.
 - Stage files are imported with `podman unshare` into a private fixed-capacity
   filesystem: no Mac mount, no Podman socket, no `podman cp --chown`.
 

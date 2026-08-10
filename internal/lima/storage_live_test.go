@@ -31,14 +31,14 @@ func liveCache(key string) runcontainer.CacheMount {
 	}
 }
 
-func liveProject(t *testing.T, transport lima.Transport, name string) string {
+func liveProject(t *testing.T, vm lima.VM, name string) string {
 	t.Helper()
 	projectKey := name + "-" + time.Now().UTC().Format("20060102150405")
-	if err := transport.EnsureProjectStorage(context.Background(), projectKey); err != nil {
+	if err := vm.EnsureProjectStorage(context.Background(), projectKey); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := transport.RemoveProjectStorage(context.Background(), projectKey); err != nil {
+		if err := vm.RemoveProjectStorage(context.Background(), projectKey); err != nil {
 			t.Errorf("remove live project storage: %v", err)
 		}
 	})
@@ -70,15 +70,15 @@ func TestLiveCacheSnapshotsAreSelectedByKeyThenRecency(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	transport := lima.NewTransport()
-	projectKey := liveProject(t, transport, "liveselect")
+	vm := lima.New()
+	projectKey := liveProject(t, vm, "liveselect")
 	namespace := runcontainer.
 		DefaultSpec("seed", projectKey, liveImageID(t)).
 		CacheNamespacePath("npm")
 
 	// An empty namespace is the first run of a project, and must select
 	// nothing rather than fail.
-	selected, err := transport.SelectCacheSnapshots(ctx, projectKey, []runcontainer.CacheMount{
+	selected, err := vm.SelectCacheSnapshots(ctx, projectKey, []runcontainer.CacheMount{
 		liveCache(liveMissingKey),
 	})
 	if err != nil {
@@ -96,7 +96,7 @@ func TestLiveCacheSnapshotsAreSelectedByKeyThenRecency(t *testing.T) {
 		"exact match on the newer generation": {liveNewerKey, liveNewerKey},
 		"no match falls back to the newest":   {liveMissingKey, liveNewerKey},
 	} {
-		selected, err := transport.SelectCacheSnapshots(ctx, projectKey, []runcontainer.CacheMount{
+		selected, err := vm.SelectCacheSnapshots(ctx, projectKey, []runcontainer.CacheMount{
 			liveCache(request.key),
 		})
 		if err != nil {
@@ -122,8 +122,8 @@ func TestLivePublishedGenerationsAreImmutableAndDisposable(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	transport := lima.NewTransport()
-	projectKey := liveProject(t, transport, "livepublish")
+	vm := lima.New()
+	projectKey := liveProject(t, vm, "livepublish")
 	runID := "livepublish-" + time.Now().UTC().Format("20060102150405")
 	namespace := runcontainer.
 		DefaultSpec("seed", projectKey, imageID).
@@ -132,7 +132,7 @@ func TestLivePublishedGenerationsAreImmutableAndDisposable(t *testing.T) {
 
 	// The run's inputs hash to a generation nobody published, so it restores
 	// the one that exists and publishes under its own key.
-	selected, err := transport.SelectCacheSnapshots(ctx, projectKey, []runcontainer.CacheMount{
+	selected, err := vm.SelectCacheSnapshots(ctx, projectKey, []runcontainer.CacheMount{
 		liveCache(liveNewerKey),
 	})
 	if err != nil {
@@ -143,16 +143,16 @@ func TestLivePublishedGenerationsAreImmutableAndDisposable(t *testing.T) {
 	}
 	spec := runcontainer.DefaultSpec(runID, projectKey, imageID)
 	spec.Caches = selected
-	if err := transport.CreateRunStorage(ctx, runID); err != nil {
+	if err := vm.CreateRunStorage(ctx, runID); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
 		runLive(t, context.Background(), "podman", "rm", "--force", "--ignore", spec.ContainerName())
-		if err := transport.RemoveRunStorage(context.Background(), runID); err != nil {
+		if err := vm.RemoveRunStorage(context.Background(), runID); err != nil {
 			t.Errorf("remove live run storage: %v", err)
 		}
 	}()
-	if err := transport.PrepareRunLayout(ctx, runID, spec.Caches); err != nil {
+	if err := vm.PrepareRunLayout(ctx, runID, spec.Caches); err != nil {
 		t.Fatal(err)
 	}
 	runArgs, err := spec.RunArgs()
@@ -160,20 +160,20 @@ func TestLivePublishedGenerationsAreImmutableAndDisposable(t *testing.T) {
 		t.Fatal(err)
 	}
 	runArgs = append(runArgs[:len(runArgs)-2:len(runArgs)-2], "sleep", "infinity")
-	if _, err := transport.Execute(ctx, nil, append([]string{"podman"}, runArgs...)...); err != nil {
+	if _, err := vm.Execute(ctx, nil, append([]string{"podman"}, runArgs...)...); err != nil {
 		t.Fatal(err)
 	}
-	inContainer(t, ctx, transport, spec, "printf fetched > /cache/npm/fetched.txt")
+	inContainer(t, ctx, vm, spec, "printf fetched > /cache/npm/fetched.txt")
 	// Publishing reads the merged view, so a deletion the run made has to be
 	// absent from the generation rather than reappear from the lower.
-	inContainer(t, ctx, transport, spec, "rm /cache/npm/shared.txt")
-	if _, err := transport.Execute(
+	inContainer(t, ctx, vm, spec, "rm /cache/npm/shared.txt")
+	if _, err := vm.Execute(
 		ctx, nil, "podman", "rm", "--force", spec.ContainerName(),
 	); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := transport.PublishCacheSnapshot(ctx, spec, spec.Caches[0]); err != nil {
+	if err := vm.PublishCacheSnapshot(ctx, spec, spec.Caches[0]); err != nil {
 		t.Fatal(err)
 	}
 	published := namespace + "/" + liveNewerKey
@@ -187,7 +187,7 @@ func TestLivePublishedGenerationsAreImmutableAndDisposable(t *testing.T) {
 	}
 	// It is also the newest by publication time, which is what the next run
 	// with an unknown key falls back to.
-	next, err := transport.SelectCacheSnapshots(ctx, projectKey, []runcontainer.CacheMount{
+	next, err := vm.SelectCacheSnapshots(ctx, projectKey, []runcontainer.CacheMount{
 		liveCache(liveMissingKey),
 	})
 	if err != nil {
@@ -199,7 +199,7 @@ func TestLivePublishedGenerationsAreImmutableAndDisposable(t *testing.T) {
 
 	// Eviction keeps what a live run may still mount whatever its age, and
 	// drops the rest.
-	if err := transport.EvictCacheSnapshots(
+	if err := vm.EvictCacheSnapshots(
 		ctx, projectKey, "npm", 1, []string{liveOlderKey},
 	); err != nil {
 		t.Fatal(err)
@@ -207,14 +207,14 @@ func TestLivePublishedGenerationsAreImmutableAndDisposable(t *testing.T) {
 	if got := runLive(t, ctx, "podman", "unshare", "ls", namespace); got != liveOlderKey+"\n"+liveNewerKey {
 		t.Errorf("namespace = %q after keeping one generation and one mounted lower", got)
 	}
-	if err := transport.EvictCacheSnapshots(ctx, projectKey, "npm", 1, nil); err != nil {
+	if err := vm.EvictCacheSnapshots(ctx, projectKey, "npm", 1, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got := runLive(t, ctx, "podman", "unshare", "ls", namespace); got != liveNewerKey {
 		t.Errorf("namespace = %q after keeping one generation", got)
 	}
 
-	if err := transport.ResetProjectCache(ctx, projectKey); err != nil {
+	if err := vm.ResetProjectCache(ctx, projectKey); err != nil {
 		t.Fatal(err)
 	}
 	if got := runLive(t, ctx, "podman", "unshare", "ls", spec.ProjectPath()+"/cache"); got != "" {
@@ -238,8 +238,8 @@ func TestLiveProjectLayersAreSharedToReadAndPrivateToWrite(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	stamp := time.Now().UTC().Format("20060102150405")
-	transport := lima.NewTransport()
-	projectKey := liveProject(t, transport, "livelayers")
+	vm := lima.New()
+	projectKey := liveProject(t, vm, "livelayers")
 
 	// Seeding stands in for publishing, which does not exist yet: the point
 	// under test is what a run sees when the project already has state.
@@ -251,7 +251,7 @@ func TestLiveProjectLayersAreSharedToReadAndPrivateToWrite(t *testing.T) {
 
 	specs := map[string]runcontainer.Spec{}
 	for _, name := range []string{"a", "b"} {
-		selected, err := transport.SelectCacheSnapshots(
+		selected, err := vm.SelectCacheSnapshots(
 			ctx,
 			projectKey,
 			[]runcontainer.CacheMount{liveCache(liveNewerKey)},
@@ -260,7 +260,7 @@ func TestLiveProjectLayersAreSharedToReadAndPrivateToWrite(t *testing.T) {
 			t.Fatal(err)
 		}
 		specs[name] = liveRun(
-			t, ctx, transport, projectKey, imageID,
+			t, ctx, vm, projectKey, imageID,
 			"livelayers-"+name+"-"+stamp, selected...,
 		)
 	}
@@ -269,18 +269,18 @@ func TestLiveProjectLayersAreSharedToReadAndPrivateToWrite(t *testing.T) {
 	// leak between them would be visible rather than merely possible.
 	for name, spec := range specs {
 		for _, overlay := range spec.ProjectOverlays() {
-			inContainer(t, ctx, transport, spec,
+			inContainer(t, ctx, vm, spec,
 				"printf %s > "+path.Join(overlay.Destination, name+".txt"), name)
 		}
 	}
 	for name, spec := range specs {
 		for _, overlay := range spec.ProjectOverlays() {
-			shared := inContainer(t, ctx, transport, spec,
+			shared := inContainer(t, ctx, vm, spec,
 				"cat "+path.Join(overlay.Destination, "shared.txt"))
 			if shared != "promoted" {
 				t.Errorf("run %s reads %s as %q", name, overlay.Destination, shared)
 			}
-			listed := inContainer(t, ctx, transport, spec, "ls "+overlay.Destination)
+			listed := inContainer(t, ctx, vm, spec, "ls "+overlay.Destination)
 			if want := name + ".txt shared.txt"; strings.Join(strings.Fields(listed), " ") != want {
 				t.Errorf("run %s sees %s as %q, want %q", name, overlay.Destination, listed, want)
 			}
@@ -323,18 +323,18 @@ func TestLiveFinishedTranscriptsPromoteWhileLiveOnesStayPrivate(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	stamp := time.Now().UTC().Format("20060102150405")
-	transport := lima.NewTransport()
-	projectKey := liveProject(t, transport, "livesessions")
+	vm := lima.New()
+	projectKey := liveProject(t, vm, "livesessions")
 
 	// A transcript's name carries a UUID, so these stand in for real ones only by
 	// being distinct. The file that is not a transcript is here because the store
 	// is Pi's session directory and nothing else belongs in it.
-	first := liveRun(t, ctx, transport, projectKey, imageID, "livesessions-a-"+stamp)
-	inContainer(t, ctx, transport, first, "printf first > /sessions/1_aaaa.jsonl")
-	inContainer(t, ctx, transport, first, "printf kept > /sessions/2_bbbb.jsonl")
-	inContainer(t, ctx, transport, first, "printf ignored > /sessions/notes.txt")
+	first := liveRun(t, ctx, vm, projectKey, imageID, "livesessions-a-"+stamp)
+	inContainer(t, ctx, vm, first, "printf first > /sessions/1_aaaa.jsonl")
+	inContainer(t, ctx, vm, first, "printf kept > /sessions/2_bbbb.jsonl")
+	inContainer(t, ctx, vm, first, "printf ignored > /sessions/notes.txt")
 	runLive(t, ctx, "podman", "rm", "--force", first.ContainerName())
-	if err := transport.PromoteSessions(ctx, projectKey, first.RunID); err != nil {
+	if err := vm.PromoteSessions(ctx, projectKey, first.RunID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -345,27 +345,27 @@ func TestLiveFinishedTranscriptsPromoteWhileLiveOnesStayPrivate(t *testing.T) {
 
 	// The whole point of the slice: a later run of the project starts with what
 	// an earlier one wrote.
-	second := liveRun(t, ctx, transport, projectKey, imageID, "livesessions-b-"+stamp)
-	if got := inContainer(t, ctx, transport, second, "cat /sessions/1_aaaa.jsonl"); got != "first" {
+	second := liveRun(t, ctx, vm, projectKey, imageID, "livesessions-b-"+stamp)
+	if got := inContainer(t, ctx, vm, second, "cat /sessions/1_aaaa.jsonl"); got != "first" {
 		t.Errorf("the second run reads the first run's transcript as %q", got)
 	}
 
 	// The third run is live throughout, and its transcript is the one thing the
 	// second run must not be able to read.
-	third := liveRun(t, ctx, transport, projectKey, imageID, "livesessions-c-"+stamp)
-	inContainer(t, ctx, transport, third, "printf live > /sessions/3_cccc.jsonl")
-	if listed := inContainer(t, ctx, transport, second, "ls /sessions"); strings.Contains(listed, "3_cccc") {
+	third := liveRun(t, ctx, vm, projectKey, imageID, "livesessions-c-"+stamp)
+	inContainer(t, ctx, vm, third, "printf live > /sessions/3_cccc.jsonl")
+	if listed := inContainer(t, ctx, vm, second, "ls /sessions"); strings.Contains(listed, "3_cccc") {
 		t.Errorf("a live transcript reached a concurrent run: %q", listed)
 	}
 
 	// Pi rewrites a transcript in place when it migrates one on load, and can
 	// delete one outright from its own picker. Neither may follow the file back
 	// into a store that other runs have mounted.
-	inContainer(t, ctx, transport, second, "printf migrated > /sessions/1_aaaa.jsonl")
-	inContainer(t, ctx, transport, second, "rm /sessions/2_bbbb.jsonl")
-	inContainer(t, ctx, transport, second, "printf second > /sessions/4_dddd.jsonl")
+	inContainer(t, ctx, vm, second, "printf migrated > /sessions/1_aaaa.jsonl")
+	inContainer(t, ctx, vm, second, "rm /sessions/2_bbbb.jsonl")
+	inContainer(t, ctx, vm, second, "printf second > /sessions/4_dddd.jsonl")
 	runLive(t, ctx, "podman", "rm", "--force", second.ContainerName())
-	if err := transport.PromoteSessions(ctx, projectKey, second.RunID); err != nil {
+	if err := vm.PromoteSessions(ctx, projectKey, second.RunID); err != nil {
 		t.Fatal(err)
 	}
 	if listed := liveStoreListing(t, ctx, store); listed != "1_aaaa.jsonl 2_bbbb.jsonl 4_dddd.jsonl" {
@@ -384,12 +384,12 @@ func TestLiveFinishedTranscriptsPromoteWhileLiveOnesStayPrivate(t *testing.T) {
 
 	// A run that starts now inherits both finished runs and neither of the live
 	// one's writes, and can read what was promoted rather than merely list it.
-	fourth := liveRun(t, ctx, transport, projectKey, imageID, "livesessions-d-"+stamp)
-	listed := inContainer(t, ctx, transport, fourth, "ls /sessions")
+	fourth := liveRun(t, ctx, vm, projectKey, imageID, "livesessions-d-"+stamp)
+	listed := inContainer(t, ctx, vm, fourth, "ls /sessions")
 	if joined := strings.Join(strings.Fields(listed), " "); joined != "1_aaaa.jsonl 2_bbbb.jsonl 4_dddd.jsonl" {
 		t.Errorf("the fourth run sees %q", joined)
 	}
-	if got := inContainer(t, ctx, transport, fourth, "cat /sessions/4_dddd.jsonl"); got != "second" {
+	if got := inContainer(t, ctx, vm, fourth, "cat /sessions/4_dddd.jsonl"); got != "second" {
 		t.Errorf("the fourth run reads a promoted transcript as %q", got)
 	}
 }
@@ -400,7 +400,7 @@ func TestLiveFinishedTranscriptsPromoteWhileLiveOnesStayPrivate(t *testing.T) {
 func liveRun(
 	t *testing.T,
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	projectKey string,
 	imageID string,
 	runID string,
@@ -409,16 +409,16 @@ func liveRun(
 	t.Helper()
 	spec := runcontainer.DefaultSpec(runID, projectKey, imageID)
 	spec.Caches = caches
-	if err := transport.CreateRunStorage(ctx, runID); err != nil {
+	if err := vm.CreateRunStorage(ctx, runID); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		runLive(t, context.Background(), "podman", "rm", "--force", "--ignore", spec.ContainerName())
-		if err := transport.RemoveRunStorage(context.Background(), runID); err != nil {
+		if err := vm.RemoveRunStorage(context.Background(), runID); err != nil {
 			t.Errorf("remove live run storage: %v", err)
 		}
 	})
-	if err := transport.PrepareRunLayout(ctx, runID, spec.Caches); err != nil {
+	if err := vm.PrepareRunLayout(ctx, runID, spec.Caches); err != nil {
 		t.Fatal(err)
 	}
 	runArgs, err := spec.RunArgs()
@@ -426,7 +426,7 @@ func liveRun(
 		t.Fatal(err)
 	}
 	runArgs = append(runArgs[:len(runArgs)-2:len(runArgs)-2], "sleep", "infinity")
-	if _, err := transport.Execute(ctx, nil, append([]string{"podman"}, runArgs...)...); err != nil {
+	if _, err := vm.Execute(ctx, nil, append([]string{"podman"}, runArgs...)...); err != nil {
 		t.Fatal(err)
 	}
 	return spec
@@ -444,7 +444,7 @@ func liveImageID(t *testing.T) string {
 func inContainer(
 	t *testing.T,
 	ctx context.Context,
-	transport lima.Transport,
+	vm lima.VM,
 	spec runcontainer.Spec,
 	script string,
 	arguments ...string,
@@ -454,7 +454,7 @@ func inContainer(
 		[]string{"podman", "exec", "--user", "1000:1000", spec.ContainerName(), "sh", "-ec", script},
 		arguments...,
 	)
-	output, err := transport.Execute(ctx, nil, command...)
+	output, err := vm.Execute(ctx, nil, command...)
 	if err != nil {
 		t.Fatalf("%s: %v\n%s", strings.Join(command, " "), err, output)
 	}
@@ -476,15 +476,15 @@ func TestLiveAReclaimedProjectStoreTakesEverythingWithIt(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	transport := lima.NewTransport()
+	vm := lima.New()
 	projectKey := "livereclaim-" + time.Now().UTC().Format("20060102150405")
-	if err := transport.EnsureProjectStorage(ctx, projectKey); err != nil {
+	if err := vm.EnsureProjectStorage(ctx, projectKey); err != nil {
 		t.Fatal(err)
 	}
 	// This test reclaims the store itself; the cleanup is for the paths that
 	// fail before reaching that.
 	t.Cleanup(func() {
-		_ = transport.RemoveProjectStorage(context.Background(), projectKey)
+		_ = vm.RemoveProjectStorage(context.Background(), projectKey)
 	})
 
 	store := runcontainer.DefaultSpec("reclaim", projectKey, imageID).ProjectPath()
@@ -503,7 +503,7 @@ func TestLiveAReclaimedProjectStoreTakesEverythingWithIt(t *testing.T) {
 		t.Fatalf("the project store is %s before anything reclaimed it", mounted)
 	}
 
-	if err := transport.RemoveProjectStorage(ctx, projectKey); err != nil {
+	if err := vm.RemoveProjectStorage(ctx, projectKey); err != nil {
 		t.Fatal(err)
 	}
 	if mounted := runLive(t, ctx, "sh", "-c",
@@ -519,13 +519,13 @@ func TestLiveAReclaimedProjectStoreTakesEverythingWithIt(t *testing.T) {
 
 	// A sweep that failed partway repeats the removal, so having nothing left
 	// to do is not a failure.
-	if err := transport.RemoveProjectStorage(ctx, projectKey); err != nil {
+	if err := vm.RemoveProjectStorage(ctx, projectKey); err != nil {
 		t.Fatal(err)
 	}
 
 	// The evidence that the image went with the mount: the same key allocates a
 	// filesystem with none of the old project in it.
-	if err := transport.EnsureProjectStorage(ctx, projectKey); err != nil {
+	if err := vm.EnsureProjectStorage(ctx, projectKey); err != nil {
 		t.Fatal(err)
 	}
 	if listed := liveStoreListing(t, ctx, sessions); listed != "" {
@@ -551,9 +551,9 @@ func TestLiveARebindCarriesTheHistoryAndNotTheCaches(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	transport := lima.NewTransport()
-	fromKey := liveProject(t, transport, "liverebindfrom")
-	toKey := liveProject(t, transport, "liverebindto")
+	vm := lima.New()
+	fromKey := liveProject(t, vm, "liverebindfrom")
+	toKey := liveProject(t, vm, "liverebindto")
 	from := runcontainer.ProjectSessionsPath(fromKey)
 	to := runcontainer.ProjectSessionsPath(toKey)
 
@@ -568,7 +568,7 @@ func TestLiveARebindCarriesTheHistoryAndNotTheCaches(t *testing.T) {
 			" && chown 1000:1000 "+from+"/*.jsonl "+to+"/*.jsonl")
 	seedSnapshot(t, ctx, path.Dir(from)+"/cache/npm", liveNewerKey, "cached", "2026-01-01")
 
-	if err := transport.AdoptSessions(ctx, toKey, fromKey); err != nil {
+	if err := vm.AdoptSessions(ctx, toKey, fromKey); err != nil {
 		t.Fatal(err)
 	}
 
@@ -604,9 +604,9 @@ func TestLiveABackupCarriesTheTranscriptsOutAndBackIn(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	transport := lima.NewTransport()
-	fromKey := liveProject(t, transport, "livebackupfrom")
-	toKey := liveProject(t, transport, "livebackupto")
+	vm := lima.New()
+	fromKey := liveProject(t, vm, "livebackupfrom")
+	toKey := liveProject(t, vm, "livebackupto")
 	from := runcontainer.ProjectSessionsPath(fromKey)
 	to := runcontainer.ProjectSessionsPath(toKey)
 
@@ -624,7 +624,7 @@ func TestLiveABackupCarriesTheTranscriptsOutAndBackIn(t *testing.T) {
 	reader, writer := io.Pipe()
 	archived := make(chan error, 1)
 	go func() {
-		err := transport.ArchiveSessions(ctx, fromKey, writer)
+		err := vm.ArchiveSessions(ctx, fromKey, writer)
 		writer.CloseWithError(err)
 		archived <- err
 	}()
@@ -647,7 +647,7 @@ func TestLiveABackupCarriesTheTranscriptsOutAndBackIn(t *testing.T) {
 		writer.CloseWithError(err)
 		sent <- err
 	}()
-	restoreErr := transport.RestoreSessions(ctx, toKey, reader)
+	restoreErr := vm.RestoreSessions(ctx, toKey, reader)
 	reader.CloseWithError(restoreErr)
 	if err := <-sent; err != nil {
 		t.Fatal(err)

@@ -44,12 +44,12 @@ func runVM(ctx context.Context, args []string, out io.Writer) error {
 // firewall built around networks this Mac has left is drift in the instance,
 // and nothing short of a new one settles it.
 func rebuildVM(ctx context.Context, request vmRebuildRequest, out io.Writer) error {
-	manager := lima.NewManager()
-	status, err := manager.Status(ctx)
+	vm := lima.New()
+	status, err := vm.Status(ctx)
 	if err != nil {
 		return err
 	}
-	stateDisk, err := manager.HasStateDisk(ctx)
+	stateDisk, err := vm.HasStateDisk(ctx)
 	if err != nil {
 		return err
 	}
@@ -92,12 +92,12 @@ func rebuildVM(ctx context.Context, request vmRebuildRequest, out io.Writer) err
 		stopRunsBeforeRebuild(ctx, runs, out)
 		fmt.Fprintln(out, "Deleting the instance...")
 	}
-	if err := manager.Delete(ctx); err != nil {
+	if err := vm.Delete(ctx); err != nil {
 		return err
 	}
 
 	fmt.Fprintln(out, "Creating the VM and verifying its boundary...")
-	if err := manager.Ensure(ctx, prefixes); err != nil {
+	if err := vm.Ensure(ctx, prefixes); err != nil {
 		return err
 	}
 	// A run image is built inside the instance, so it goes with one. Building it
