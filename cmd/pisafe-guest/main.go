@@ -387,7 +387,7 @@ func materialize(
 ) error {
 	stageDirectory := filepath.Clean(stagePath)
 	workspace := filepath.Clean(workspacePath)
-	snapshotFile, err := os.Open(filepath.Join(stageDirectory, "snapshot.json"))
+	snapshotFile, err := os.Open(filepath.Join(stageDirectory, gitstage.StageSnapshotName))
 	if err != nil {
 		return fmt.Errorf("open stage snapshot: %w", err)
 	}
@@ -397,21 +397,11 @@ func materialize(
 		return err
 	}
 
-	submodules := make([]gitstage.PreparedSubmodule, 0, len(snapshot.Submodules))
-	for index, submodule := range snapshot.Submodules {
-		submodules = append(submodules, gitstage.PreparedSubmodule{
-			Path:       submodule.Path,
-			BundlePath: filepath.Join(stageDirectory, fmt.Sprintf("submodule-%d.bundle", index)),
-			PatchPath:  filepath.Join(stageDirectory, fmt.Sprintf("submodule-%d.patch", index)),
-		})
-	}
-	materialized, err := gitstage.Materialize(ctx, gitstage.PreparedStage{
-		Snapshot:   snapshot,
-		BundlePath: filepath.Join(stageDirectory, "source.bundle"),
-		PatchPath:  filepath.Join(stageDirectory, "tracked.patch"),
-		InputsPath: filepath.Join(stageDirectory, "inputs.tar"),
-		Submodules: submodules,
-	}, workspace)
+	materialized, err := gitstage.Materialize(
+		ctx,
+		gitstage.StagePackage(stageDirectory, snapshot),
+		workspace,
+	)
 	if err != nil {
 		return err
 	}

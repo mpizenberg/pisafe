@@ -433,40 +433,118 @@ func (overlay ProjectOverlay) volume() string {
 		":O,upperdir=" + overlay.Upper + ",workdir=" + overlay.Work
 }
 
-func (spec Spec) RunArgs() ([]string, error) {
-	if err := spec.Validate(); err != nil {
-		return nil, err
+// container is the hardened base every container pisafe starts is built from:
+// unprivileged, unable to gain a capability or a privilege, running a
+// pinned image read-only, and reaching nothing it is not given here. A builder
+// says what its container additionally needs and renders through args, so a
+// container added later inherits the prologue instead of restating it.
+type container struct {
+	// name is set for the one container that outlives the command starting it.
+	// Everything else is a throwaway, which is why a name and detaching rather
+	// than removing on exit are the same decision.
+	name        string
+	runID       string
+	kind        string
+	interactive bool
+	// internet is opt-in: a container that says nothing about the network gets
+	// none at all, and the two that have to reach the npm registry say so here.
+	internet       bool
+	cpus           string
+	memoryBytes    int64
+	pids           int
+	timeoutSeconds int64
+	// tmpBytes gives the container a scratch filesystem, which it needs because
+	// everything else it can write is either absent or shared. tmpExec leaves
+	// that scratch space executable, which only the install container does:
+	// it is where npm unpacks a downloaded tarball.
+	tmpBytes int64
+	tmpExec  bool
+}
+
+func (settings container) args() []string {
+	args := []string{"run", "--pull=never"}
+	if settings.name != "" {
+		args = append(args, "--detach", "--name", settings.name, "--hostname", settings.name)
+	} else {
+		args = append(args, "--rm")
 	}
-	memory := strconv.FormatInt(spec.MemoryBytes, 10)
-	tmpSize := strconv.FormatInt(spec.TmpBytes, 10)
-	args := []string{
-		"run",
-		"--detach",
-		"--pull=never",
-		"--name", spec.ContainerName(),
-		"--hostname", spec.ContainerName(),
-		"--label", "io.pisafe.run=" + spec.RunID,
+	if settings.interactive {
+		args = append(args, "--interactive")
+	}
+	if settings.runID != "" {
+		args = append(args, "--label", "io.pisafe.run="+settings.runID)
+	}
+	if settings.kind != "" {
+		args = append(args, "--label", "io.pisafe.kind="+settings.kind)
+	}
+	args = append(args,
 		"--user", containerUser,
 		"--read-only",
 		"--cap-drop=all",
 		"--security-opt=no-new-privileges",
-		"--network=pasta",
-		"--dns=1.1.1.1",
-		"--dns=9.9.9.9",
-		"--cpus", spec.CPUs,
+	)
+	if settings.internet {
+		args = append(args, "--network=pasta", "--dns=1.1.1.1", "--dns=9.9.9.9")
+	} else {
+		args = append(args, "--network=none")
+	}
+	if settings.cpus != "" {
+		args = append(args, "--cpus", settings.cpus)
+	}
+	memory := strconv.FormatInt(settings.memoryBytes, 10)
+	args = append(args,
 		"--memory", memory,
 		"--memory-swap", memory,
-		"--pids-limit", strconv.Itoa(spec.PIDs),
-		"--timeout", strconv.FormatInt(spec.WallSeconds, 10),
-		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=" + tmpSize,
-		"--mount", "type=tmpfs,dst=/run,tmpfs-size=16777216,tmpfs-mode=0755,U=true",
-		"--mount", "type=bind,src=" + spec.WorkspacePath() + ",dst=" + ContainerWorkRoot + ",nodev,nosuid",
-		"--mount", "type=bind,src=" + spec.HomePath() + ",dst=" + ContainerHome + ",nodev,nosuid",
-		"--mount", "type=bind,src=" + ProfileMount().Source +
-			",dst=" + ProfileMount().Destination + ",ro,nodev,nosuid",
-		"--mount", "type=bind,src=" + ToolsMount().Source +
-			",dst=" + ToolsMount().Destination + ",ro,nodev,nosuid",
+		"--pids-limit", strconv.Itoa(settings.pids),
+	)
+	if settings.timeoutSeconds > 0 {
+		args = append(args, "--timeout", strconv.FormatInt(settings.timeoutSeconds, 10))
 	}
+	if settings.tmpBytes > 0 {
+		options := "rw,noexec,nosuid,nodev"
+		if settings.tmpExec {
+			options = "rw,nosuid,nodev"
+		}
+		args = append(
+			args,
+			"--tmpfs",
+			"/tmp:"+options+",size="+strconv.FormatInt(settings.tmpBytes, 10),
+		)
+	}
+	return args
+}
+
+// container is the base for a container belonging to one run: it carries the
+// run's label and is bounded by the run's own limits, whatever it is for.
+func (spec Spec) container(kind string) container {
+	return container{
+		runID:       spec.RunID,
+		kind:        kind,
+		memoryBytes: spec.MemoryBytes,
+		pids:        spec.PIDs,
+	}
+}
+
+func (spec Spec) RunArgs() ([]string, error) {
+	if err := spec.Validate(); err != nil {
+		return nil, err
+	}
+	settings := spec.container("")
+	settings.name = spec.ContainerName()
+	settings.internet = true
+	settings.cpus = spec.CPUs
+	settings.timeoutSeconds = spec.WallSeconds
+	settings.tmpBytes = spec.TmpBytes
+	args := append(
+		settings.args(),
+		"--mount", "type=tmpfs,dst=/run,tmpfs-size=16777216,tmpfs-mode=0755,U=true",
+		"--mount", "type=bind,src="+spec.WorkspacePath()+",dst="+ContainerWorkRoot+",nodev,nosuid",
+		"--mount", "type=bind,src="+spec.HomePath()+",dst="+ContainerHome+",nodev,nosuid",
+		"--mount", "type=bind,src="+ProfileMount().Source+
+			",dst="+ProfileMount().Destination+",ro,nodev,nosuid",
+		"--mount", "type=bind,src="+ToolsMount().Source+
+			",dst="+ToolsMount().Destination+",ro,nodev,nosuid",
+	)
 	for _, overlay := range spec.ProjectOverlays() {
 		args = append(args, "--volume", overlay.volume())
 	}
@@ -499,26 +577,13 @@ func (spec Spec) PublishArgs(cache CacheMount) ([]string, error) {
 		return nil, err
 	}
 	overlay := spec.cacheOverlay(cache)
-	memory := strconv.FormatInt(spec.MemoryBytes, 10)
-	return []string{
-		"run",
-		"--rm",
-		"--pull=never",
-		"--label", "io.pisafe.run=" + spec.RunID,
-		"--label", "io.pisafe.kind=publish",
-		"--user", containerUser,
-		"--read-only",
-		"--cap-drop=all",
-		"--security-opt=no-new-privileges",
-		"--network=none",
-		"--memory", memory,
-		"--memory-swap", memory,
-		"--pids-limit", strconv.Itoa(spec.PIDs),
+	return append(
+		spec.container("publish").args(),
 		"--volume", overlay.volume(),
 		spec.ImageID,
 		"tar", "--numeric-owner", "--owner=1000", "--group=1000",
 		"-C", overlay.Destination, "-cf", "-", ".",
-	}, nil
+	), nil
 }
 
 // PackageResolveArgs renders the throwaway container that asks npm what a
@@ -566,24 +631,17 @@ func packageArgs(imageID, kind string) ([]string, error) {
 	if !imageIDPattern.MatchString(imageID) {
 		return nil, fmt.Errorf("image must be an immutable sha256 ID")
 	}
-	memory := strconv.FormatInt(DefaultMemory, 10)
-	return []string{
-		"run",
-		"--rm",
-		"--pull=never",
-		"--label", "io.pisafe.kind=package-" + kind,
-		"--user", containerUser,
-		"--read-only",
-		"--cap-drop=all",
-		"--security-opt=no-new-privileges",
-		"--network=pasta",
-		"--dns=1.1.1.1",
-		"--dns=9.9.9.9",
-		"--memory", memory,
-		"--memory-swap", memory,
-		"--pids-limit", strconv.Itoa(DefaultPIDs),
-		"--timeout", strconv.Itoa(packageSeconds),
-		"--tmpfs", "/tmp:rw,nosuid,nodev,size=" + strconv.FormatInt(DefaultTemporary, 10),
+	settings := container{
+		kind:           "package-" + kind,
+		internet:       true,
+		memoryBytes:    DefaultMemory,
+		pids:           DefaultPIDs,
+		timeoutSeconds: packageSeconds,
+		tmpBytes:       DefaultTemporary,
+		tmpExec:        true,
+	}
+	return append(
+		settings.args(),
 		"--env", "HOME=/tmp",
 		"--env", "npm_config_cache=/tmp/npm-cache",
 		"--env", "npm_config_update_notifier=false",
@@ -591,7 +649,7 @@ func packageArgs(imageID, kind string) ([]string, error) {
 		"--env", "npm_config_audit=false",
 		"--workdir", "/tmp",
 		imageID,
-	}, nil
+	), nil
 }
 
 const (
@@ -617,24 +675,16 @@ func (spec Spec) ConfigureSSHArgs() ([]string, error) {
 	if err := spec.Validate(); err != nil {
 		return nil, err
 	}
-	return []string{
-		"run",
-		"--rm",
-		"--interactive",
-		"--pull=never",
-		"--label", "io.pisafe.run=" + spec.RunID,
-		"--label", "io.pisafe.kind=ssh-init",
-		"--user", containerUser,
-		"--read-only",
-		"--cap-drop=all",
-		"--security-opt=no-new-privileges",
-		"--network=none",
-		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=16777216",
-		"--mount", "type=bind,src=" + spec.HomePath() + ",dst=" + ContainerHome + ",nodev,nosuid",
-		"--env", "HOME=" + ContainerHome,
+	settings := spec.container("ssh-init")
+	settings.interactive = true
+	settings.tmpBytes = 16 << 20
+	return append(
+		settings.args(),
+		"--mount", "type=bind,src="+spec.HomePath()+",dst="+ContainerHome+",nodev,nosuid",
+		"--env", "HOME="+ContainerHome,
 		spec.ImageID,
 		"pisafe-guest", guestcall.ConfigureSSH,
-	}, nil
+	), nil
 }
 
 func (spec Spec) MaterializeArgs(projectDirectory string) ([]string, error) {
@@ -795,30 +845,18 @@ func (spec Spec) inspectionArgs(
 	if err := runid.Validate(projectDirectory); err != nil {
 		return nil, fmt.Errorf("invalid project directory: %w", err)
 	}
-	memory := strconv.FormatInt(spec.MemoryBytes, 10)
-	return []string{
-		"run",
-		"--rm",
-		"--interactive",
-		"--pull=never",
-		"--label", "io.pisafe.run=" + spec.RunID,
-		"--label", "io.pisafe.kind=" + kind,
-		"--user", containerUser,
-		"--read-only",
-		"--cap-drop=all",
-		"--security-opt=no-new-privileges",
-		"--network=none",
-		"--memory", memory,
-		"--memory-swap", memory,
-		"--pids-limit", strconv.Itoa(spec.PIDs),
-		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=" + strconv.FormatInt(spec.TmpBytes, 10),
-		"--mount", "type=bind,src=" + spec.WorkspacePath() +
-			",dst=" + ContainerWorkRoot + ",nodev,nosuid" + mountOptions,
+	settings := spec.container(kind)
+	settings.interactive = true
+	settings.tmpBytes = spec.TmpBytes
+	return append(
+		settings.args(),
+		"--mount", "type=bind,src="+spec.WorkspacePath()+
+			",dst="+ContainerWorkRoot+",nodev,nosuid"+mountOptions,
 		"--workdir", ContainerWorkRoot,
 		"--env", "HOME=/tmp",
 		"--env", "GIT_TERMINAL_PROMPT=0",
 		spec.ImageID,
-	}, nil
+	), nil
 }
 
 func (spec Spec) CleanupStageArgs() ([]string, error) {

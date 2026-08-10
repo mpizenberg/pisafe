@@ -760,7 +760,9 @@ func TestResumeCleansContainerAfterAmbiguousStartFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	backend.failAfterAt = "podman run --detach"
+	// Detaching is what distinguishes the run container from every throwaway
+	// one, whatever order the hardened prologue renders its flags in.
+	backend.failAfterAt = "--detach"
 	if _, err := controller.Resume(context.Background(), manifest.RunID); err == nil ||
 		!strings.Contains(err.Error(), "start run container") {
 		t.Fatalf("error = %v", err)

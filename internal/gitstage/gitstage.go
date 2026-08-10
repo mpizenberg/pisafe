@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -65,6 +66,82 @@ type PreparedStage struct {
 	PatchPath  string
 	InputsPath string
 	Submodules []PreparedSubmodule
+}
+
+const (
+	sourceBundleName = "source.bundle"
+	trackedPatchName = "tracked.patch"
+	// StageSnapshotName holds the one artifact a stage package does not
+	// describe, because it is what describes the rest: the receiving side reads
+	// it and locates everything else from what it says.
+	StageSnapshotName = "snapshot.json"
+)
+
+// stageSubmoduleArtifact bounds the names a submodule contributes to a stage
+// package, so an artifact name can never become a path.
+var stageSubmoduleArtifact = regexp.MustCompile(`^submodule-[0-9]{1,4}\.(bundle|patch)$`)
+
+// StageArtifact is one file of a stage package: the name both sides address it
+// by, and the path it has on whichever side currently holds it.
+type StageArtifact struct {
+	Name string
+	Path string
+}
+
+// Artifacts lists the files a prepared stage consists of, other than the
+// snapshot that names them.
+func (prepared PreparedStage) Artifacts() []StageArtifact {
+	artifacts := []StageArtifact{
+		{Name: sourceBundleName, Path: prepared.BundlePath},
+		{Name: trackedPatchName, Path: prepared.PatchPath},
+	}
+	if prepared.InputsPath != "" {
+		artifacts = append(artifacts, StageArtifact{
+			Name: inputsArchiveName,
+			Path: prepared.InputsPath,
+		})
+	}
+	for index, submodule := range prepared.Submodules {
+		artifacts = append(
+			artifacts,
+			StageArtifact{Name: submoduleBundleName(index), Path: submodule.BundlePath},
+			StageArtifact{Name: submodulePatchName(index), Path: submodule.PatchPath},
+		)
+	}
+	return artifacts
+}
+
+// StagePackage locates the artifacts of a stage package in one directory. It is
+// what the receiving side has in place of the record the sending side built,
+// and it is the layout Prepare writes, so neither side spells the other's file
+// names.
+func StagePackage(directory string, snapshot Snapshot) PreparedStage {
+	prepared := PreparedStage{
+		Snapshot:   snapshot,
+		BundlePath: filepath.Join(directory, sourceBundleName),
+		PatchPath:  filepath.Join(directory, trackedPatchName),
+	}
+	if len(snapshot.Inputs) != 0 {
+		prepared.InputsPath = filepath.Join(directory, inputsArchiveName)
+	}
+	for index, submodule := range snapshot.Submodules {
+		prepared.Submodules = append(prepared.Submodules, PreparedSubmodule{
+			Path:       submodule.Path,
+			BundlePath: filepath.Join(directory, submoduleBundleName(index)),
+			PatchPath:  filepath.Join(directory, submodulePatchName(index)),
+		})
+	}
+	return prepared
+}
+
+// ValidStageArtifactName reports whether a name is one a stage package holds.
+// Whoever writes into the package asks here, because the names are formed here.
+func ValidStageArtifactName(name string) bool {
+	switch name {
+	case sourceBundleName, trackedPatchName, StageSnapshotName, inputsArchiveName:
+		return true
+	}
+	return stageSubmoduleArtifact.MatchString(name)
 }
 
 // PrepareRequest describes one staging operation. Selected inputs are the only
@@ -215,7 +292,7 @@ func withoutCovered(names, others []string) []string {
 // bundle rooted at HEAD, a binary patch of the final tracked state, and an
 // archive of any explicitly selected untracked inputs. PackageDir must not
 // already exist.
-func Prepare(ctx context.Context, request PrepareRequest) (prepared PreparedStage, err error) {
+func Prepare(ctx context.Context, request PrepareRequest) (PreparedStage, error) {
 	runID, packageDir := request.RunID, request.PackageDir
 	if err := runid.Validate(runID); err != nil {
 		return PreparedStage{}, err
@@ -250,46 +327,11 @@ func Prepare(ctx context.Context, request PrepareRequest) (prepared PreparedStag
 		}
 	}()
 
-	bundlePath := filepath.Join(packageDir, "source.bundle")
-	patchPath := filepath.Join(packageDir, "tracked.patch")
-	if err := captureRepository(ctx, root, bundlePath, patchPath); err != nil {
-		return PreparedStage{}, err
-	}
-	preparedSubmodules := make([]PreparedSubmodule, 0, len(submodules))
-	for index, submodule := range submodules {
-		working := filepath.Join(root, filepath.FromSlash(submodule.Path))
-		artifacts := PreparedSubmodule{
-			Path:       submodule.Path,
-			BundlePath: filepath.Join(packageDir, submoduleBundleName(index)),
-			PatchPath:  filepath.Join(packageDir, submodulePatchName(index)),
-		}
-		if err := captureRepository(
-			ctx,
-			working,
-			artifacts.BundlePath,
-			artifacts.PatchPath,
-		); err != nil {
-			return PreparedStage{}, fmt.Errorf("submodule %q: %w", submodule.Path, err)
-		}
-		preparedSubmodules = append(preparedSubmodules, artifacts)
-	}
-	if err := recheckHeads(ctx, root, head, submodules); err != nil {
-		return PreparedStage{}, err
-	}
-
-	inputsPath := ""
 	names := make([]string, 0, len(request.Inputs))
-	if len(request.Inputs) != 0 {
-		inputsPath = filepath.Join(packageDir, inputsArchiveName)
-		if err := writeInputsArchive(root, inputsPath, request.Inputs); err != nil {
-			return PreparedStage{}, err
-		}
-		for _, input := range request.Inputs {
-			names = append(names, input.Path)
-		}
+	for _, input := range request.Inputs {
+		names = append(names, input.Path)
 	}
-
-	snapshot := Snapshot{
+	prepared := StagePackage(packageDir, Snapshot{
 		RunID:      runID,
 		SourceRoot: root,
 		SourceHead: head,
@@ -297,15 +339,31 @@ func Prepare(ctx context.Context, request PrepareRequest) (prepared PreparedStag
 		Inputs:     names,
 		Submodules: submodules,
 		CreatedAt:  time.Now().UTC(),
+	})
+	if err := captureRepository(ctx, root, prepared.BundlePath, prepared.PatchPath); err != nil {
+		return PreparedStage{}, err
+	}
+	for _, artifacts := range prepared.Submodules {
+		working := filepath.Join(root, filepath.FromSlash(artifacts.Path))
+		if err := captureRepository(
+			ctx,
+			working,
+			artifacts.BundlePath,
+			artifacts.PatchPath,
+		); err != nil {
+			return PreparedStage{}, fmt.Errorf("submodule %q: %w", artifacts.Path, err)
+		}
+	}
+	if err := recheckHeads(ctx, root, head, submodules); err != nil {
+		return PreparedStage{}, err
+	}
+	if prepared.InputsPath != "" {
+		if err := writeInputsArchive(root, prepared.InputsPath, request.Inputs); err != nil {
+			return PreparedStage{}, err
+		}
 	}
 	complete = true
-	return PreparedStage{
-		Snapshot:   snapshot,
-		BundlePath: bundlePath,
-		PatchPath:  patchPath,
-		InputsPath: inputsPath,
-		Submodules: preparedSubmodules,
-	}, nil
+	return prepared, nil
 }
 
 // recheckHeads fails the run if the source moved while its artifacts were

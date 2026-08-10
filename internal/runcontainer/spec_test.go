@@ -11,6 +11,56 @@ const testProjectKey = "project-3f9c2a1b"
 
 const testImageID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+// TestEveryContainerPisafeStartsIsHardened is what the shared base exists for:
+// whatever a container is for, it runs a pinned image as an unprivileged user
+// that can gain no capability and no privilege, and it is bounded. Only the run
+// container outlives the command that starts it; the rest are removed on exit.
+func TestEveryContainerPisafeStartsIsHardened(t *testing.T) {
+	spec := DefaultSpec("run-123", testProjectKey, testImageID)
+	integrity := "sha512-" + strings.Repeat("A", 86) + "=="
+	npm := CacheMount{Name: "npm", Env: []string{"npm_config_cache"}, Key: "0123456789abcdef"}
+	containers := map[string]func() ([]string, error){
+		"run":      spec.RunArgs,
+		"publish":  func() ([]string, error) { return spec.PublishArgs(npm) },
+		"resolve":  func() ([]string, error) { return PackageResolveArgs(testImageID, "is-number") },
+		"ssh-init": spec.ConfigureSSHArgs,
+		"apply":    func() ([]string, error) { return spec.PrepareApplyArgs("project", gitstage.KeepBaseline) },
+		"diff":     func() ([]string, error) { return spec.DiffArgs("project") },
+		"copy":     func() ([]string, error) { return spec.ExportArgs("project", "dist") },
+		"copy-in":  func() ([]string, error) { return spec.ImportArgs("project", "", "note.md", false) },
+		"install": func() ([]string, error) {
+			return PackageInstallArgs(testImageID, "is-number", "7.0.0", integrity)
+		},
+	}
+	for name, build := range containers {
+		args, err := build()
+		if err != nil {
+			t.Fatal(err)
+		}
+		joined := strings.Join(args, " ")
+		for _, required := range []string{
+			"--pull=never",
+			"--user 1000:1000",
+			"--read-only",
+			"--cap-drop=all",
+			"--security-opt=no-new-privileges",
+			"--memory ",
+			"--memory-swap ",
+			"--pids-limit ",
+			testImageID,
+		} {
+			if !strings.Contains(joined, required) {
+				t.Errorf("%s container lacks %q:\n%s", name, required, joined)
+			}
+		}
+		named := strings.Contains(joined, "--name ")
+		if named != (name == "run") || named != strings.Contains(joined, "--detach") ||
+			named == strings.Contains(joined, "--rm") {
+			t.Errorf("%s container is named=%v:\n%s", name, named, joined)
+		}
+	}
+}
+
 func TestRunArgsAreHardenedAndImmutable(t *testing.T) {
 	spec := DefaultSpec("run-123", testProjectKey, testImageID)
 	args, err := spec.RunArgs()
@@ -19,11 +69,6 @@ func TestRunArgsAreHardenedAndImmutable(t *testing.T) {
 	}
 	joined := strings.Join(args, " ")
 	for _, required := range []string{
-		"--pull=never",
-		"--user 1000:1000",
-		"--read-only",
-		"--cap-drop=all",
-		"--security-opt=no-new-privileges",
 		"--network=pasta",
 		"--dns=1.1.1.1",
 		"--dns=9.9.9.9",
@@ -80,15 +125,9 @@ func TestStorageAndMaterializeArgsAreRunScoped(t *testing.T) {
 	}
 	configureJoined := strings.Join(configureSSH, " ")
 	for _, expected := range []string{
-		"--rm",
 		"--interactive",
 		"--network=none",
-		"--user 1000:1000",
-		"--read-only",
-		"--cap-drop=all",
-		"--security-opt=no-new-privileges",
 		"type=bind,src=/var/lib/pisafe/runs/run-123/home,dst=/home/node,nodev,nosuid",
-		testImageID,
 		"pisafe-guest configure-ssh",
 	} {
 		if !strings.Contains(configureJoined, expected) {
@@ -105,15 +144,9 @@ func TestPrepareApplyArgsRunWithoutNetworkOrRunHome(t *testing.T) {
 	}
 	joined := strings.Join(args, " ")
 	for _, expected := range []string{
-		"--rm",
 		"--interactive",
 		"--network=none",
-		"--user 1000:1000",
-		"--read-only",
-		"--cap-drop=all",
-		"--security-opt=no-new-privileges",
 		"type=bind,src=/var/lib/pisafe/runs/run-123/workspace,dst=/work,nodev,nosuid",
-		testImageID,
 		"pisafe-guest prepare-apply keep /work/project /work/apply",
 	} {
 		if !strings.Contains(joined, expected) {
@@ -201,9 +234,6 @@ func TestImportArgsWriteOnlyToTheWorkspace(t *testing.T) {
 	joined := strings.Join(args, " ")
 	for _, expected := range []string{
 		"--network=none",
-		"--read-only",
-		"--cap-drop=all",
-		"--security-opt=no-new-privileges",
 		"type=bind,src=/var/lib/pisafe/runs/run-123/workspace,dst=/work,nodev,nosuid ",
 		"pisafe-guest import /work/project plans note.md refuse",
 	} {
@@ -349,16 +379,9 @@ func TestInstallingAnExtensionRunsWithNetworkAndNoStorage(t *testing.T) {
 	for name, args := range map[string][]string{"resolve": resolve, "install": install} {
 		joined := strings.Join(args, " ")
 		for _, required := range []string{
-			"--rm",
-			"--pull=never",
-			"--user 1000:1000",
-			"--read-only",
-			"--cap-drop=all",
-			"--security-opt=no-new-privileges",
 			"--network=pasta",
 			"--pids-limit 512",
 			"--timeout 600",
-			testImageID,
 		} {
 			if !strings.Contains(joined, required) {
 				t.Errorf("%s args lack %q:\n%s", name, required, joined)
@@ -464,12 +487,8 @@ func TestPublishReadsExactlyOneCacheThroughItsOverlay(t *testing.T) {
 	if count := strings.Count(joined, "--volume") + strings.Count(joined, "--mount"); count != 1 {
 		t.Errorf("publishing npm opens %d mounts, want only its own:\n%s", count, joined)
 	}
-	for _, required := range []string{
-		"--network=none", "--read-only", "--cap-drop=all", "--security-opt=no-new-privileges",
-	} {
-		if !strings.Contains(joined, required) {
-			t.Errorf("publish args lack %q:\n%s", required, joined)
-		}
+	if !strings.Contains(joined, "--network=none") {
+		t.Errorf("publish args reach the network:\n%s", joined)
 	}
 	if _, err := spec.PublishArgs(CacheMount{Name: "npm", Env: npm.Env, Key: "not-a-key"}); err == nil {
 		t.Error("an unkeyed cache was published")

@@ -445,10 +445,6 @@ const maxResolveBytes = 1 << 22
 // legitimately produce reaches it.
 const maxApplyArtifactBytes = int64(8 << 30)
 
-// submoduleArtifactPattern bounds the stage file names a submodule may
-// contribute, so an artifact name can never become a path.
-var submoduleArtifactPattern = regexp.MustCompile(`^submodule-[0-9]{1,4}\.(bundle|patch)$`)
-
 // applyArtifactPattern bounds the file names an apply package may hand back,
 // so the run cannot steer the fetch outside its own package directory.
 var applyArtifactPattern = regexp.MustCompile(`^apply(-submodule-[0-9]{1,4})?\.bundle$`)
@@ -563,39 +559,15 @@ func (transport Transport) CreateStage(
 	}
 	snapshotJSON = append(snapshotJSON, '\n')
 
-	type stageArtifact struct {
-		name string
-		path string
-		data []byte
-	}
-	artifacts := []stageArtifact{
-		{name: "source.bundle", path: prepared.BundlePath},
-		{name: "tracked.patch", path: prepared.PatchPath},
-		{name: "snapshot.json", data: snapshotJSON},
-	}
-	if prepared.InputsPath != "" {
-		artifacts = append(artifacts, stageArtifact{
-			name: "inputs.tar",
-			path: prepared.InputsPath,
-		})
-	}
-	for index, submodule := range prepared.Submodules {
-		artifacts = append(
-			artifacts,
-			stageArtifact{
-				name: fmt.Sprintf("submodule-%d.bundle", index),
-				path: submodule.BundlePath,
-			},
-			stageArtifact{
-				name: fmt.Sprintf("submodule-%d.patch", index),
-				path: submodule.PatchPath,
-			},
-		)
-	}
-	for _, artifact := range artifacts {
-		if err := transport.uploadArtifact(ctx, runID, artifact.name, artifact.path, artifact.data); err != nil {
-			return "", fmt.Errorf("upload %s: %w", artifact.name, err)
+	for _, artifact := range prepared.Artifacts() {
+		if err := transport.uploadArtifact(ctx, runID, artifact.Name, artifact.Path, nil); err != nil {
+			return "", fmt.Errorf("upload %s: %w", artifact.Name, err)
 		}
+	}
+	if err := transport.uploadArtifact(
+		ctx, runID, gitstage.StageSnapshotName, "", snapshotJSON,
+	); err != nil {
+		return "", fmt.Errorf("upload %s: %w", gitstage.StageSnapshotName, err)
 	}
 	return stagePath, nil
 }
@@ -1396,12 +1368,8 @@ func (transport Transport) uploadArtifact(
 	path string,
 	data []byte,
 ) error {
-	switch name {
-	case "source.bundle", "tracked.patch", "snapshot.json", "inputs.tar":
-	default:
-		if !submoduleArtifactPattern.MatchString(name) {
-			return fmt.Errorf("unsupported stage artifact %q", name)
-		}
+	if !gitstage.ValidStageArtifactName(name) {
+		return fmt.Errorf("unsupported stage artifact %q", name)
 	}
 
 	var (

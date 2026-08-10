@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -60,6 +61,63 @@ func TestStageCapturesFinalTrackedBaseline(t *testing.T) {
 	message := runGit(t, workspace, "log", "-1", "--format=%s")
 	if message != baselineMessage {
 		t.Fatalf("baseline message = %q", message)
+	}
+}
+
+// TestStagePackageDerivesWhatPrepareWrote is what lets the receiving side find
+// a stage package's files without being told where they are: the layout follows
+// from the snapshot alone, so both sides name the same files or neither does.
+func TestStagePackageDerivesWhatPrepareWrote(t *testing.T) {
+	ctx := context.Background()
+	source := newInputRepository(t)
+	addSubmodule(t, source, newRepository(t), "dependency")
+	inputs, _, err := selectInputs(t, source, InputSelection{
+		Include: []string{filepath.Join(source, "notes.txt")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packageDir := filepath.Join(t.TempDir(), "package")
+	prepared, err := Prepare(ctx, PrepareRequest{
+		SourcePath: source,
+		PackageDir: packageDir,
+		RunID:      "layout-run",
+		Inputs:     inputs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if derived := StagePackage(packageDir, prepared.Snapshot); !reflect.DeepEqual(derived, prepared) {
+		t.Fatalf("derived = %#v, want %#v", derived, prepared)
+	}
+	artifacts := prepared.Artifacts()
+	if len(artifacts) != 5 {
+		t.Fatalf("artifacts = %#v", artifacts)
+	}
+	for _, artifact := range artifacts {
+		if !ValidStageArtifactName(artifact.Name) {
+			t.Errorf("%q is not a name a stage package may hold", artifact.Name)
+		}
+		if artifact.Path != filepath.Join(packageDir, artifact.Name) {
+			t.Errorf("%s is at %q", artifact.Name, artifact.Path)
+		}
+		if _, err := os.Stat(artifact.Path); err != nil {
+			t.Error(err)
+		}
+	}
+
+	// A stage carrying no selected inputs has no archive, and neither side then
+	// looks for one.
+	quiet, err := Prepare(ctx, PrepareRequest{
+		SourcePath: source,
+		PackageDir: filepath.Join(t.TempDir(), "package"),
+		RunID:      "quiet-layout-run",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quiet.InputsPath != "" || len(quiet.Artifacts()) != 4 {
+		t.Fatalf("artifacts without inputs = %#v", quiet.Artifacts())
 	}
 }
 
