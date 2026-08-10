@@ -313,9 +313,5 @@ func startBoundary(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("discover host networks: %w", err)
 	}
-	prefixStrings := make([]string, 0, len(prefixes))
-	for _, prefix := range prefixes {
-		prefixStrings = append(prefixStrings, prefix.String())
-	}
-	return lima.NewManager().Start(ctx, prefixStrings)
+	return lima.NewManager().Start(ctx, prefixes)
 }

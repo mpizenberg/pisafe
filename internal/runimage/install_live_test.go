@@ -24,11 +24,7 @@ func TestLiveInstallAndReuseManagedImage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prefixStrings := make([]string, 0, len(prefixes))
-	for _, prefix := range prefixes {
-		prefixStrings = append(prefixStrings, prefix.String())
-	}
-	if err := lima.NewManager().Start(ctx, prefixStrings); err != nil {
+	if err := lima.NewManager().Start(ctx, prefixes); err != nil {
 		t.Fatal(err)
 	}
 

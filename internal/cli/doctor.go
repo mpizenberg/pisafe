@@ -84,6 +84,10 @@ func checkGeneratedLimaConfig(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("render Lima configuration: %w", err)
 	}
+	boundary, err := limabackend.CanonicalIPv4Prefixes(prefixes)
+	if err != nil {
+		return fmt.Errorf("host networks: %w", err)
+	}
 
 	tempDir, err := os.MkdirTemp("", "pisafe-doctor-*")
 	if err != nil {
@@ -98,6 +102,6 @@ func checkGeneratedLimaConfig(ctx context.Context, out io.Writer) error {
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("validate Lima configuration: %s", output)
 	}
-	fmt.Fprintf(out, "OK       Boundary %d host IPv4 prefixes; Lima config valid\n", len(prefixes))
+	fmt.Fprintf(out, "OK       Boundary %d host IPv4 prefixes; Lima config valid\n", len(boundary))
 	return nil
 }

@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -98,11 +98,7 @@ func (manager Manager) Ensure(ctx context.Context, prefixes []netip.Prefix) erro
 			return err
 		}
 	}
-	prefixStrings := make([]string, 0, len(prefixes))
-	for _, prefix := range prefixes {
-		prefixStrings = append(prefixStrings, prefix.String())
-	}
-	return manager.Start(ctx, prefixStrings)
+	return manager.Start(ctx, prefixes)
 }
 
 // provision renders the VM definition and builds an instance from it. The
@@ -265,20 +261,21 @@ func (manager Manager) unlockStateDisk(ctx context.Context) error {
 // Start starts (or reuses) the VM and verifies that its immutable host-network
 // deny set and generated security profile still match the controller. Callers
 // must not start run containers if this fails.
-func (manager Manager) Start(ctx context.Context, hostPrefixes []string) error {
-	if _, err := renderPrefixInput(hostPrefixes); err != nil {
+func (manager Manager) Start(ctx context.Context, hostPrefixes []netip.Prefix) error {
+	prefixes, err := CanonicalIPv4Prefixes(hostPrefixes)
+	if err != nil {
 		return err
 	}
 	if err := manager.bringUp(ctx); err != nil {
 		return err
 	}
-	if err := manager.VerifySecurityProfile(ctx, hostPrefixes); err != nil {
+	if err := manager.verifySecurityProfile(ctx, prefixes); err != nil {
 		return err
 	}
 	if err := manager.SyncClock(ctx); err != nil {
 		return err
 	}
-	return manager.VerifyFirewall(ctx, hostPrefixes)
+	return manager.verifyFirewall(ctx, prefixes)
 }
 
 // StartUnverified starts (or reuses) the VM without holding it to the boundary
@@ -329,15 +326,12 @@ func (manager Manager) bringUp(ctx context.Context) error {
 	}
 }
 
-// VerifySecurityProfile detects an instance provisioned by an older or locally
+// verifySecurityProfile detects an instance provisioned by an older or locally
 // modified VM definition. The record is root-owned and immutable to the
-// unprivileged Lima user after provisioning.
-func (manager Manager) VerifySecurityProfile(ctx context.Context, prefixes []string) error {
-	rendered, err := renderPrefixInput(prefixes)
-	if err != nil {
-		return err
-	}
-	expected := securityProfileDigest(strings.Fields(rendered))
+// unprivileged Lima user after provisioning. The prefixes are already canonical:
+// what the digest is taken over is decided once, by Start.
+func (manager Manager) verifySecurityProfile(ctx context.Context, prefixes []string) error {
+	expected := securityProfileDigest(prefixes)
 	output, err := manager.runner.Run(
 		ctx,
 		nil,
@@ -376,14 +370,12 @@ func (manager Manager) SyncClock(ctx context.Context) error {
 	return nil
 }
 
-// VerifyFirewall refuses to reuse a VM after the Mac's on-link networks
-// change. The prefix set is immutable at runtime so a process that escapes to
-// the Lima user cannot use a privileged refresh operation to weaken it.
-func (manager Manager) VerifyFirewall(ctx context.Context, prefixes []string) error {
-	expected, err := renderPrefixInput(prefixes)
-	if err != nil {
-		return err
-	}
+// verifyFirewall refuses to reuse a VM after the Mac's on-link networks change.
+// The prefix set is immutable at runtime so a process that escapes to the Lima
+// user cannot use a privileged refresh operation to weaken it. The VM's copy is
+// the one deny set pisafe did not compose, so it is parsed rather than trusted:
+// a line that is not an IPv4 prefix fails the check instead of being skipped.
+func (manager Manager) verifyFirewall(ctx context.Context, prefixes []string) error {
 	output, err := manager.runner.Run(
 		ctx,
 		nil,
@@ -395,36 +387,24 @@ func (manager Manager) VerifyFirewall(ctx context.Context, prefixes []string) er
 	if err != nil {
 		return fmt.Errorf("read VM firewall networks: %w", err)
 	}
-	actualLines := strings.Fields(string(output))
-	actual, err := renderPrefixInput(actualLines)
+	installed := make([]netip.Prefix, 0, len(prefixes))
+	for _, field := range strings.Fields(string(output)) {
+		prefix, err := netip.ParsePrefix(field)
+		if err != nil || !prefix.Addr().Is4() {
+			return fmt.Errorf("validate VM firewall networks: invalid IPv4 prefix %q", field)
+		}
+		installed = append(installed, prefix)
+	}
+	actual, err := CanonicalIPv4Prefixes(installed)
 	if err != nil {
 		return fmt.Errorf("validate VM firewall networks: %w", err)
 	}
-	if actual != expected {
+	if !slices.Equal(actual, prefixes) {
 		return fmt.Errorf(
 			"VM firewall networks are stale; rebuild the VM with pisafe vm rebuild",
 		)
 	}
 	return nil
-}
-
-func renderPrefixInput(prefixes []string) (string, error) {
-	if len(prefixes) == 0 {
-		return "", errors.New("host IPv4 prefixes are required; refusing to empty the firewall set")
-	}
-	parsed := make([]netip.Prefix, 0, len(prefixes))
-	for _, rawPrefix := range prefixes {
-		prefix, err := netip.ParsePrefix(rawPrefix)
-		if err != nil || !prefix.Addr().Is4() {
-			return "", fmt.Errorf("invalid IPv4 prefix %q", rawPrefix)
-		}
-		parsed = append(parsed, prefix)
-	}
-	canonical, err := canonicalIPv4Prefixes(parsed)
-	if err != nil {
-		return "", err
-	}
-	return strings.Join(canonical, "\n") + "\n", nil
 }
 
 type execRunner struct {

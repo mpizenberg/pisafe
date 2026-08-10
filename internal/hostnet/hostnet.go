@@ -1,6 +1,11 @@
-// Package hostnet discovers host-side networks that a pisafe VM must not
-// reach. The result is embedded in the initial firewall and refreshed whenever
-// the VM starts or resumes.
+// Package hostnet discovers the host-side networks a pisafe VM must not reach.
+// It reports what the Mac is attached to and nothing more: masking, collapsing,
+// and ordering belong to whoever builds the boundary out of them, because that
+// is what the VM definition and its digest are taken over.
+//
+// The set is fixed into the VM definition when the instance is built. Starting
+// or resuming a VM verifies it rather than rewriting it, so a Mac that has since
+// joined a different network fails the check and is told to rebuild.
 package hostnet
 
 import (
@@ -11,7 +16,6 @@ import (
 	"net"
 	"net/netip"
 	"os/exec"
-	"sort"
 	"strings"
 )
 
@@ -46,8 +50,12 @@ func OnLinkIPv4(ctx context.Context) ([]netip.Prefix, error) {
 	return collectIPv4(infos, gateway)
 }
 
+// collectIPv4 takes the IPv4 prefix of every address on an interface that is up
+// and is not the loopback, and the default gateway as a host route. An empty
+// result is an error: an incomplete deny set is worse than none at all, because
+// it would be built into a VM that then looks boundaried.
 func collectIPv4(interfaces []interfaceInfo, gateway netip.Addr) ([]netip.Prefix, error) {
-	unique := make(map[netip.Prefix]struct{})
+	prefixes := []netip.Prefix{}
 	for _, networkInterface := range interfaces {
 		if networkInterface.flags&net.FlagUp == 0 || networkInterface.flags&net.FlagLoopback != 0 {
 			continue
@@ -57,43 +65,15 @@ func collectIPv4(interfaces []interfaceInfo, gateway netip.Addr) ([]netip.Prefix
 			if err != nil || !prefix.Addr().Is4() {
 				continue
 			}
-			unique[prefix.Masked()] = struct{}{}
+			prefixes = append(prefixes, prefix)
 		}
 	}
 	if gateway.IsValid() && gateway.Is4() {
-		unique[netip.PrefixFrom(gateway, gateway.BitLen())] = struct{}{}
+		prefixes = append(prefixes, netip.PrefixFrom(gateway, gateway.BitLen()))
 	}
-	if len(unique) == 0 {
+	if len(prefixes) == 0 {
 		return nil, errors.New("no active host IPv4 network could be determined")
 	}
-
-	prefixes := make([]netip.Prefix, 0, len(unique))
-	for prefix := range unique {
-		prefixes = append(prefixes, prefix)
-	}
-	sort.Slice(prefixes, func(left, right int) bool {
-		if prefixes[left].Bits() != prefixes[right].Bits() {
-			return prefixes[left].Bits() < prefixes[right].Bits()
-		}
-		return prefixes[left].String() < prefixes[right].String()
-	})
-	collapsed := make([]netip.Prefix, 0, len(prefixes))
-	for _, candidate := range prefixes {
-		covered := false
-		for _, existing := range collapsed {
-			if existing.Contains(candidate.Addr()) {
-				covered = true
-				break
-			}
-		}
-		if !covered {
-			collapsed = append(collapsed, candidate)
-		}
-	}
-	prefixes = collapsed
-	sort.Slice(prefixes, func(left, right int) bool {
-		return prefixes[left].String() < prefixes[right].String()
-	})
 	return prefixes, nil
 }
 

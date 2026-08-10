@@ -162,8 +162,11 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
 ### Host network and Lima backend
 
 - `internal/hostnet` gathers IPv4 prefixes from every active non-loopback Mac
-  interface plus the default gateway, canonicalized, deduplicated, and collapsed
-  so nftables interval sets never overlap. Discovery fails closed.
+  interface plus the default gateway, and reports them as observed. Discovery
+  fails closed. `lima.CanonicalIPv4Prefixes` is the one place they are masked,
+  deduplicated, ordered, and collapsed so nftables interval sets never overlap:
+  the VM definition, its digest, and the check against a running VM all read the
+  set from there, so an uncollapsed Mac and a collapsed one are never a drift.
 - Dedicated instance `pisafe`, Lima ≥ 2.2.0, `plain: true` (no mounts, dynamic
   forwarding, containerd, guest agent, or agent forwarding), explicitly empty
   mounts, no forwarded X11/proxy/host-resolver/Podman socket, public DNS, IPv6
@@ -231,7 +234,9 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   infrastructure working.
 - `Start` requires a non-empty host-prefix set and compares it against the
   root-owned record baked into the firewall; a network change fails closed and
-  requires VM recreation.
+  requires VM recreation. The record is parsed as IPv4 prefixes before it is
+  compared, so a line the VM holds that is not one fails the check rather than
+  being read past.
 - **There is deliberately no runtime firewall-mutation privilege for the Lima
   user.** A merely syntax-valid refresh helper would still let an escaped
   process replace the real LAN set with an unrelated valid prefix.

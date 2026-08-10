@@ -9,6 +9,14 @@ import (
 	"testing"
 )
 
+func testPrefixes(values ...string) []netip.Prefix {
+	prefixes := make([]netip.Prefix, 0, len(values))
+	for _, value := range values {
+		prefixes = append(prefixes, netip.MustParsePrefix(value))
+	}
+	return prefixes
+}
+
 type recordedCall struct {
 	args  []string
 	stdin string
@@ -172,7 +180,7 @@ func TestManagerStartIsIdempotent(t *testing.T) {
 	}}
 	manager := Manager{instance: InstanceName, runner: runner}
 
-	if err := manager.Start(context.Background(), []string{"192.168.2.0/24"}); err != nil {
+	if err := manager.Start(context.Background(), testPrefixes("192.168.2.0/24")); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 4 {
@@ -200,7 +208,7 @@ func TestManagerStartRefreshesAfterResume(t *testing.T) {
 	}}
 	manager := Manager{instance: InstanceName, runner: runner}
 
-	if err := manager.Start(context.Background(), []string{"192.168.2.0/24"}); err != nil {
+	if err := manager.Start(context.Background(), testPrefixes("192.168.2.0/24")); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 5 {
@@ -273,7 +281,7 @@ func TestManagerStartFailsClosedOnSecurityProfileDrift(t *testing.T) {
 	}}
 	manager := Manager{instance: InstanceName, runner: runner}
 
-	err := manager.Start(context.Background(), []string{"192.168.2.0/24"})
+	err := manager.Start(context.Background(), testPrefixes("192.168.2.0/24"))
 	if err == nil || !strings.Contains(err.Error(), "security profile is stale") {
 		t.Fatalf("error = %v", err)
 	}
@@ -289,7 +297,7 @@ func TestManagerStartFailsClosedWhenSecurityProfileIsMissing(t *testing.T) {
 	}
 	manager := Manager{instance: InstanceName, runner: runner}
 
-	err := manager.Start(context.Background(), []string{"192.168.2.0/24"})
+	err := manager.Start(context.Background(), testPrefixes("192.168.2.0/24"))
 	if err == nil || !strings.Contains(err.Error(), "pisafe vm rebuild") {
 		t.Fatalf("error = %v", err)
 	}
@@ -313,11 +321,13 @@ func TestVerifyFirewallAcceptsCanonicalEquivalentPrefixes(t *testing.T) {
 	}}
 	manager := Manager{instance: InstanceName, runner: runner}
 
-	err := manager.VerifyFirewall(
-		context.Background(),
-		[]string{"192.168.2.0/24", "192.168.2.1/32", "203.0.113.9/32"},
+	prefixes, err := CanonicalIPv4Prefixes(
+		testPrefixes("192.168.2.0/24", "192.168.2.1/32", "203.0.113.9/32"),
 	)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.verifyFirewall(context.Background(), prefixes); err != nil {
 		t.Fatal(err)
 	}
 	if len(runner.calls) != 1 {
@@ -330,9 +340,14 @@ func TestVerifyFirewallAcceptsCanonicalEquivalentPrefixes(t *testing.T) {
 	)
 }
 
+// The deny set the VM holds is the one pisafe did not compose, so a line of it
+// that is not an IPv4 prefix fails the check rather than being skipped past.
 func TestVerifyFirewallRejectsInjectedPrefix(t *testing.T) {
-	manager := Manager{instance: InstanceName, runner: &fakeRunner{}}
-	err := manager.VerifyFirewall(context.Background(), []string{"10.0.0.0/8 } delete table inet pisafe"})
+	runner := &fakeRunner{outputs: [][]byte{
+		[]byte("10.0.0.0/8 } delete table inet pisafe\n"),
+	}}
+	manager := Manager{instance: InstanceName, runner: runner}
+	err := manager.verifyFirewall(context.Background(), []string{"10.0.0.0/8"})
 	if err == nil || !strings.Contains(err.Error(), "invalid IPv4 prefix") {
 		t.Fatalf("error = %v", err)
 	}
@@ -343,7 +358,7 @@ func TestVerifyFirewallFailsClosedOnNetworkChange(t *testing.T) {
 		[]byte("192.168.2.0/24\n"),
 	}}
 	manager := Manager{instance: InstanceName, runner: runner}
-	err := manager.VerifyFirewall(context.Background(), []string{"10.20.30.0/24"})
+	err := manager.verifyFirewall(context.Background(), []string{"10.20.30.0/24"})
 	if err == nil || !strings.Contains(err.Error(), "stale") {
 		t.Fatalf("error = %v", err)
 	}
@@ -426,7 +441,7 @@ func TestManagerDeleteReplacesAnInstanceLimaCannotClassify(t *testing.T) {
 		instance: InstanceName,
 		runner:   &fakeRunner{outputs: [][]byte{[]byte("pisafe\tBroken\n")}},
 	}
-	err := broken.Start(context.Background(), []string{"192.168.2.0/24"})
+	err := broken.Start(context.Background(), testPrefixes("192.168.2.0/24"))
 	if err == nil || !strings.Contains(err.Error(), "pisafe vm rebuild") {
 		t.Fatalf("error = %v", err)
 	}

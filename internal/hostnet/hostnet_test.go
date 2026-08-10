@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestCollectIPv4CanonicalizesAndIncludesGateway(t *testing.T) {
+func TestCollectIPv4ReportsLiveInterfacesAndTheGateway(t *testing.T) {
 	interfaces := []interfaceInfo{
 		{
 			flags: net.FlagUp,
@@ -35,7 +35,9 @@ func TestCollectIPv4CanonicalizesAndIncludesGateway(t *testing.T) {
 	for _, prefix := range prefixes {
 		got = append(got, prefix.String())
 	}
-	want := []string{"100.64.4.0/30", "192.168.7.0/24"}
+	// A down interface, the loopback, and IPv6 contribute nothing. What is left
+	// is reported as observed: the boundary is what masks and collapses it.
+	want := []string{"192.168.7.23/24", "100.64.4.2/30", "192.168.7.1/32"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("prefixes = %#v, want %#v", got, want)
 	}

@@ -31,7 +31,7 @@ const (
 )
 
 func RenderConfig(hostIPv4Prefixes []netip.Prefix) ([]byte, error) {
-	prefixes, err := canonicalIPv4Prefixes(hostIPv4Prefixes)
+	prefixes, err := CanonicalIPv4Prefixes(hostIPv4Prefixes)
 	if err != nil {
 		return nil, err
 	}
@@ -86,7 +86,11 @@ func securityProfileDigest(prefixes []string) string {
 	return "sha256:" + hex.EncodeToString(digest.Sum(nil))
 }
 
-func canonicalIPv4Prefixes(prefixes []netip.Prefix) ([]string, error) {
+// CanonicalIPv4Prefixes is the deny set as the VM definition and its digest
+// state it: masked, deduplicated, ordered, and with any prefix another already
+// covers removed. Everything that builds or checks the boundary reads it from
+// here, so the set a VM was built with and the set it is held to are one answer.
+func CanonicalIPv4Prefixes(prefixes []netip.Prefix) ([]string, error) {
 	if len(prefixes) == 0 {
 		return nil, errors.New("host IPv4 prefixes are required; refusing an incomplete firewall")
 	}

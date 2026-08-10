@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -109,6 +110,35 @@ func TestSecurityProfileChangesWithTemplateOrNetworks(t *testing.T) {
 	}
 	if first == different {
 		t.Fatal("network change did not change security profile digest")
+	}
+}
+
+// What a Mac reports about itself may be unmasked, duplicated, unordered, and
+// full of host routes inside subnets it already named. The boundary is what
+// canonicalizes, so none of that reaches the digest: an instance is stale only
+// when the networks themselves changed.
+func TestSecurityProfileDependsOnTheCanonicalSetAlone(t *testing.T) {
+	observed, err := CanonicalIPv4Prefixes([]netip.Prefix{
+		netip.MustParsePrefix("192.168.7.23/24"),
+		netip.MustParsePrefix("100.64.4.2/30"),
+		netip.MustParsePrefix("192.168.7.1/32"),
+		netip.MustParsePrefix("192.168.7.99/24"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collapsed, err := CanonicalIPv4Prefixes([]netip.Prefix{
+		netip.MustParsePrefix("100.64.4.0/30"),
+		netip.MustParsePrefix("192.168.7.0/24"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(observed, collapsed) {
+		t.Fatalf("canonical sets differ: %v and %v", observed, collapsed)
+	}
+	if securityProfileDigest(observed) != securityProfileDigest(collapsed) {
+		t.Fatal("equivalent host networks produced different security profiles")
 	}
 }
 
