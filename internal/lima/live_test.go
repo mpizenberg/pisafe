@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -68,30 +67,7 @@ func ensureLiveVM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	config, err := lima.RenderConfig(prefixes)
-	if err != nil {
-		t.Fatal(err)
-	}
-	configPath := filepath.Join(t.TempDir(), "pisafe.yaml")
-	if err := lima.WriteConfig(configPath, config); err != nil {
-		t.Fatal(err)
-	}
-
-	manager := lima.NewManager()
-	status, err := manager.Status(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if status == lima.StatusAbsent {
-		if err := manager.Create(ctx, configPath); err != nil {
-			t.Fatal(err)
-		}
-	}
-	prefixStrings := make([]string, 0, len(prefixes))
-	for _, prefix := range prefixes {
-		prefixStrings = append(prefixStrings, prefix.String())
-	}
-	if err := manager.Start(ctx, prefixStrings); err != nil {
+	if err := lima.NewManager().Ensure(ctx, prefixes); err != nil {
 		t.Fatal(err)
 	}
 }

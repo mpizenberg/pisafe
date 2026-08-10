@@ -61,20 +61,19 @@ func TestManagerCreateValidatesBeforeCreating(t *testing.T) {
 	runner := &fakeRunner{outputs: [][]byte{
 		nil,
 		nil,
-		nil,
 	}}
 	manager := Manager{instance: InstanceName, runner: runner}
 
-	if err := manager.Create(context.Background(), "/tmp/pisafe.yaml"); err != nil {
+	if err := manager.create(context.Background(), "/tmp/pisafe.yaml"); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 3 {
+	if len(runner.calls) != 2 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
-	assertArgs(t, runner.calls[1], "template", "validate", "/tmp/pisafe.yaml")
+	assertArgs(t, runner.calls[0], "template", "validate", "/tmp/pisafe.yaml")
 	assertArgs(
 		t,
-		runner.calls[2],
+		runner.calls[1],
 		"--tty=false", "create", "--name=pisafe", "/tmp/pisafe.yaml",
 	)
 }
@@ -82,7 +81,6 @@ func TestManagerCreateValidatesBeforeCreating(t *testing.T) {
 func TestManagerEnsureCreatesStartsAndVerifiesAbsentVM(t *testing.T) {
 	prefix := netip.MustParsePrefix("192.168.2.0/24")
 	runner := &fakeRunner{outputs: [][]byte{
-		nil,
 		nil,
 		nil,
 		nil,
@@ -98,16 +96,16 @@ func TestManagerEnsureCreatesStartsAndVerifiesAbsentVM(t *testing.T) {
 	if err := manager.Ensure(context.Background(), []netip.Prefix{prefix}); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 10 {
+	if len(runner.calls) != 9 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
 	assertArgs(t, runner.calls[1], "disk", "list", "--json")
 	assertArgs(t, runner.calls[2], "disk", "create", "pisafe-state", "--size", "64GiB")
-	assertArgs(t, runner.calls[5],
-		"--tty=false", "create", "--name=pisafe", runner.calls[5].args[3],
+	assertArgs(t, runner.calls[4],
+		"--tty=false", "create", "--name=pisafe", runner.calls[4].args[3],
 	)
 	assertArgs(
-		t, runner.calls[7],
+		t, runner.calls[6],
 		"shell", "pisafe", "cat", "/etc/pisafe/security-profile",
 	)
 }
@@ -120,7 +118,6 @@ func TestManagerEnsureAdoptsAnExistingStateDisk(t *testing.T) {
 		nil,
 		[]byte(`{"name":"other","size":1}` + "\n" +
 			`{"name":"pisafe-state","size":68719476736}` + "\n"),
-		nil,
 		nil,
 		nil,
 		[]byte("pisafe\tRunning\n"),
@@ -138,7 +135,7 @@ func TestManagerEnsureAdoptsAnExistingStateDisk(t *testing.T) {
 			t.Fatalf("Ensure recreated a state disk that already exists: %#v", call)
 		}
 	}
-	if len(runner.calls) != 9 {
+	if len(runner.calls) != 8 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
 }

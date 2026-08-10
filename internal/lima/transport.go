@@ -505,10 +505,7 @@ func (transport Transport) Execute(
 	stdin io.Reader,
 	args ...string,
 ) ([]byte, error) {
-	command := make([]string, 0, len(args)+2)
-	command = append(command, "shell", transport.instance)
-	command = append(command, args...)
-	output, err := transport.runner.Run(ctx, stdin, command...)
+	output, err := transport.runner.Run(ctx, stdin, transport.inVM(args)...)
 	if err != nil {
 		return nil, fmt.Errorf("execute in Lima VM: %w", err)
 	}
@@ -523,13 +520,16 @@ func (transport Transport) StreamExecute(
 	stdout io.Writer,
 	args ...string,
 ) error {
-	command := make([]string, 0, len(args)+2)
-	command = append(command, "shell", transport.instance)
-	command = append(command, args...)
-	if err := transport.runner.Stream(ctx, stdout, command...); err != nil {
+	if err := transport.runner.Stream(ctx, stdout, transport.inVM(args)...); err != nil {
 		return fmt.Errorf("stream from Lima VM: %w", err)
 	}
 	return nil
+}
+
+func (transport Transport) inVM(args []string) []string {
+	command := make([]string, 0, len(args)+2)
+	command = append(command, "shell", transport.instance)
+	return append(command, args...)
 }
 
 // CreateStage allocates a new, private VM-side run directory and streams the
@@ -821,13 +821,14 @@ func (transport Transport) PublishCacheSnapshot(
 		return err
 	}
 	arguments := append(
-		[]string{"pisafe-publish", spec.ProjectKey, cache.Name, cache.Key, spec.RunID},
+		[]string{spec.ProjectKey, cache.Name, cache.Key, spec.RunID},
 		publishArgs...,
 	)
-	if _, err := transport.Execute(
+	if err := transport.bashScript(
 		ctx,
-		nil,
-		append([]string{"bash", "-ceu", publishSnapshotScript}, arguments...)...,
+		publishSnapshotScript,
+		"pisafe-publish",
+		arguments...,
 	); err != nil {
 		return fmt.Errorf("publish cache %q: %w", cache.Name, err)
 	}
@@ -1149,11 +1150,12 @@ func (transport Transport) installPackage(
 	if err != nil {
 		return err
 	}
-	arguments := append([]string{"pisafe-package", root}, installArgs...)
-	if _, err := transport.Execute(
+	arguments := append([]string{root}, installArgs...)
+	if err := transport.bashScript(
 		ctx,
-		nil,
-		append([]string{"bash", "-ceu", installPackageScript}, arguments...)...,
+		installPackageScript,
+		"pisafe-package",
+		arguments...,
 	); err != nil {
 		return fmt.Errorf("install %s@%s: %w", pin.Name, pin.Version, err)
 	}
@@ -1297,12 +1299,7 @@ func (transport Transport) ImportStage(
 	if err := runid.Validate(runID); err != nil {
 		return err
 	}
-	if _, err := transport.Execute(
-		ctx,
-		nil,
-		"bash", "-ceu", importStageScript,
-		"pisafe-import", runID,
-	); err != nil {
+	if err := transport.bashScript(ctx, importStageScript, "pisafe-import", runID); err != nil {
 		return fmt.Errorf("import stage into run workspace: %w", err)
 	}
 	return nil
@@ -1458,15 +1455,23 @@ func (transport Transport) uploadArtifact(
 	return nil
 }
 
+// scriptCommand invokes one VM-side script. The interpreter reads the script
+// from an argument rather than from a file or a pipe, so nothing an argument
+// carries is ever parsed as script text, and name is what the script sees as
+// $0 — what its own diagnostics call it.
+func scriptCommand(interpreter, script, name string, args []string) []string {
+	command := make([]string, 0, len(args)+4)
+	command = append(command, interpreter, "-ceu", script, name)
+	return append(command, args...)
+}
+
 func (transport Transport) shellScript(
 	ctx context.Context,
 	stdin io.Reader,
 	script string,
 	args ...string,
 ) ([]byte, error) {
-	command := []string{"sh", "-ceu", script, "pisafe-remote"}
-	command = append(command, args...)
-	return transport.Execute(ctx, stdin, command...)
+	return transport.Execute(ctx, stdin, scriptCommand("sh", script, "pisafe-remote", args)...)
 }
 
 func (transport Transport) streamScript(
@@ -1475,10 +1480,22 @@ func (transport Transport) streamScript(
 	script string,
 	args ...string,
 ) error {
-	command := []string{
-		"shell", transport.instance,
-		"sh", "-ceu", script, "pisafe-remote",
-	}
-	command = append(command, args...)
-	return transport.runner.Stream(ctx, stdout, command...)
+	return transport.StreamExecute(
+		ctx,
+		stdout,
+		scriptCommand("sh", script, "pisafe-remote", args)...,
+	)
+}
+
+// bashScript runs a script that needs more than POSIX sh — pipefail, in every
+// case there is one. Each names itself, because these are the scripts whose
+// diagnostics a user is most likely to see.
+func (transport Transport) bashScript(
+	ctx context.Context,
+	script string,
+	name string,
+	args ...string,
+) error {
+	_, err := transport.Execute(ctx, nil, scriptCommand("bash", script, name, args)...)
+	return err
 }

@@ -67,14 +67,9 @@ func (manager Manager) Status(ctx context.Context) (Status, error) {
 	return StatusAbsent, nil
 }
 
-func (manager Manager) Create(ctx context.Context, configPath string) error {
-	status, err := manager.Status(ctx)
-	if err != nil {
-		return err
-	}
-	if status != StatusAbsent {
-		return fmt.Errorf("Lima instance %q already exists (%s)", manager.instance, status)
-	}
+// create builds the instance from a configuration Lima has agreed to first, so
+// a definition Lima rejects never becomes an instance a rebuild has to clear.
+func (manager Manager) create(ctx context.Context, configPath string) error {
 	if _, err := manager.runner.Run(ctx, nil, "template", "validate", configPath); err != nil {
 		return fmt.Errorf("validate Lima configuration: %w", err)
 	}
@@ -94,36 +89,44 @@ func (manager Manager) Create(ctx context.Context, configPath string) error {
 // Ensure creates the dedicated VM when absent, then starts and verifies it
 // against the current host-network boundary.
 func (manager Manager) Ensure(ctx context.Context, prefixes []netip.Prefix) error {
-	config, err := RenderConfig(prefixes)
-	if err != nil {
-		return err
-	}
-	prefixStrings := make([]string, 0, len(prefixes))
-	for _, prefix := range prefixes {
-		prefixStrings = append(prefixStrings, prefix.String())
-	}
 	status, err := manager.Status(ctx)
 	if err != nil {
 		return err
 	}
 	if status == StatusAbsent {
-		if err := manager.ensureStateDisk(ctx); err != nil {
-			return err
-		}
-		temporary, err := os.MkdirTemp("", "pisafe-lima-config-*")
-		if err != nil {
-			return fmt.Errorf("create temporary Lima config directory: %w", err)
-		}
-		defer os.RemoveAll(temporary)
-		configPath := filepath.Join(temporary, "pisafe.yaml")
-		if err := WriteConfig(configPath, config); err != nil {
-			return err
-		}
-		if err := manager.Create(ctx, configPath); err != nil {
+		if err := manager.provision(ctx, prefixes); err != nil {
 			return err
 		}
 	}
+	prefixStrings := make([]string, 0, len(prefixes))
+	for _, prefix := range prefixes {
+		prefixStrings = append(prefixStrings, prefix.String())
+	}
 	return manager.Start(ctx, prefixStrings)
+}
+
+// provision renders the VM definition and builds an instance from it. The
+// configuration lives no longer than the call: what a running instance was
+// built from is Lima's copy, and rendering it again is how a stale one is
+// detected rather than quietly reconciled.
+func (manager Manager) provision(ctx context.Context, prefixes []netip.Prefix) error {
+	config, err := RenderConfig(prefixes)
+	if err != nil {
+		return err
+	}
+	if err := manager.ensureStateDisk(ctx); err != nil {
+		return err
+	}
+	temporary, err := os.MkdirTemp("", "pisafe-lima-config-*")
+	if err != nil {
+		return fmt.Errorf("create temporary Lima config directory: %w", err)
+	}
+	defer os.RemoveAll(temporary)
+	configPath := filepath.Join(temporary, "pisafe.yaml")
+	if err := WriteConfig(configPath, config); err != nil {
+		return err
+	}
+	return manager.create(ctx, configPath)
 }
 
 // ensureStateDisk creates the disk that carries /var/lib/pisafe, unless Lima
