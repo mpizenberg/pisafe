@@ -244,8 +244,10 @@ Despite its name, `apply` does not check out files or merge into the current
 branch. It imports the completed history as `refs/heads/pisafe/<run>`,
 preserving the agent's commits individually. Before import it shows uncommitted
 tracked changes, new non-ignored files, and ignored outputs separately; tracked
-changes are captured as a final clearly labelled commit, new files are included
-after confirmation, and ignored build outputs are not imported by default.
+changes are captured as a final clearly labelled commit, and neither new files
+nor ignored build outputs are imported. Untracked files are reported and stay in
+the run, on the same terms that kept them out of it: what crosses either
+boundary is what Git tracks, plus what the user named.
 
 The branch travels as an incremental bundle containing only commits new since
 the captured HEAD, fetched into a temporary ref and moved into place only after

@@ -49,7 +49,7 @@ func runExtension(ctx context.Context, args []string, out io.Writer) error {
 		return installExtension(ctx, vm, args[1], out)
 	case "update":
 		return updateExtensions(ctx, vm, args[1:], out)
-	case "remove", "uninstall":
+	case "remove":
 		if len(args) != 2 {
 			return errExtensionUsage
 		}
@@ -168,11 +168,13 @@ func reportExtensionUpdates(
 		return nil
 	}
 	offers, checkErr := vm.ResolveExtensionUpdates(ctx, imageID, record, time.Now())
-	if checkErr != nil {
-		fmt.Fprintf(out, "Warning: %s\n", checkErr)
-	}
 	if len(offers.Latest) == 0 {
 		return checkErr
+	}
+	// Some packages resolved and some did not. What did resolve is still worth
+	// offering, so the rest is reported beside it rather than instead of it.
+	if checkErr != nil {
+		fmt.Fprintf(out, "Warning: %s\n", checkErr)
 	}
 	if err := vm.WriteProfileOffers(ctx, offers); err != nil {
 		return err

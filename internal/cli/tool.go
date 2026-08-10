@@ -31,7 +31,7 @@ func runTool(ctx context.Context, args []string, out io.Writer) error {
 			return errToolUsage
 		}
 		return installTool(ctx, vm, args[1], out)
-	case "remove", "uninstall":
+	case "remove":
 		if len(args) != 2 {
 			return errToolUsage
 		}
