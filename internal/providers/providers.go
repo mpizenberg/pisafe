@@ -53,24 +53,25 @@ func Add(ctx context.Context, record apikey.Record, key string) error {
 
 // Remove takes one login away, whichever kind it is. A name nothing is stored
 // under is an error rather than a silent success, because the user asking for
-// it believes something is there.
+// it believes something is there. Whether what is stored still parses or still
+// describes a reachable upstream is deliberately not asked: the reason to
+// remove a login is often that it does not.
 func Remove(ctx context.Context, name string) error {
 	if name == chatgpt.Name {
-		subscription, err := chatgpt.LoadProvider(ctx)
+		keychain := chatgpt.NewKeychain()
+		stored, err := keychain.Has(ctx)
 		if err != nil {
 			return err
 		}
-		if subscription == nil {
+		if !stored {
 			return unknownLogin(name)
 		}
-		return chatgpt.NewKeychain().Forget(ctx)
+		return keychain.Forget(ctx)
 	}
 	store, err := keyStore()
 	if err != nil {
 		return err
 	}
-	// Whether the record still describes a reachable upstream is deliberately
-	// not asked: the reason to remove one is often that it does not.
 	stored, err := store.Has(name)
 	if err != nil {
 		return err

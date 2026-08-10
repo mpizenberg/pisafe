@@ -296,16 +296,23 @@ func TestAStoredLoginIsCompleteOrIsNotALogin(t *testing.T) {
 		t.Fatal("incomplete credential was saved")
 	}
 	// A credential that lost a field in storage cannot be refreshed, so it is
-	// not a login however it got that way.
+	// not a login however it got that way — but it is still something stored,
+	// which is what keeps it removable.
 	secrets[Name] = []byte(`{"access":"a","refresh":"b"}`)
 	if _, err := store.Load(ctx); err == nil {
 		t.Fatal("incomplete credential was loaded")
+	}
+	if stored, err := store.Has(ctx); err != nil || !stored {
+		t.Fatalf("unusable credential reported as absent: %v %v", stored, err)
 	}
 	if err := store.Forget(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Load(ctx); !errors.Is(err, ErrNotLoggedIn) {
 		t.Fatalf("forgotten login err = %v", err)
+	}
+	if stored, err := store.Has(ctx); err != nil || stored {
+		t.Fatalf("forgotten login reported as stored: %v %v", stored, err)
 	}
 }
 

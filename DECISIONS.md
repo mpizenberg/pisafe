@@ -1172,10 +1172,12 @@ history holds them. New entries are appended in full.
   relay appends the client's own API path, so pasting the documented URL
   produces `/v1/v1/responses` and nothing but the upstream's 404 would say so.
   Refusing, rather than silently rewriting, teaches the shape once.
-- A login is removable whether or not it is still usable. The first cut had
-  `logout` confirm the login existed by loading the whole catalog, which made a
-  record the rules no longer accept impossible to remove through the CLI.
-  Removal now asks only whether something is stored under the name.
+- A login is removable whether or not it is still usable, whichever kind it is.
+  `logout` used to confirm the login existed by loading it — the whole key
+  catalog for a key, the parsed and validated credential for the subscription —
+  which made anything the current rules no longer accept impossible to remove
+  through the CLI. Removal now asks only whether something is stored under the
+  name.
 - A key is read only when a request is relayed. Starting a run renders
   models.json, which contains no upstream credential, so run creation touches no
   secret at all.

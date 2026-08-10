@@ -771,8 +771,9 @@ with a fake VM boundary:
   custom endpoint carrying its own upstream and never redirecting a known one;
   declared models that cannot route around the broker; plaintext endpoints
   refused unless they stay on this Mac; an endpoint that would be requested
-  twice over refused; a key read from stdin and never blank; a login removable
-  because a record names its key; and a key read only when a request is relayed.
+  twice over refused; a key read from stdin and never blank; a login of either
+  kind removable without being read back; and a key read only when a request is
+  relayed.
 - **CLI**: every mistyped scope command refused before anything reaches the VM,
   an extension refusing what it cannot pin before reaching the VM, and a restore
   reading its backup before it starts anything.
