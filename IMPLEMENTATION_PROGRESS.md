@@ -338,9 +338,9 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
 ### Inference broker and provider logins
 
 - `internal/broker` is the Mac-side relay. Runs authenticate with a
-  `pisafe-cap-<64 hex>` capability from `crypto/rand`, stored only in the
-  version-4 manifest: activation and resume require a fresh one, stop clears it,
-  and a manifest is invalid if an inactive state retains one. The broker
+  `pisafe-cap-<64 hex>` capability from `crypto/rand`, stored only in the run
+  manifest: activation and resume require a fresh one, stop clears it, and a
+  manifest is invalid if an inactive state retains one. The broker
   re-reads durable records per request, so a run that stopped, was reclaimed, or
   exhausted its wall clock is rejected immediately with a uniform 401. Matching
   is constant-time over SHA-256 digests.
@@ -642,24 +642,28 @@ git diff --check
 Package coverage at this milestone:
 
 ```text
-pisafe         0.0%   projectconfig 90.7%
-pisafe-guest  71.2%   providers      0.0%
-apikey        82.2%   runcontainer  85.1%
-backup        80.7%   runcopy       78.2%
-broker        93.9%   runctl        75.8%
-chatgpt       76.7%   runid         90.5%
-cli           33.1%   runimage      77.7%
-gitstage      80.0%   runssh        68.8%
-hostnet       50.0%   runstart      74.4%
-keychain      60.0%   runstate      74.4%
-lima          61.3%   zedsettings   80.4%
-profile       96.0%
+pisafe         0.0%   profile       96.0%
+pisafe-guest  70.5%   projectconfig 90.7%
+apikey        82.2%   providers      0.0%
+backup        84.1%   runcontainer  87.7%
+broker        93.9%   runcopy       78.2%
+chatgpt       76.1%   runctl        76.1%
+cli           33.0%   runid         90.5%
+gitstage      80.2%   runimage      79.1%
+guestcall      0.0%   runssh        69.3%
+hostnet       31.1%   runstart      74.4%
+keychain      64.6%   runstate      75.6%
+lima          60.1%   safefile      76.7%
+                      zedsettings   80.4%
 ```
 
 `lima` and `cli` fell as Phase 2 added VM-side scripts and command surface that
-only the gated live suite and the end-to-end exercises execute. `providers` has
-no test file of its own; it is covered through the CLI and broker suites and by
-the stub-upstream exercise below.
+only the gated live suite and the end-to-end exercises execute. `hostnet` fell
+without losing a test: canonicalization moved to `lima`, so what is left in the
+package is mostly the two functions that read the Mac's real interfaces and
+routing table, which no unit test can. `providers` and `guestcall` have no test
+file of their own; both are covered through the CLI, broker, guest, and
+controller suites and by the stub-upstream exercise below.
 
 What the unit and integration suites cover, mostly against real repositories
 with a fake VM boundary:

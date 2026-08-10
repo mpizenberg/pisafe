@@ -141,6 +141,8 @@ pisafe list
 pisafe connect [run] [-- <command>...]
 pisafe forward [run] [<local>:]<port>...
 pisafe zed [run]
+pisafe stop [run]
+pisafe resume [run]
 pisafe diff [run]
 pisafe cp [<run>]:<path> [dest]
 pisafe cp <path> [<run>]:[<path>]
@@ -152,6 +154,7 @@ pisafe doctor
 
 pisafe login [chatgpt|anthropic|openai|<name> --url --api --models]
 pisafe logout <name>
+pisafe broker
 
 pisafe extension install <package>[@<version>]
 pisafe extension update [package...]

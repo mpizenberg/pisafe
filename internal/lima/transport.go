@@ -436,8 +436,9 @@ done
 )
 
 // maxResolveBytes bounds what npm may report about one package. Its report
-// lists the tarball's files, so this is far above what any package produces
-// and far below what would make the controller allocate without bound.
+// lists the tarball's files, so this is far above what any package produces. It
+// refuses an oversize report rather than preventing one: a command's output is
+// read whole before it is returned, so the bound is on what pisafe parses.
 const maxResolveBytes = 1 << 22
 
 // maxApplyArtifactBytes stops a run from filling the Mac's disk through the
