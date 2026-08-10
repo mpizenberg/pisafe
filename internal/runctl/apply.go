@@ -3,7 +3,6 @@ package runctl
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -119,11 +118,9 @@ func (controller Controller) importRun(
 	if err != nil {
 		return gitstage.PlannedApply{}, err
 	}
-	request := manifest.Snapshot
-	request.SourceRoot = ""
-	requestJSON, err := json.Marshal(request)
+	requestJSON, err := runRequest(manifest)
 	if err != nil {
-		return gitstage.PlannedApply{}, fmt.Errorf("encode apply request: %w", err)
+		return gitstage.PlannedApply{}, err
 	}
 	output, err := controller.podman(ctx, bytes.NewReader(requestJSON), args...)
 	if err != nil {

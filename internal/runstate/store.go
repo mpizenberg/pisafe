@@ -19,6 +19,7 @@ import (
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/runcontainer"
 	"github.com/mpizenberg/pisafe/internal/runid"
+	"github.com/mpizenberg/pisafe/internal/runssh"
 )
 
 const manifestVersion = 6
@@ -216,23 +217,16 @@ func (store Store) Stop(runID string, endedAt time.Time) (Manifest, error) {
 		return Manifest{}, err
 	}
 	now := store.now().UTC()
-	endedAt = endedAt.UTC()
-	if endedAt.IsZero() {
-		endedAt = now
-	}
-	if endedAt.After(now.Add(5 * time.Second)) {
-		return Manifest{}, fmt.Errorf("container stop time is in the future")
-	}
-	if endedAt.After(now) {
-		endedAt = now
+	endedAt, err = containerTime(endedAt, now, "stop")
+	if err != nil {
+		return Manifest{}, err
 	}
 	if manifest.ActiveStartedAt == nil || endedAt.Before(*manifest.ActiveStartedAt) {
 		return Manifest{}, fmt.Errorf("container stop time precedes activation")
 	}
 	elapsed := endedAt.Sub(*manifest.ActiveStartedAt)
 	elapsedSeconds := int64((elapsed + time.Second - 1) / time.Second)
-	remaining := manifest.ActiveLimitSeconds - manifest.ActiveElapsedSeconds
-	if elapsedSeconds > remaining {
+	if remaining := manifest.remainingBudget(); elapsedSeconds > remaining {
 		elapsedSeconds = remaining
 	}
 	return store.replace(endActiveStretch(manifest, now, endedAt, elapsedSeconds))
@@ -301,7 +295,7 @@ func (store Store) Resume(runID string, capability string, startedAt time.Time) 
 			StateActive,
 		)
 	}
-	remaining := manifest.ActiveLimitSeconds - manifest.ActiveElapsedSeconds
+	remaining := manifest.remainingBudget()
 	if remaining <= 0 {
 		return Manifest{}, fmt.Errorf("run %q exhausted its active wall-clock limit", runID)
 	}
@@ -309,15 +303,9 @@ func (store Store) Resume(runID string, capability string, startedAt time.Time) 
 		return Manifest{}, fmt.Errorf("resume requires a fresh inference capability")
 	}
 	now := store.now().UTC()
-	startedAt = startedAt.UTC()
-	if startedAt.IsZero() {
-		startedAt = now
-	}
-	if startedAt.After(now.Add(5 * time.Second)) {
-		return Manifest{}, fmt.Errorf("container start time is in the future")
-	}
-	if startedAt.After(now) {
-		startedAt = now
+	startedAt, err = containerTime(startedAt, now, "start")
+	if err != nil {
+		return Manifest{}, err
 	}
 	deadline := startedAt.Add(time.Duration(remaining) * time.Second)
 	manifest.State = StateActive
@@ -436,15 +424,9 @@ func (store Store) Activate(
 	if manifest.ActiveLimitSeconds <= 0 {
 		return Manifest{}, fmt.Errorf("active wall-clock limit is required")
 	}
-	startedAt = startedAt.UTC()
-	if startedAt.IsZero() {
-		startedAt = now
-	}
-	if startedAt.After(now.Add(5 * time.Second)) {
-		return Manifest{}, fmt.Errorf("container start time is in the future")
-	}
-	if startedAt.After(now) {
-		startedAt = now
+	startedAt, err = containerTime(startedAt, now, "start")
+	if err != nil {
+		return Manifest{}, err
 	}
 	deadline := startedAt.Add(time.Duration(manifest.ActiveLimitSeconds) * time.Second)
 	manifest.State = StateActive
@@ -456,14 +438,7 @@ func (store Store) Activate(
 	manifest.InferenceCapability = capability
 	manifest.LastError = ""
 	manifest.UpdatedAt = now
-	path, err := store.manifestPath(runID)
-	if err != nil {
-		return Manifest{}, err
-	}
-	if err := store.writeAtomic(path, manifest, true); err != nil {
-		return Manifest{}, err
-	}
-	return manifest, nil
+	return store.replace(manifest)
 }
 
 // materializedBaselines returns the staged submodules carrying the baseline
@@ -511,14 +486,30 @@ func (store Store) RecordError(runID string, operationErr error) (Manifest, erro
 	}
 	manifest.LastError = operationErr.Error()
 	manifest.UpdatedAt = store.now().UTC()
-	path, err := store.manifestPath(runID)
-	if err != nil {
-		return Manifest{}, err
+	return store.replace(manifest)
+}
+
+// clockSkewAllowance is how far ahead of the Mac a container's clock may be
+// before its account of when it started or stopped is refused outright.
+const clockSkewAllowance = 5 * time.Second
+
+// containerTime reconciles a time the container reported with the Mac's. Zero
+// means the container never said, and a little skew is clamped rather than
+// refused, because charging a run for a second it could not have spent is worse
+// than losing one. Beyond that the two clocks disagree about something pisafe
+// bills a budget against, and it will not guess which is right.
+func containerTime(reported, now time.Time, moment string) (time.Time, error) {
+	reported = reported.UTC()
+	if reported.IsZero() {
+		return now, nil
 	}
-	if err := store.writeAtomic(path, manifest, true); err != nil {
-		return Manifest{}, err
+	if reported.After(now.Add(clockSkewAllowance)) {
+		return time.Time{}, fmt.Errorf("container %s time is in the future", moment)
 	}
-	return manifest, nil
+	if reported.After(now) {
+		return now, nil
+	}
+	return reported, nil
 }
 
 func (store Store) replace(manifest Manifest) (Manifest, error) {
@@ -703,8 +694,9 @@ func validateStoredManifest(manifest Manifest, expectedRunID string) error {
 		if manifest.ActiveStartedAt == nil || manifest.ActiveDeadline == nil {
 			return fmt.Errorf("active run requires wall-clock timestamps")
 		}
-		remaining := manifest.ActiveLimitSeconds - manifest.ActiveElapsedSeconds
-		expected := manifest.ActiveStartedAt.Add(time.Duration(remaining) * time.Second)
+		expected := manifest.ActiveStartedAt.Add(
+			time.Duration(manifest.remainingBudget()) * time.Second,
+		)
 		if !manifest.ActiveDeadline.Equal(expected) {
 			return fmt.Errorf("active run has an inconsistent wall-clock deadline")
 		}
@@ -721,8 +713,14 @@ func validateStoredManifest(manifest Manifest, expectedRunID string) error {
 	return nil
 }
 
+// remainingBudget is what a run has left of its active wall-clock limit, before
+// any deadline the stretch it is in imposes on top of that.
+func (manifest Manifest) remainingBudget() int64 {
+	return manifest.ActiveLimitSeconds - manifest.ActiveElapsedSeconds
+}
+
 func RemainingSeconds(manifest Manifest, now time.Time) int64 {
-	remaining := manifest.ActiveLimitSeconds - manifest.ActiveElapsedSeconds
+	remaining := manifest.remainingBudget()
 	if remaining <= 0 {
 		return 0
 	}
@@ -763,7 +761,7 @@ func validateApplyPlan(runID string, planned gitstage.PlannedApply) error {
 }
 
 func validateSSHConnection(runID string, connection SSHConnection) error {
-	if connection.Alias != "pisafe-"+runID {
+	if connection.Alias != runssh.Alias(runID) {
 		return fmt.Errorf("SSH alias does not match run ID")
 	}
 	for name, path := range map[string]string{

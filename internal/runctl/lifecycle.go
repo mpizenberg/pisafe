@@ -101,7 +101,7 @@ func (controller Controller) Stop(
 func (controller Controller) Resume(
 	ctx context.Context,
 	runID string,
-) (runstate.Manifest, error) {
+) (_ runstate.Manifest, returnErr error) {
 	manifest, err := controller.store.Get(runID)
 	if err != nil {
 		return runstate.Manifest{}, err
@@ -147,65 +147,46 @@ func (controller Controller) Resume(
 	if err != nil {
 		return runstate.Manifest{}, err
 	}
-	if _, err := controller.podman(ctx, nil, runArgs...); err != nil {
-		cleanupContext, cancelCleanup := lifecycleCleanupContext(ctx)
-		defer cancelCleanup()
-		_, cleanupErr := controller.stopAndRemoveContainer(cleanupContext, spec)
-		return runstate.Manifest{}, controller.recordLifecycleError(
-			runID,
-			"resume",
-			errors.Join(fmt.Errorf("start run container: %w", err), cleanupErr),
-		)
-	}
-	inspection, err := controller.inspectStartedContainer(ctx, spec)
-	if err != nil || inspection == nil || inspection.State.Status != "running" {
-		if err == nil {
-			err = errors.New("resumed container is not running")
+
+	// From here a failure may have left a container behind, and a resume that
+	// did not finish must leave the run stopped as it was found.
+	operation := "resume"
+	defer func() {
+		if returnErr == nil {
+			return
 		}
 		cleanupContext, cancelCleanup := lifecycleCleanupContext(ctx)
 		defer cancelCleanup()
-		_, cleanupErr := controller.stopAndRemoveContainer(
-			cleanupContext,
-			spec,
-		)
-		return runstate.Manifest{}, controller.recordLifecycleError(
+		_, cleanupErr := controller.stopAndRemoveContainer(cleanupContext, spec)
+		returnErr = controller.recordLifecycleError(
 			runID,
-			"resume",
-			errors.Join(err, cleanupErr),
+			operation,
+			errors.Join(returnErr, cleanupErr),
 		)
+	}()
+
+	if _, err := controller.podman(ctx, nil, runArgs...); err != nil {
+		return runstate.Manifest{}, fmt.Errorf("start run container: %w", err)
+	}
+	inspection, err := controller.inspectStartedContainer(ctx, spec)
+	if err != nil {
+		return runstate.Manifest{}, err
+	}
+	if inspection == nil || inspection.State.Status != "running" {
+		return runstate.Manifest{}, errors.New("resumed container is not running")
 	}
 	capability, err := runstate.NewInferenceCapability()
-	if err == nil {
-		err = controller.configureProfile(ctx, spec, manifest.Workspace())
-	}
-	if err == nil {
-		err = controller.configureModels(ctx, spec, capability)
-	}
 	if err != nil {
-		cleanupContext, cancelCleanup := lifecycleCleanupContext(ctx)
-		defer cancelCleanup()
-		_, cleanupErr := controller.stopAndRemoveContainer(cleanupContext, spec)
-		return runstate.Manifest{}, controller.recordLifecycleError(
-			runID,
-			"resume",
-			errors.Join(err, cleanupErr),
-		)
+		return runstate.Manifest{}, err
 	}
-	resumed, err := controller.store.Resume(runID, capability, inspection.State.StartedAt)
-	if err != nil {
-		cleanupContext, cancelCleanup := lifecycleCleanupContext(ctx)
-		defer cancelCleanup()
-		_, cleanupErr := controller.stopAndRemoveContainer(
-			cleanupContext,
-			spec,
-		)
-		return runstate.Manifest{}, controller.recordLifecycleError(
-			runID,
-			"record resume",
-			errors.Join(err, cleanupErr),
-		)
+	if err := controller.configureProfile(ctx, spec, manifest.Workspace()); err != nil {
+		return runstate.Manifest{}, err
 	}
-	return resumed, nil
+	if err := controller.configureModels(ctx, spec, capability); err != nil {
+		return runstate.Manifest{}, err
+	}
+	operation = "record resume"
+	return controller.store.Resume(runID, capability, inspection.State.StartedAt)
 }
 
 // endWhatIsNoLongerRunning settles a record that still claims a container the

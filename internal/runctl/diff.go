@@ -3,12 +3,10 @@ package runctl
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
-	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
 // Diff reports what a run changed since it began. It neither stops nor resumes
@@ -23,22 +21,8 @@ func (controller Controller) Diff(
 	runID string,
 	imageID string,
 ) (gitstage.RunDiff, error) {
-	manifest, err := controller.store.Get(runID)
+	manifest, err := controller.workspaceRun(ctx, runID, "compare")
 	if err != nil {
-		return gitstage.RunDiff{}, err
-	}
-	switch manifest.State {
-	case runstate.StateActive, runstate.StateStopped, runstate.StateImported:
-	default:
-		return gitstage.RunDiff{}, fmt.Errorf(
-			"run %q is %s and has no workspace to compare",
-			runID,
-			manifest.State,
-		)
-	}
-	// A run's storage is mounted per VM boot, not per run, so a VM that
-	// restarted since the run started presents an empty run root.
-	if err := controller.backend.VerifyRunStorage(ctx, manifest.RunID); err != nil {
 		return gitstage.RunDiff{}, err
 	}
 	spec := specForManifest(manifest, imageID)
@@ -46,11 +30,9 @@ func (controller Controller) Diff(
 	if err != nil {
 		return gitstage.RunDiff{}, err
 	}
-	request := manifest.Snapshot
-	request.SourceRoot = ""
-	requestJSON, err := json.Marshal(request)
+	requestJSON, err := runRequest(manifest)
 	if err != nil {
-		return gitstage.RunDiff{}, fmt.Errorf("encode diff request: %w", err)
+		return gitstage.RunDiff{}, err
 	}
 	output, err := controller.podman(ctx, bytes.NewReader(requestJSON), args...)
 	if err != nil {

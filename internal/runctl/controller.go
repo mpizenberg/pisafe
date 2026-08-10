@@ -384,6 +384,19 @@ func (controller Controller) configureModels(
 // controller allocate or the manifest grow without bound.
 const guestResponseLimit = 1 << 20
 
+// runRequest renders what a run is told about itself. The source root is the
+// Mac path its checkout lives at, which nothing inside a run may learn, so it is
+// cleared here rather than at each place that sends the snapshot in.
+func runRequest(manifest runstate.Manifest) ([]byte, error) {
+	request := manifest.Snapshot
+	request.SourceRoot = ""
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("encode run request: %w", err)
+	}
+	return encoded, nil
+}
+
 // decodeGuestResponse reads one document produced inside a run. Unknown fields
 // and trailing data are refused, so a run cannot smuggle anything past what
 // the controller expects to receive.

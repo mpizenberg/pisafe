@@ -46,7 +46,7 @@ func (controller Controller) CopyOut(
 	if err := runcopy.CheckDestination(request.Destination, request.Replace); err != nil {
 		return nil, err
 	}
-	manifest, err := controller.workspaceRun(ctx, request.RunID)
+	manifest, err := controller.workspaceRun(ctx, request.RunID, "copy through")
 	if err != nil {
 		return nil, err
 	}
@@ -122,7 +122,7 @@ func (controller Controller) CopyIn(
 			return nil, err
 		}
 	}
-	manifest, err := controller.workspaceRun(ctx, request.RunID)
+	manifest, err := controller.workspaceRun(ctx, request.RunID, "copy through")
 	if err != nil {
 		return nil, err
 	}
@@ -163,10 +163,13 @@ func (controller Controller) CopyIn(
 	return entries, nil
 }
 
-// workspaceRun resolves a run whose workspace still exists to copy through.
+// workspaceRun resolves a run whose workspace still exists to reach through.
+// purpose is what the caller would do with it, so a run in the wrong state is
+// refused in the terms the user asked in.
 func (controller Controller) workspaceRun(
 	ctx context.Context,
 	runID string,
+	purpose string,
 ) (runstate.Manifest, error) {
 	manifest, err := controller.store.Get(runID)
 	if err != nil {
@@ -176,9 +179,10 @@ func (controller Controller) workspaceRun(
 	case runstate.StateActive, runstate.StateStopped, runstate.StateImported:
 	default:
 		return runstate.Manifest{}, fmt.Errorf(
-			"run %q is %s and has no workspace to copy through",
+			"run %q is %s and has no workspace to %s",
 			runID,
 			manifest.State,
+			purpose,
 		)
 	}
 	// A run's storage is mounted per VM boot, not per run, so a VM that

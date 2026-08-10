@@ -298,8 +298,15 @@ func (spec Spec) Validate() error {
 	return nil
 }
 
+// ContainerName is what a run's container is called. It is derived from the run
+// ID alone so anything holding only the ID — a record, an SSH configuration —
+// names the same container without being told.
+func ContainerName(runID string) string {
+	return "pisafe-run-" + runID
+}
+
 func (spec Spec) ContainerName() string {
-	return "pisafe-run-" + spec.RunID
+	return ContainerName(spec.RunID)
 }
 
 func (spec Spec) StoragePath() string {

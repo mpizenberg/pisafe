@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/mpizenberg/pisafe/internal/guestcall"
+	"github.com/mpizenberg/pisafe/internal/runcontainer"
 	"github.com/mpizenberg/pisafe/internal/runid"
 )
 
@@ -147,7 +148,7 @@ func (store Store) Finalize(
 	if _, err := readLimitedRegularFile(gateway.ConfigFile, 1<<20); err != nil {
 		return Endpoint{}, fmt.Errorf("validate Lima SSH config: %w", err)
 	}
-	if containerName != "pisafe-run-"+prepared.RunID {
+	if containerName != runcontainer.ContainerName(prepared.RunID) {
 		return Endpoint{}, errors.New("SSH container does not match run")
 	}
 	hostKey, hostBlob, err := ParsePublicKey(hostPublicKey)
