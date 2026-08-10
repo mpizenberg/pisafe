@@ -64,8 +64,6 @@ type Manifest struct {
 	State               State             `json:"state"`
 	Snapshot            gitstage.Snapshot `json:"snapshot"`
 	Image               string            `json:"image,omitempty"`
-	Container           string            `json:"container,omitempty"`
-	Workspace           string            `json:"workspace,omitempty"`
 	SSH                 *SSHConnection    `json:"ssh,omitempty"`
 	InferenceCapability string            `json:"inference_capability,omitempty"`
 	// Caches records which snapshot each declared cache was resolved to. A
@@ -87,6 +85,13 @@ type Manifest struct {
 	ImportedAt           *time.Time             `json:"imported_at,omitempty"`
 	ImportedBranch       string                 `json:"imported_branch,omitempty"`
 	LastError            string                 `json:"last_error,omitempty"`
+}
+
+// Workspace is where the run's checkout is inside its container. It follows
+// from the project name, which is validated, so nothing a stored record says
+// can send a shell somewhere else.
+func (manifest Manifest) Workspace() string {
+	return runcontainer.ContainerWorkRoot + "/" + manifest.Project
 }
 
 type SSHConnection struct {
@@ -628,8 +633,8 @@ func validateManifestIdentity(manifest Manifest) error {
 	if manifest.Snapshot.RunID != manifest.RunID {
 		return fmt.Errorf("snapshot does not match run ID")
 	}
-	if manifest.Project == "" {
-		return fmt.Errorf("project name is required")
+	if err := runid.Validate(manifest.Project); err != nil {
+		return fmt.Errorf("invalid project name: %w", err)
 	}
 	if err := runid.Validate(manifest.ProjectKey); err != nil {
 		return fmt.Errorf("invalid project key: %w", err)

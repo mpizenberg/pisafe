@@ -94,7 +94,9 @@ history holds them. New entries are appended in full.
   but would send the run a program named `cat > file`, and redirects and pipes
   are most of why the general form is worth having. This is what `ssh` itself
   does with a remote command, so the surprising behaviour is at least the
-  familiar one. Only the workspace path is quoted, because pisafe supplies it.
+  familiar one. Only the workspace path is quoted, because pisafe supplies it:
+  it is derived from the run's validated project name, never read back as a
+  string the record could aim elsewhere.
 - A pty is requested only when stdin and stdout are both terminals. Always
   asking corrupts a redirected copy through CRLF translation; never asking with
   a command, which is `ssh`'s own rule, breaks `-- pi`. Testing both ends serves
@@ -386,6 +388,14 @@ history holds them. New entries are appended in full.
   and for versions 5 and 6 the VM recreation that per-project storage forced
   had destroyed the old runs' storage regardless. Any future change after real
   users exist needs an explicit migration.
+- A manifest records only what it cannot derive and something reads. The
+  workspace path is `/work/<project>`, so it is computed from the project name —
+  which is validated as an identifier, as every name the slug generator produces
+  already was — rather than stored where a tampered record could aim it
+  somewhere the derivation cannot reach. The container name was stored and read
+  by nothing. Dropping both needed no manifest version: existing records hold
+  exactly the value the derivation produces, and their now-unknown keys decode
+  and are ignored.
 - A run's record lives exactly as long as the run owns something: `discard` and
   `gc` remove the record with the resources, and discard is reachable from
   every state that still owns them, including `imported`. An earlier increment

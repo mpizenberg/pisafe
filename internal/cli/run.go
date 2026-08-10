@@ -150,7 +150,7 @@ func printRunResult(out io.Writer, result runstart.Result, inferenceConfigured b
 		out,
 		"Run:       %s\nWorkspace: %s\nBranch:    %s\nSSH:       %s\n",
 		manifest.RunID,
-		manifest.Workspace,
+		manifest.Workspace(),
 		strings.TrimPrefix(manifest.Snapshot.WorkRef, "refs/heads/"),
 		sshCommand,
 	); err != nil {

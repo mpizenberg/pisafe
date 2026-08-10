@@ -28,12 +28,12 @@ import (
 
 const (
 	runHome = runcontainer.ContainerHome
-	// profileRoot is where the read-only profile is mounted and workRoot where
-	// the run's own workspace is. The controller composes what this helper is
-	// told, and the helper still refuses a path outside either, so no
-	// configuration can point Pi at something that is not the run's.
-	profileRoot       = "/opt/pisafe/profile"
-	workRoot          = "/work"
+	// The controller composes what this helper is told, and the helper still
+	// refuses a path outside the profile or the workspace, so no configuration
+	// can point Pi at something that is not the run's. Sharing the constants is
+	// what keeps the two sides refusing the same paths; it shares no trust.
+	profileRoot       = runcontainer.ContainerProfileRoot
+	workRoot          = runcontainer.ContainerWorkRoot
 	sshPublicKeySize  = 4096
 	documentSizeLimit = int64(1 << 20)
 )

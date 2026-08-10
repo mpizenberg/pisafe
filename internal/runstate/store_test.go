@@ -116,6 +116,28 @@ func TestStoreRejectsDuplicateAndCorruptManifest(t *testing.T) {
 	}
 }
 
+// Every run's workspace path is built from its project name, so what that name
+// may contain is settled here rather than wherever the path is spliced into a
+// command.
+func TestStoreRefusesAProjectNameItWouldPutInAPath(t *testing.T) {
+	store := NewStore(t.TempDir())
+	manifest := testManifest("run-one")
+	for _, project := range []string{"", "my project", "../escape", "a;b", "-lead"} {
+		manifest.Project = project
+		if _, err := store.Create(manifest); err == nil {
+			t.Fatalf("project name %q was accepted", project)
+		}
+	}
+	manifest.Project = "project"
+	created, err := store.Create(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Workspace() != "/work/project" {
+		t.Fatalf("workspace = %q", created.Workspace())
+	}
+}
+
 func TestStoreRecordsAndClearsOperationError(t *testing.T) {
 	store := NewStore(t.TempDir())
 	if _, err := store.Create(testManifest("run-one")); err != nil {

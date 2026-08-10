@@ -798,8 +798,6 @@ func TestDiscardCleansActiveAndFailedCreatingRuns(t *testing.T) {
 					ProjectKey:         testProject.Key,
 					Snapshot:           prepared.Snapshot,
 					Image:              spec.ImageID,
-					Container:          spec.ContainerName(),
-					Workspace:          "/work/project",
 					ActiveLimitSeconds: spec.WallSeconds,
 				})
 				if err != nil {
@@ -1000,8 +998,6 @@ func activeManifest(
 		ProjectKey:         testProject.Key,
 		Snapshot:           prepared.Snapshot,
 		Image:              spec.ImageID,
-		Container:          spec.ContainerName(),
-		Workspace:          "/work/project",
 		Caches:             spec.Caches,
 		ActiveLimitSeconds: spec.WallSeconds,
 	}); err != nil {

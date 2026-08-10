@@ -42,9 +42,12 @@ const (
 	// applyPackage is where a run leaves the bundles apply fetches. It sits in
 	// the run's own workspace, the only writable place both the run and the
 	// VM-side transport can reach.
-	applyPackage      = "apply"
-	containerUser     = "1000:1000"
-	containerWorkRoot = "/work"
+	applyPackage  = "apply"
+	containerUser = "1000:1000"
+	// ContainerWorkRoot is where a run's workspace is mounted. The guest helper
+	// refuses a workspace outside it and the Mac derives each run's workspace
+	// under it, so both read it from here rather than restating the path.
+	ContainerWorkRoot = "/work"
 	// ContainerHome is where a run's home is mounted. The guest helper writes
 	// into it from inside the container and must mean the same directory the
 	// mount and the declared environment name, so it reads it from here.
@@ -58,14 +61,14 @@ const (
 	// variable points it here, so the layer cannot accumulate arbitrary state.
 	containerCacheRoot   = "/cache"
 	containerSessionRoot = "/sessions"
-	// containerProfileRoot is where the profile's packages are mounted. It is
+	// ContainerProfileRoot is where the profile's packages are mounted. It is
 	// deliberately not Pi's own global package store: mounting there read-only
 	// made pi install fail, and an agent told it cannot install globally
 	// installs into the repository instead, where the package is committed and
 	// arrives on the user's Mac. Pi's store stays an ordinary directory in the
 	// run's home, so a global install succeeds, serves that run, and dies with
 	// it, while nothing a run does reaches the profile at all.
-	containerProfileRoot = "/opt/pisafe/profile"
+	ContainerProfileRoot = "/opt/pisafe/profile"
 	// containerToolRoot is where the installed commands are mounted. It is
 	// outside the run's home, which is writable, and outside the image's own
 	// directories, which the run must not be able to appear to have changed.
@@ -133,7 +136,7 @@ type Mount struct {
 // so it depends on nothing about the run.
 func ProfileMount() Mount {
 	return Mount{
-		Destination: containerProfileRoot,
+		Destination: ContainerProfileRoot,
 		Source:      ProfilePath() + "/" + extensionsNamespace,
 	}
 }
@@ -451,7 +454,7 @@ func (spec Spec) RunArgs() ([]string, error) {
 		"--timeout", strconv.FormatInt(spec.WallSeconds, 10),
 		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=" + tmpSize,
 		"--mount", "type=tmpfs,dst=/run,tmpfs-size=16777216,tmpfs-mode=0755,U=true",
-		"--mount", "type=bind,src=" + spec.WorkspacePath() + ",dst=" + containerWorkRoot + ",nodev,nosuid",
+		"--mount", "type=bind,src=" + spec.WorkspacePath() + ",dst=" + ContainerWorkRoot + ",nodev,nosuid",
 		"--mount", "type=bind,src=" + spec.HomePath() + ",dst=" + ContainerHome + ",nodev,nosuid",
 		"--mount", "type=bind,src=" + ProfileMount().Source +
 			",dst=" + ProfileMount().Destination + ",ro,nodev,nosuid",
@@ -461,7 +464,7 @@ func (spec Spec) RunArgs() ([]string, error) {
 	for _, overlay := range spec.ProjectOverlays() {
 		args = append(args, "--volume", overlay.volume())
 	}
-	args = append(args, "--workdir", containerWorkRoot)
+	args = append(args, "--workdir", ContainerWorkRoot)
 	for _, variable := range runEnvironment {
 		args = append(args, "--env", variable[0]+"="+variable[1])
 	}
@@ -638,11 +641,11 @@ func (spec Spec) MaterializeArgs(projectDirectory string) ([]string, error) {
 	return []string{
 		"exec",
 		"--user", containerUser,
-		"--workdir", containerWorkRoot,
+		"--workdir", ContainerWorkRoot,
 		spec.ContainerName(),
 		"pisafe-guest", guestcall.Materialize,
-		containerWorkRoot + "/stage",
-		containerWorkRoot + "/" + projectDirectory,
+		ContainerWorkRoot + "/stage",
+		ContainerWorkRoot + "/" + projectDirectory,
 	}, nil
 }
 
@@ -697,8 +700,8 @@ func (spec Spec) PrepareApplyArgs(
 		args,
 		"pisafe-guest", guestcall.PrepareApply,
 		string(baseline),
-		containerWorkRoot+"/"+projectDirectory,
-		containerWorkRoot+"/"+applyPackage,
+		ContainerWorkRoot+"/"+projectDirectory,
+		ContainerWorkRoot+"/"+applyPackage,
 	), nil
 }
 
@@ -710,7 +713,7 @@ func (spec Spec) DiffArgs(projectDirectory string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(args, "pisafe-guest", guestcall.Diff, containerWorkRoot+"/"+projectDirectory), nil
+	return append(args, "pisafe-guest", guestcall.Diff, ContainerWorkRoot+"/"+projectDirectory), nil
 }
 
 // ExportArgs streams one path of the run's workspace out as a tar on standard
@@ -728,7 +731,7 @@ func (spec Spec) ExportArgs(projectDirectory, requestPath string) ([]string, err
 	return append(
 		args,
 		"pisafe-guest", guestcall.Export,
-		containerWorkRoot+"/"+projectDirectory,
+		ContainerWorkRoot+"/"+projectDirectory,
 		requested,
 	), nil
 }
@@ -764,7 +767,7 @@ func (spec Spec) ImportArgs(
 	return append(
 		args,
 		"pisafe-guest", guestcall.Import,
-		containerWorkRoot+"/"+projectDirectory,
+		ContainerWorkRoot+"/"+projectDirectory,
 		destination,
 		name,
 		decision,
@@ -804,8 +807,8 @@ func (spec Spec) inspectionArgs(
 		"--pids-limit", strconv.Itoa(spec.PIDs),
 		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=" + strconv.FormatInt(spec.TmpBytes, 10),
 		"--mount", "type=bind,src=" + spec.WorkspacePath() +
-			",dst=" + containerWorkRoot + ",nodev,nosuid" + mountOptions,
-		"--workdir", containerWorkRoot,
+			",dst=" + ContainerWorkRoot + ",nodev,nosuid" + mountOptions,
+		"--workdir", ContainerWorkRoot,
 		"--env", "HOME=/tmp",
 		"--env", "GIT_TERMINAL_PROMPT=0",
 		spec.ImageID,
@@ -820,6 +823,6 @@ func (spec Spec) CleanupStageArgs() ([]string, error) {
 		"exec",
 		"--user", containerUser,
 		spec.ContainerName(),
-		"rm", "-rf", containerWorkRoot + "/stage",
+		"rm", "-rf", ContainerWorkRoot + "/stage",
 	}, nil
 }

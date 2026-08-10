@@ -70,7 +70,7 @@ func runConnect(ctx context.Context, args []string, out io.Writer) error {
 	if len(request.command) == 0 && interactive {
 		// A shell says where it is but not what is installed in it, and the
 		// agent is the reason the run exists.
-		fmt.Fprintf(out, "%s: shell in %s. Run `pi` to start the agent.\n", runID, manifest.Workspace)
+		fmt.Fprintf(out, "%s: shell in %s. Run `pi` to start the agent.\n", runID, manifest.Workspace())
 	}
 	// The terminal now belongs to the run, and pisafe has nothing left to do
 	// with it: replacing this process hands over signals, window resizes, and
@@ -87,7 +87,7 @@ func runConnect(ctx context.Context, args []string, out io.Writer) error {
 // started it; a command does not, because exec would run the first command of
 // a list and silently drop the rest.
 func connectArgv(manifest runstate.Manifest, command []string, interactive bool) []string {
-	remote := "cd " + shellQuote(manifest.Workspace) + " && "
+	remote := "cd " + shellQuote(manifest.Workspace()) + " && "
 	if len(command) == 0 {
 		remote += `exec "$SHELL" -l`
 	} else {

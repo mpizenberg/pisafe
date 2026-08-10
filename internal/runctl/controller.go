@@ -148,8 +148,6 @@ func (controller Controller) StartPrepared(
 		ProjectKey:         project.Key,
 		Snapshot:           prepared.Snapshot,
 		Image:              imageID,
-		Container:          spec.ContainerName(),
-		Workspace:          "/work/" + project.Directory,
 		Caches:             spec.Caches,
 		ActiveLimitSeconds: spec.WallSeconds,
 	})
@@ -281,7 +279,7 @@ func (controller Controller) StartPrepared(
 	if err := controller.configureIdentity(ctx, spec, identity); err != nil {
 		return runstate.Manifest{}, err
 	}
-	if err := controller.configureProfile(ctx, spec, "/work/"+project.Directory); err != nil {
+	if err := controller.configureProfile(ctx, spec, manifest.Workspace()); err != nil {
 		return runstate.Manifest{}, err
 	}
 	capability, err := runstate.NewInferenceCapability()

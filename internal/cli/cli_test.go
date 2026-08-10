@@ -91,8 +91,8 @@ func TestPrintRunResultShowsExactConnectionAndExclusions(t *testing.T) {
 	var output bytes.Buffer
 	result := runstart.Result{
 		Manifest: runstate.Manifest{
-			RunID:     "project-run",
-			Workspace: "/work/project",
+			RunID:   "project-run",
+			Project: "project",
 			Snapshot: gitstage.Snapshot{
 				BaselineCommit: strings.Repeat("a", 40),
 				WorkRef:        "refs/heads/work/project-run",
@@ -365,11 +365,12 @@ func TestParseConnectRequestSeparatesTheRunFromTheCommand(t *testing.T) {
 }
 
 // The remote command is executed by a shell inside the run, so the workspace
-// path must reach it as one word whatever the project is called, and the
-// command's own words must reach it as the shell syntax they were written as.
+// path must reach it as one word whatever the project is called — including a
+// name the store would refuse to file a run under — and the command's own words
+// must reach it as the shell syntax they were written as.
 func TestConnectArgvRunsInTheWorkspaceWithATerminalOnlyWhenInteractive(t *testing.T) {
 	manifest := runstate.Manifest{
-		Workspace: "/work/my project",
+		Project: "my project",
 		SSH: &runstate.SSHConnection{
 			Alias:      "pisafe-run-123",
 			ConfigFile: "/Users/alice/Library/Application Support/pisafe/ssh.config",
@@ -1081,8 +1082,8 @@ func TestZedConnectionsAreSavedAndReclaimedUnderTheSameAlias(t *testing.T) {
 	settings := filepath.Join(home, ".config", "zed", "settings.json")
 	runID := "tessera-20260804-134311-bf9fdd2fcdb6"
 	manifest := runstate.Manifest{
-		RunID:     runID,
-		Workspace: "/work/tessera",
+		RunID:   runID,
+		Project: "tessera",
 		SSH: &runstate.SSHConnection{
 			Alias:      runssh.Alias(runID),
 			ConfigFile: filepath.Join(home, "ssh", runID, "ssh.config"),

@@ -176,7 +176,7 @@ func (controller Controller) Resume(
 	}
 	capability, err := runstate.NewInferenceCapability()
 	if err == nil {
-		err = controller.configureProfile(ctx, spec, manifest.Workspace)
+		err = controller.configureProfile(ctx, spec, manifest.Workspace())
 	}
 	if err == nil {
 		err = controller.configureModels(ctx, spec, capability)

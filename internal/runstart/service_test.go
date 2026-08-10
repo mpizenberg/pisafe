@@ -73,7 +73,6 @@ func (controller *fakeController) StartPrepared(
 		Project:    project.Directory,
 		ProjectKey: project.Key,
 		State:      runstate.StateActive,
-		Workspace:  "/work/" + project.Directory,
 		SSH: &runstate.SSHConnection{
 			Alias:      "pisafe-" + prepared.Snapshot.RunID,
 			ConfigFile: "/state/ssh.config",

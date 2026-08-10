@@ -47,7 +47,7 @@ func runZed(ctx context.Context, runID string, out io.Writer) error {
 	command := exec.CommandContext(
 		ctx,
 		zed,
-		"ssh://"+manifest.SSH.Alias+manifest.Workspace,
+		"ssh://"+manifest.SSH.Alias+manifest.Workspace(),
 	)
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("open run in Zed: %s", output)

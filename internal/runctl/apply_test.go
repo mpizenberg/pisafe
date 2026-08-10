@@ -240,8 +240,6 @@ func creatingRun(t *testing.T, store runstate.Store, snapshot gitstage.Snapshot)
 		ProjectKey:         testProject.Key,
 		Snapshot:           snapshot,
 		Image:              testImage,
-		Container:          "pisafe-run-" + snapshot.RunID,
-		Workspace:          "/work/project",
 		ActiveLimitSeconds: 3600,
 	}); err != nil {
 		t.Fatal(err)
