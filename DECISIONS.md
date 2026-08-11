@@ -263,13 +263,14 @@ history holds them. New entries are appended in full.
   container added later inherits all of it instead of restating it. Writing the
   prologue down once is what showed that the container generating a run's SSH
   host key had no memory or PID limit at all; it has the run's now. One
-  difference survives and is not understood: `packageArgs` mounts its scratch
-  `/tmp` without `noexec` where every other container has it. Install needs
-  somewhere to unpack a downloaded tarball, but resolve shares that base and
-  only runs `npm pack --dry-run`, so it holds an exemption it has no use for and
-  is the half whose output comes back from the network. Narrowing it to install,
-  or dropping it entirely, is backlog work behind a live install rather than a
-  silent change inside a deduplication.
+  container is exempt from `noexec` on its scratch `/tmp`: the half of
+  `packageArgs` that installs, because npm runs a downloaded tarball's own files
+  out of `/tmp` while unpacking it. Resolve shares that base and had the
+  exemption for no reason other than sharing it — it runs `npm pack --dry-run`
+  and unpacks nothing, while being the half whose answer comes back from the
+  registry and is parsed. `packageArgs` now takes the flag from its caller.
+  Dropping it from install as well is not attempted: only a live install can
+  show whether npm needs it, and nothing records that it does.
 - The Mac's on-link deny set is canonicalized in exactly one place. `hostnet`
   reports the prefixes it observed; `lima.CanonicalIPv4Prefixes` masks,
   deduplicates, orders, and drops any prefix another already covers, and the VM

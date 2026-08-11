@@ -58,6 +58,13 @@ func TestEveryContainerPisafeStartsIsHardened(t *testing.T) {
 			named == strings.Contains(joined, "--rm") {
 			t.Errorf("%s container is named=%v:\n%s", name, named, joined)
 		}
+		// A scratch filesystem is the only place any of these can write, so
+		// whether it may be executed out of is the whole of what the exemption
+		// costs. Install is the one that unpacks a tarball and runs npm over it.
+		if executable := strings.Contains(joined, "--tmpfs /tmp:rw,nosuid"); executable !=
+			(name == "install") {
+			t.Errorf("%s container has an executable /tmp = %v:\n%s", name, executable, joined)
+		}
 	}
 }
 

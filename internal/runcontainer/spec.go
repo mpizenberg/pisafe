@@ -591,7 +591,7 @@ func (spec Spec) PublishArgs(cache CacheMount) ([]string, error) {
 // and the integrity of the tarball that spec names, so the pin comes from the
 // registry's own answer rather than from anything pisafe invents.
 func PackageResolveArgs(imageID, packageSpec string) ([]string, error) {
-	args, err := packageArgs(imageID, "resolve")
+	args, err := packageArgs(imageID, "resolve", false)
 	if err != nil {
 		return nil, err
 	}
@@ -613,7 +613,7 @@ func PackageInstallArgs(imageID, name, version, integrity string) ([]string, err
 	if err := profile.ValidateIntegrity(integrity); err != nil {
 		return nil, err
 	}
-	args, err := packageArgs(imageID, "install")
+	args, err := packageArgs(imageID, "install", true)
 	if err != nil {
 		return nil, err
 	}
@@ -627,7 +627,12 @@ func PackageInstallArgs(imageID, name, version, integrity string) ([]string, err
 // container in every respect except that it has no storage at all: managing the
 // profile is the one thing pisafe does that needs the network and needs nothing
 // of any run or project.
-func packageArgs(imageID, kind string) ([]string, error) {
+//
+// executableScratch belongs to the half that unpacks a tarball, because npm
+// runs files out of /tmp while installing. The half that only puts a question
+// to the registry is told nothing there may be executed, which matters most
+// there: it is the one whose answer comes back from the registry and is parsed.
+func packageArgs(imageID, kind string, executableScratch bool) ([]string, error) {
 	if !imageIDPattern.MatchString(imageID) {
 		return nil, fmt.Errorf("image must be an immutable sha256 ID")
 	}
@@ -638,7 +643,7 @@ func packageArgs(imageID, kind string) ([]string, error) {
 		pids:           DefaultPIDs,
 		timeoutSeconds: packageSeconds,
 		tmpBytes:       DefaultTemporary,
-		tmpExec:        true,
+		tmpExec:        executableScratch,
 	}
 	return append(
 		settings.args(),

@@ -568,7 +568,11 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   SHA-512 is not the resolved integrity. The tree is streamed into the profile
   and renamed into place before the old one goes, and the record is written
   after the tree and before any removal. `extension remove` and `extension list`
-  complete the set.
+  complete the set. The two share one container definition and differ in one
+  thing: the installing half gets a scratch `/tmp` it may execute out of,
+  because npm runs an unpacked tarball's own files while installing. The
+  resolving half — the one whose answer comes back from the registry and is
+  parsed — cannot execute anything it writes.
 - `pisafe extension update` never applies anything unasked. What npm resolves
   each installed name to now is checked at most once a day, bounded to 45
   seconds, when a run stops — never at run start, which reaches no registry at
