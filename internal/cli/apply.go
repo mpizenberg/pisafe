@@ -12,13 +12,17 @@ import (
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
-// applyRequest is one parsed `pisafe apply RUN [--keep-baseline|--drop-baseline]`.
+// applyRequest is one parsed `pisafe apply RUN [--keep-baseline|--drop-baseline]
+// [--include-force]`.
 type applyRequest struct {
 	runID    string
 	baseline gitstage.BaselineChoice
+	force    bool
 }
 
-var errApplyUsage = fmt.Errorf("usage: pisafe apply [RUN] [--keep-baseline|--drop-baseline]")
+var errApplyUsage = fmt.Errorf(
+	"usage: pisafe apply [RUN] [--keep-baseline|--drop-baseline] [--include-force]",
+)
 
 func parseApplyRequest(args []string) (applyRequest, error) {
 	request := applyRequest{}
@@ -29,6 +33,8 @@ func parseApplyRequest(args []string) (applyRequest, error) {
 			request.baseline = gitstage.KeepBaseline
 		case "--drop-baseline":
 			request.baseline = gitstage.DropBaseline
+		case "--include-force":
+			request.force = true
 		default:
 			if strings.HasPrefix(argument, "-") {
 				return applyRequest{}, fmt.Errorf(
@@ -155,12 +161,17 @@ func runApply(ctx context.Context, args []string, in io.Reader, out io.Writer) e
 	if err != nil {
 		return err
 	}
-	manifest, result, err := controller.Apply(ctx, runID, imageID, baseline)
+	manifest, result, err := controller.Apply(ctx, runID, imageID, baseline, request.force)
 	if err != nil {
 		conflict := &gitstage.BaselineReplayConflict{}
 		if errors.As(err, &conflict) {
 			printReplayConflict(out, runID, conflict)
 			return errors.New("the baseline commit cannot be left out of this run's history")
+		}
+		included := &gitstage.IncludedConflict{}
+		if errors.As(err, &included) {
+			printIncludedConflict(out, runID, included)
+			return errors.New("the included work was not copied back")
 		}
 		if errors.Is(err, gitstage.ErrApplyNeedsReconciliation) {
 			return fmt.Errorf(
@@ -197,6 +208,27 @@ func printReplayConflict(out io.Writer, runID string, conflict *gitstage.Baselin
 	)
 }
 
+// printIncludedConflict reports a copy-back that was refused. The branch is
+// imported by now, so what is left is only the files, and the run still holds
+// its own copy of every one of them.
+func printIncludedConflict(out io.Writer, runID string, conflict *gitstage.IncludedConflict) {
+	fmt.Fprintf(
+		out,
+		"The branch was imported, but %d included path(s) changed both in the run\n"+
+			"and here while it ran:\n",
+		len(conflict.Paths),
+	)
+	printNames(out, namedList{names: conflict.Paths})
+	fmt.Fprintf(
+		out,
+		"Nothing was copied back, and %s still holds its own copy. You can:\n"+
+			"  pisafe apply %s --include-force   overwrite this Mac's copies\n"+
+			"  resolve them here first, then rerun the same command\n",
+		runID,
+		runID,
+	)
+}
+
 func printApplyResult(out io.Writer, manifest runstate.Manifest, result gitstage.ApplyResult) {
 	fmt.Fprintf(out, "Imported:  %s\nTip:       %s\n", result.Branch, result.Tip)
 	for _, submodule := range result.Submodules {
@@ -222,6 +254,22 @@ func printApplyResult(out io.Writer, manifest runstate.Manifest, result gitstage
 			len(result.Untracked),
 		)
 		printNames(out, namedList{names: result.Untracked})
+	}
+	if len(result.Included.Written) != 0 {
+		fmt.Fprintf(
+			out,
+			"Included:  %d file(s) copied back under the paths you selected\n",
+			len(result.Included.Written),
+		)
+		printNames(out, namedList{names: result.Included.Written})
+	}
+	if len(result.Included.Kept) != 0 {
+		fmt.Fprintf(
+			out,
+			"Kept:      %d included file(s) the run removed were left here\n",
+			len(result.Included.Kept),
+		)
+		printNames(out, namedList{names: result.Included.Kept})
 	}
 	fmt.Fprintf(
 		out,

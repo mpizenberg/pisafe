@@ -80,7 +80,7 @@ func TestStoreRejectsInvalidTransitions(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.BeginApply("run-one", testApplyPlan("run-one", root)); err == nil ||
+	if _, err := store.BeginApply("run-one", testApplyPlan("run-one", root), nil); err == nil ||
 		!strings.Contains(err.Error(), "not stopped") {
 		t.Fatalf("error = %v", err)
 	}
@@ -390,14 +390,14 @@ func TestStoreRecordsApplyPlanUntilEveryRefIsImported(t *testing.T) {
 		!strings.Contains(err.Error(), "no apply in progress") {
 		t.Fatalf("premature completion error = %v", err)
 	}
-	recorded, err := store.BeginApply("run-apply", planned)
+	recorded, err := store.BeginApply("run-apply", planned, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if recorded.State != StateStopped || recorded.Apply == nil {
 		t.Fatalf("recorded = %#v", recorded)
 	}
-	if _, err := store.BeginApply("run-apply", planned); err == nil ||
+	if _, err := store.BeginApply("run-apply", planned, nil); err == nil ||
 		!strings.Contains(err.Error(), "already has an apply in progress") {
 		t.Fatalf("second plan error = %v", err)
 	}
@@ -447,7 +447,7 @@ func TestStoreRejectsApplyPlansItCannotReplaySafely(t *testing.T) {
 		plan := valid
 		plan.Journal.Steps = append([]gitstage.ApplyStep(nil), valid.Journal.Steps...)
 		corrupt(&plan)
-		if _, err := store.BeginApply("run-plan", plan); err == nil {
+		if _, err := store.BeginApply("run-plan", plan, nil); err == nil {
 			t.Errorf("BeginApply accepted a plan with a %s", name)
 		}
 	}
@@ -468,7 +468,7 @@ func TestStoreForgetsAReclaimedRunButNeverALiveOne(t *testing.T) {
 		t.Fatalf("forgetting an active run = %v", err)
 	}
 
-	if _, err := store.BeginApply("run-gone", testApplyPlan("run-gone", root)); err != nil {
+	if _, err := store.BeginApply("run-gone", testApplyPlan("run-gone", root), nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.CompleteApply("run-gone"); err != nil {

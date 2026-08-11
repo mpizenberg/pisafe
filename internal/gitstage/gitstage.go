@@ -55,6 +55,9 @@ type ApplyResult struct {
 	FinalCommit string             `json:"final_commit,omitempty"`
 	Untracked   []string           `json:"untracked,omitempty"`
 	Submodules  []AppliedSubmodule `json:"submodules,omitempty"`
+	// Included reports what the run's work under the paths the user chose did
+	// to the working tree, which is the one part of an apply that writes files.
+	Included IncludedResult `json:"included,omitempty"`
 }
 
 // AppliedSubmodule reports which commit the imported superproject branch

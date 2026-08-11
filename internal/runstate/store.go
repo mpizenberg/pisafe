@@ -23,7 +23,7 @@ import (
 	"github.com/mpizenberg/pisafe/internal/safefile"
 )
 
-const manifestVersion = 6
+const manifestVersion = 7
 
 var (
 	gitObjectPattern  = regexp.MustCompile(`^(?:[a-f0-9]{40}|[a-f0-9]{64})$`)
@@ -76,17 +76,21 @@ type Manifest struct {
 	// Apply is the plan of an import that has been verified but whose refs
 	// may not all have moved yet. It exists only between BeginApply and
 	// CompleteApply, and is what makes an interrupted apply replayable.
-	Apply                *gitstage.PlannedApply `json:"apply,omitempty"`
-	ActiveLimitSeconds   int64                  `json:"active_limit_seconds"`
-	ActiveElapsedSeconds int64                  `json:"active_elapsed_seconds"`
-	ActiveStartedAt      *time.Time             `json:"active_started_at,omitempty"`
-	ActiveDeadline       *time.Time             `json:"active_deadline,omitempty"`
-	CreatedAt            time.Time              `json:"created_at"`
-	UpdatedAt            time.Time              `json:"updated_at"`
-	StoppedAt            *time.Time             `json:"stopped_at,omitempty"`
-	ImportedAt           *time.Time             `json:"imported_at,omitempty"`
-	ImportedBranch       string                 `json:"imported_branch,omitempty"`
-	LastError            string                 `json:"last_error,omitempty"`
+	Apply *gitstage.PlannedApply `json:"apply,omitempty"`
+	// Included is the work a run handed back under the paths the user chose
+	// that has not reached the working tree yet. It outlives the ref import, so
+	// a refused copy-back is completed later rather than lost.
+	Included             []gitstage.SelectedInput `json:"included,omitempty"`
+	ActiveLimitSeconds   int64                    `json:"active_limit_seconds"`
+	ActiveElapsedSeconds int64                    `json:"active_elapsed_seconds"`
+	ActiveStartedAt      *time.Time               `json:"active_started_at,omitempty"`
+	ActiveDeadline       *time.Time               `json:"active_deadline,omitempty"`
+	CreatedAt            time.Time                `json:"created_at"`
+	UpdatedAt            time.Time                `json:"updated_at"`
+	StoppedAt            *time.Time               `json:"stopped_at,omitempty"`
+	ImportedAt           *time.Time               `json:"imported_at,omitempty"`
+	ImportedBranch       string                   `json:"imported_branch,omitempty"`
+	LastError            string                   `json:"last_error,omitempty"`
 }
 
 // Workspace is where the run's checkout is inside its container. It follows
@@ -329,6 +333,13 @@ func (store Store) Forget(runID string) error {
 	if manifest.State == StateActive {
 		return fmt.Errorf("run %q is active and must be stopped first", runID)
 	}
+	archive, err := store.IncludedArchivePath(runID)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(archive); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove included work archive: %w", err)
+	}
 	path, err := store.manifestPath(runID)
 	if err != nil {
 		return err
@@ -342,7 +353,11 @@ func (store Store) Forget(runID string) error {
 // BeginApply records a verified import plan before any user-visible ref moves.
 // Every object the plan names is already in the local repositories, so the
 // recorded journal is enough to finish or inspect an interrupted apply.
-func (store Store) BeginApply(runID string, planned gitstage.PlannedApply) (Manifest, error) {
+func (store Store) BeginApply(
+	runID string,
+	planned gitstage.PlannedApply,
+	included []gitstage.SelectedInput,
+) (Manifest, error) {
 	manifest, err := store.Get(runID)
 	if err != nil {
 		return Manifest{}, err
@@ -357,9 +372,40 @@ func (store Store) BeginApply(runID string, planned gitstage.PlannedApply) (Mani
 		return Manifest{}, err
 	}
 	manifest.Apply = &planned
+	manifest.Included = included
 	manifest.LastError = ""
 	manifest.UpdatedAt = store.now().UTC()
 	return store.replace(manifest)
+}
+
+// ClearIncluded drops a run's pending included work once it has been written to
+// the working tree, archive and record together.
+func (store Store) ClearIncluded(runID string) (Manifest, error) {
+	manifest, err := store.Get(runID)
+	if err != nil {
+		return Manifest{}, err
+	}
+	path, err := store.IncludedArchivePath(runID)
+	if err != nil {
+		return Manifest{}, err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return Manifest{}, fmt.Errorf("remove included work archive: %w", err)
+	}
+	manifest.Included = nil
+	manifest.UpdatedAt = store.now().UTC()
+	return store.replace(manifest)
+}
+
+// IncludedArchivePath is where a run's returned work waits between the ref
+// import and its copy into the working tree. It lives beside the manifest
+// rather than in the run, so completing a refused copy-back never needs the VM
+// again.
+func (store Store) IncludedArchivePath(runID string) (string, error) {
+	if err := runid.Validate(runID); err != nil {
+		return "", err
+	}
+	return filepath.Join(store.root, runID+".outputs.tar"), nil
 }
 
 // CompleteApply marks a run imported. Callers reach it only once every ref in

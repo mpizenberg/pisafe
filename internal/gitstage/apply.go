@@ -76,7 +76,7 @@ func (prepared PreparedApply) Artifacts() []ApplyArtifact {
 	// fetched last.
 	if prepared.OutputsSHA256 != "" {
 		artifacts = append(artifacts, ApplyArtifact{
-			Name:   applyOutputsName,
+			Name:   OutputsArtifactName,
 			SHA256: prepared.OutputsSHA256,
 		})
 	}
@@ -115,6 +115,9 @@ type ApplyStep struct {
 type PlannedApply struct {
 	Journal ApplyJournal `json:"journal"`
 	Result  ApplyResult  `json:"result"`
+	// Outputs is the included work the run handed back, kept with the plan so
+	// it survives an interruption between the ref import and the copy.
+	Outputs []SelectedInput `json:"outputs,omitempty"`
 }
 
 var ErrApplyNeedsReconciliation = errors.New(
@@ -441,7 +444,7 @@ func ImportApply(
 		Repository: sourceRoot,
 		Commit:     prepared.Tip,
 	})
-	return PlannedApply{Journal: journal, Result: result}, nil
+	return PlannedApply{Journal: journal, Result: result, Outputs: prepared.Outputs}, nil
 }
 
 // importBundle verifies a transferred bundle and fetches it into a temporary

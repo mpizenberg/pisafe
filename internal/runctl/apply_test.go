@@ -27,7 +27,7 @@ func TestApplyImportsAStoppedRunAndMarksItImported(t *testing.T) {
 	controller := New(backend, store, &fakeSSHStore{}, testInference{})
 	stoppedRun(t, store, snapshot)
 
-	manifest, result, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.KeepBaseline)
+	manifest, result, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.KeepBaseline, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestApplyImportsAStoppedRunAndMarksItImported(t *testing.T) {
 	}
 
 	// An imported run is not applied twice.
-	if _, _, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.KeepBaseline); err == nil ||
+	if _, _, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.KeepBaseline, false); err == nil ||
 		!strings.Contains(err.Error(), "already imported") {
 		t.Fatalf("second apply error = %v", err)
 	}
@@ -82,7 +82,7 @@ func TestImportedRunStillReclaimsItsStorage(t *testing.T) {
 	controller := New(backend, store, &fakeSSHStore{}, testInference{})
 	stoppedRun(t, store, snapshot)
 
-	if _, _, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.KeepBaseline); err != nil {
+	if _, _, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.KeepBaseline, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := controller.Discard(ctx, snapshot.RunID); err != nil {
@@ -106,7 +106,7 @@ func TestApplyMountsRunStorageBeforeCapturingIt(t *testing.T) {
 	controller := New(backend, store, &fakeSSHStore{}, testInference{})
 	stoppedRun(t, store, snapshot)
 
-	if _, _, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.KeepBaseline); err == nil ||
+	if _, _, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.KeepBaseline, false); err == nil ||
 		!strings.Contains(err.Error(), "verify storage") {
 		t.Fatalf("error = %v", err)
 	}
@@ -134,7 +134,7 @@ func TestApplyFinishesARecordedPlanWithoutRecapturingTheRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.BeginApply(snapshot.RunID, planned); err != nil {
+	if _, err := store.BeginApply(snapshot.RunID, planned, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := sourceGitOutput(source, "rev-parse", "--verify", "refs/heads/pisafe/interrupted-run"); err == nil {
@@ -144,7 +144,7 @@ func TestApplyFinishesARecordedPlanWithoutRecapturingTheRun(t *testing.T) {
 	// The run is gone: any attempt to capture it again must fail the test.
 	backend := &fakeBackend{failAt: "podman"}
 	controller := New(backend, store, &fakeSSHStore{}, testInference{})
-	manifest, result, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.KeepBaseline)
+	manifest, result, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.KeepBaseline, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,7 @@ func TestApplyKeepsThePlanWhenARefIsContested(t *testing.T) {
 	stoppedRun(t, store, snapshot)
 	sourceGit(t, source, "update-ref", "refs/heads/pisafe/contested-run", snapshot.SourceHead)
 
-	_, _, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.KeepBaseline)
+	_, _, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.KeepBaseline, false)
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("error = %v", err)
 	}
@@ -328,7 +328,7 @@ func TestApplyDropsTheBaselineWhenTheRunIsAskedTo(t *testing.T) {
 	controller := New(backend, store, &fakeSSHStore{}, testInference{})
 	stoppedRun(t, store, snapshot)
 
-	_, result, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.DropBaseline)
+	_, result, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.DropBaseline, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +377,7 @@ func TestApplyReportsAReplayConflictWithoutMarkingTheRunBroken(t *testing.T) {
 	controller := New(backend, store, &fakeSSHStore{}, testInference{})
 	stoppedRun(t, store, snapshot)
 
-	_, _, err = controller.Apply(ctx, snapshot.RunID, testImage, gitstage.DropBaseline)
+	_, _, err = controller.Apply(ctx, snapshot.RunID, testImage, gitstage.DropBaseline, false)
 	conflict := &gitstage.BaselineReplayConflict{}
 	if !errors.As(err, &conflict) {
 		t.Fatalf("error = %v", err)
@@ -390,7 +390,7 @@ func TestApplyReportsAReplayConflictWithoutMarkingTheRunBroken(t *testing.T) {
 		manifest.Apply != nil {
 		t.Fatalf("manifest = %#v", manifest)
 	}
-	if _, _, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.KeepBaseline); err != nil {
+	if _, _, err := controller.Apply(ctx, snapshot.RunID, testImage, gitstage.KeepBaseline, false); err != nil {
 		t.Fatalf("keeping the baseline after a conflict: %v", err)
 	}
 }

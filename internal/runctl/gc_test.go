@@ -323,7 +323,7 @@ func importedRun(t *testing.T, runID string) (
 	store := runstate.NewStore(t.TempDir())
 	controller := New(backend, store, &fakeSSHStore{}, testInference{})
 	stoppedRun(t, store, snapshot)
-	if _, _, err := controller.Apply(context.Background(), snapshot.RunID, testImage, gitstage.KeepBaseline); err != nil {
+	if _, _, err := controller.Apply(context.Background(), snapshot.RunID, testImage, gitstage.KeepBaseline, false); err != nil {
 		t.Fatal(err)
 	}
 	return backend, store, controller, snapshot
