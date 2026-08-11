@@ -282,22 +282,25 @@ configuration is never touched.`)
 }
 
 func runList(ctx context.Context, out io.Writer) error {
-	runs, err := recordedRuns()
+	runs, unreadable, err := recordedRuns()
 	if err != nil {
 		return err
 	}
-	if len(runs) == 0 {
+	if len(runs) == 0 && len(unreadable) == 0 {
 		fmt.Fprintln(out, "No runs.")
 		return nil
 	}
 	running, asked := runningRuns(ctx)
-	return printRuns(out, runs, running, asked)
+	return printRuns(out, runs, unreadable, running, asked)
 }
 
-// printRuns renders the durable records against what the VM shows.
+// printRuns renders the durable records against what the VM shows. A record
+// this version cannot read is listed too: it still holds a workspace, and
+// naming it is what lets it be discarded.
 func printRuns(
 	out io.Writer,
 	runs []runstate.Manifest,
+	unreadable []runstate.UnreadableRun,
 	running map[string]bool,
 	asked bool,
 ) error {
@@ -313,8 +316,20 @@ func printRuns(
 			run.UpdatedAt.UTC().Format("2006-01-02 15:04Z"),
 		)
 	}
+	for _, record := range unreadable {
+		fmt.Fprintf(table, "%s\tunreadable\t-\t-\n", record.RunID)
+	}
 	if err := table.Flush(); err != nil {
 		return fmt.Errorf("write run list: %w", err)
+	}
+	for _, record := range unreadable {
+		fmt.Fprintf(
+			out,
+			"%s: %s.\nIt still holds a workspace; pisafe discard %s releases it.\n",
+			record.RunID,
+			record.Reason,
+			record.RunID,
+		)
 	}
 	if !asked {
 		fmt.Fprintln(
@@ -369,10 +384,10 @@ func runningRuns(ctx context.Context) (map[string]bool, bool) {
 	return running, true
 }
 
-func recordedRuns() ([]runstate.Manifest, error) {
+func recordedRuns() ([]runstate.Manifest, []runstate.UnreadableRun, error) {
 	store, err := runStore()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	return store.List()
 }
@@ -410,7 +425,10 @@ func resolveRunID(ctx context.Context, runID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	runs, err := recordedRuns()
+	// A record this version cannot read is not a candidate: every command that
+	// resolves a run then reads it, so naming one could only fail later.
+	// Discarding is the exception and always names its run outright.
+	runs, _, err := recordedRuns()
 	if err != nil {
 		return "", err
 	}

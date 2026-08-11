@@ -48,7 +48,7 @@ var forwardedRequestHeaders = []string{
 // every request so a run that has stopped or been reclaimed is rejected
 // immediately.
 type RunSource interface {
-	List() ([]runstate.Manifest, error)
+	List() ([]runstate.Manifest, []runstate.UnreadableRun, error)
 }
 
 type Server struct {
@@ -190,7 +190,9 @@ func (server *Server) authorize(request *http.Request) (string, bool) {
 	if !runstate.ValidInferenceCapability(capability) {
 		return "", false
 	}
-	manifests, err := server.runs.List()
+	// A record that cannot be read holds no capability that can be matched, so
+	// leaving it out only ever denies.
+	manifests, _, err := server.runs.List()
 	if err != nil {
 		return "", false
 	}

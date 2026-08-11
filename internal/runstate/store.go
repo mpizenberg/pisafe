@@ -186,15 +186,29 @@ func (store Store) Get(runID string) (Manifest, error) {
 	return manifest, nil
 }
 
-func (store Store) List() ([]Manifest, error) {
+// UnreadableRun is a record that is there and cannot be understood — written
+// by a version that is gone, or damaged. Only its run ID is known, because the
+// file is named by it, and that is enough to report it and to discard it.
+type UnreadableRun struct {
+	RunID  string
+	Reason string
+}
+
+// List returns every run record, separating the ones this version can read
+// from the ones it cannot. A caller that only matches or displays runs may
+// ignore the second list; a caller about to conclude that nothing refers to
+// something may not, because an unreadable record still owns everything it
+// was given and names none of it.
+func (store Store) List() ([]Manifest, []UnreadableRun, error) {
 	entries, err := os.ReadDir(store.root)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("list run manifests: %w", err)
+		return nil, nil, fmt.Errorf("list run manifests: %w", err)
 	}
 	manifests := make([]Manifest, 0, len(entries))
+	var unreadable []UnreadableRun
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
@@ -202,15 +216,21 @@ func (store Store) List() ([]Manifest, error) {
 		runID := entry.Name()[:len(entry.Name())-len(".json")]
 		manifest, err := store.Get(runID)
 		if err != nil {
-			// One unreadable record stops the listing, so it has to say which.
-			return nil, fmt.Errorf("run %q: %w", runID, err)
+			unreadable = append(unreadable, UnreadableRun{
+				RunID:  runID,
+				Reason: err.Error(),
+			})
+			continue
 		}
 		manifests = append(manifests, manifest)
 	}
 	sort.Slice(manifests, func(i, j int) bool {
 		return manifests[i].CreatedAt.After(manifests[j].CreatedAt)
 	})
-	return manifests, nil
+	sort.Slice(unreadable, func(i, j int) bool {
+		return unreadable[i].RunID < unreadable[j].RunID
+	})
+	return manifests, unreadable, nil
 }
 
 func (store Store) Stop(runID string, endedAt time.Time) (Manifest, error) {

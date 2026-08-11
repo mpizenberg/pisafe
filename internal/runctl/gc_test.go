@@ -205,6 +205,59 @@ func TestASweepReclaimsAStoreOnlyAfterItsCheckoutStaysGone(t *testing.T) {
 	}
 }
 
+// A record this version cannot read names a project it cannot be asked about,
+// so no store may be released while one exists. Its own run is reported rather
+// than acted on: its age and state are exactly what could not be read.
+func TestASweepReleasesNoStoreWhileARecordCannotBeRead(t *testing.T) {
+	root := t.TempDir()
+	store := runstate.NewStore(root)
+	controller := New(&fakeBackend{}, store, &fakeSSHStore{}, testInference{})
+	gone := registerCheckout(t, store, t.TempDir(), "released")
+	if err := os.RemoveAll(gone.Root); err != nil {
+		t.Fatal(err)
+	}
+	long := time.Now().UTC().Add(-10 * Retention)
+	if err := store.MarkProjectMissing(gone.Key, long); err != nil {
+		t.Fatal(err)
+	}
+
+	// The window has run out, so the store is released while every record can
+	// be read.
+	now := time.Now().UTC()
+	plan, err := controller.Plan(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.ReclaimedProjects) != 1 || plan.ReclaimedProjects[0].Key != gone.Key {
+		t.Fatalf("plan = %#v", plan)
+	}
+
+	if err := os.WriteFile(
+		filepath.Join(root, "run-stale.json"),
+		[]byte(`{"version":1,"run_id":"run-stale"}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	plan, err = controller.Plan(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.ReclaimedProjects) != 0 {
+		t.Fatalf("a store was released beside a record nothing could read: %#v", plan)
+	}
+	if len(plan.MissingProjects) != 1 || plan.MissingProjects[0].Key != gone.Key {
+		t.Fatalf("plan = %#v", plan)
+	}
+	if len(plan.Kept) != 1 || plan.Kept[0].RunID != "run-stale" ||
+		!strings.Contains(plan.Kept[0].Reason, "cannot be read") {
+		t.Fatalf("kept = %#v", plan.Kept)
+	}
+	if len(plan.Reclaimed) != 0 {
+		t.Fatalf("an unreadable record was acted on: %#v", plan.Reclaimed)
+	}
+}
+
 // TestASweepLeavesAStoreWhoseCheckoutCameBack is the case the window exists
 // for. The stamp is old enough to release the store, and the checkout being
 // there again overrules it.

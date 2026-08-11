@@ -56,7 +56,7 @@ type StateStore interface {
 	Create(runstate.Manifest) (runstate.Manifest, error)
 	Activate(string, runstate.SSHConnection, gitstage.Snapshot, string, time.Time) (runstate.Manifest, error)
 	Get(string) (runstate.Manifest, error)
-	List() ([]runstate.Manifest, error)
+	List() ([]runstate.Manifest, []runstate.UnreadableRun, error)
 	Stop(string, time.Time) (runstate.Manifest, error)
 	Abandon(string) (runstate.Manifest, error)
 	Resume(string, string, time.Time) (runstate.Manifest, error)

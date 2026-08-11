@@ -23,7 +23,7 @@ func (controller Controller) publishCaches(
 		return nil
 	}
 	spec := specForManifest(manifest, manifest.Image)
-	records, err := controller.store.List()
+	records, unreadable, err := controller.store.List()
 	if err != nil {
 		return fmt.Errorf("publish run caches: %w", err)
 	}
@@ -31,6 +31,13 @@ func (controller Controller) publishCaches(
 	for _, cache := range manifest.Caches {
 		if err := controller.backend.PublishCacheSnapshot(ctx, spec, cache); err != nil {
 			failures = append(failures, err)
+			continue
+		}
+		// Which generations a record this version cannot read still mounts is
+		// unknowable, so nothing may be evicted while one exists. Publishing is
+		// additive and stays; the cost of waiting is disk, and the cost of
+		// guessing is a lower disappearing under a mounted overlay.
+		if len(unreadable) > 0 {
 			continue
 		}
 		if err := controller.backend.EvictCacheSnapshots(
@@ -56,7 +63,7 @@ func (controller Controller) ResetProjectCache(
 	ctx context.Context,
 	project runid.Project,
 ) error {
-	records, err := controller.store.List()
+	records, unreadable, err := controller.store.List()
 	if err != nil {
 		return err
 	}
@@ -67,6 +74,9 @@ func (controller Controller) ResetProjectCache(
 				record.RunID,
 			)
 		}
+	}
+	if err := refuseUnreadable(unreadable); err != nil {
+		return err
 	}
 	return controller.backend.ResetProjectCache(ctx, project.Key)
 }

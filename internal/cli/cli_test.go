@@ -34,6 +34,36 @@ func TestListWithNoRuns(t *testing.T) {
 	}
 }
 
+// A record this version cannot read still holds a workspace, and the listing
+// is the only thing that can name it. Hiding it would leave the space it
+// occupies with nothing pointing at it.
+func TestListNamesARecordItCannotRead(t *testing.T) {
+	var output bytes.Buffer
+	if err := printRuns(
+		&output,
+		[]runstate.Manifest{{RunID: "run-ok", Project: "project", State: runstate.StateStopped}},
+		[]runstate.UnreadableRun{{
+			RunID:  "run-stale",
+			Reason: "unsupported run manifest version 6",
+		}},
+		nil,
+		true,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"run-ok",
+		"run-stale",
+		"unreadable",
+		"unsupported run manifest version 6",
+		"pisafe discard run-stale",
+	} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("output lacks %q:\n%s", expected, output.String())
+		}
+	}
+}
+
 // What a record says and what the VM shows are two different things, and only
 // their combination is worth printing: a run recorded active that the VM has no
 // container for is neither running nor out of time.
@@ -60,7 +90,7 @@ func TestListShowsDurableStateAgainstWhatTheVMHas(t *testing.T) {
 	up := map[string]bool{"run-up": true}
 
 	var asked bytes.Buffer
-	if err := printRuns(&asked, runs, up, true); err != nil {
+	if err := printRuns(&asked, runs, nil, up, true); err != nil {
 		t.Fatal(err)
 	}
 	for _, expected := range []string{
@@ -76,7 +106,7 @@ func TestListShowsDurableStateAgainstWhatTheVMHas(t *testing.T) {
 	// A VM that could not be asked leaves both readings open, so neither is
 	// printed as though it had been settled.
 	var unasked bytes.Buffer
-	if err := printRuns(&unasked, runs, nil, false); err != nil {
+	if err := printRuns(&unasked, runs, nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(unasked.String(), "no container") ||

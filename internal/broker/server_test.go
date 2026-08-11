@@ -19,8 +19,8 @@ type fakeRuns struct {
 	err       error
 }
 
-func (runs fakeRuns) List() ([]runstate.Manifest, error) {
-	return runs.manifests, runs.err
+func (runs fakeRuns) List() ([]runstate.Manifest, []runstate.UnreadableRun, error) {
+	return runs.manifests, nil, runs.err
 }
 
 type staticCredentials struct {

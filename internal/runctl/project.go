@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/mpizenberg/pisafe/internal/runid"
+	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
 // DropProject throws away one project's whole store: its caches, its
@@ -99,7 +100,7 @@ func (controller Controller) releaseProject(ctx context.Context, projectKey stri
 // a mounted lower goes away — so this is the same question eviction and cache
 // reset ask, widened from one generation to the whole store.
 func (controller Controller) refuseIfInUse(projectKey string) error {
-	records, err := controller.store.List()
+	records, unreadable, err := controller.store.List()
 	if err != nil {
 		return err
 	}
@@ -111,5 +112,20 @@ func (controller Controller) refuseIfInUse(projectKey string) error {
 			)
 		}
 	}
-	return nil
+	return refuseUnreadable(unreadable)
+}
+
+// refuseUnreadable turns a record this version cannot read into the same
+// refusal a matching one would give. Which project such a record belongs to is
+// precisely what cannot be read, so anything about to disturb a project store
+// has to assume the answer is this one.
+func refuseUnreadable(unreadable []runstate.UnreadableRun) error {
+	if len(unreadable) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"run %q has a record this version cannot read, so whether it belongs to "+
+			"this project is unknown; discard it first",
+		unreadable[0].RunID,
+	)
 }

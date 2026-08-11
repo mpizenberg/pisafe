@@ -48,7 +48,7 @@ func TestStoreLifecycleAndList(t *testing.T) {
 	if _, err := store.Create(testManifest("run-two")); err != nil {
 		t.Fatal(err)
 	}
-	runs, err := store.List()
+	runs, _, err := store.List()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,11 +108,47 @@ func TestStoreRejectsDuplicateAndCorruptManifest(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	// The listing stops, so it has to name the record that stopped it.
-	_, err := store.List()
-	if err == nil || !strings.Contains(err.Error(), "identity mismatch") ||
-		!strings.Contains(err.Error(), `"bad"`) {
-		t.Fatalf("error = %v", err)
+	// A record nothing can make sense of is reported rather than hidden, and
+	// never at the cost of the records beside it.
+	runs, unreadable, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].RunID != "run-one" {
+		t.Fatalf("runs = %#v", runs)
+	}
+	if len(unreadable) != 1 || unreadable[0].RunID != "bad" ||
+		!strings.Contains(unreadable[0].Reason, "identity mismatch") {
+		t.Fatalf("unreadable = %#v", unreadable)
+	}
+}
+
+// A run staged by a version that is gone has to stay nameable: the record is
+// the only thing that says its workspace exists, and discarding it is the only
+// way to get that space back.
+func TestStoreListsARecordItCannotRead(t *testing.T) {
+	root := t.TempDir()
+	store := NewStore(root)
+	if _, err := store.Create(testManifest("run-current")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(root, "run-superseded.json"),
+		fmt.Appendf(nil, `{"version":%d,"run_id":"run-superseded"}`, manifestVersion-1),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	runs, unreadable, err := store.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].RunID != "run-current" {
+		t.Fatalf("runs = %#v", runs)
+	}
+	if len(unreadable) != 1 || unreadable[0].RunID != "run-superseded" ||
+		!strings.Contains(unreadable[0].Reason, "unsupported run manifest version") {
+		t.Fatalf("unreadable = %#v", unreadable)
 	}
 }
 

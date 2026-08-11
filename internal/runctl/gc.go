@@ -49,12 +49,21 @@ type KeptRun struct {
 // Plan decides what collection would do from the durable records alone. It
 // reads nothing from the VM, so it is safe to show before anything is removed.
 func (controller Controller) Plan(now time.Time) (GCPlan, error) {
-	manifests, err := controller.store.List()
+	manifests, unreadable, err := controller.store.List()
 	if err != nil {
 		return GCPlan{}, err
 	}
 	now = now.UTC()
 	var plan GCPlan
+	// A record this version cannot read is reported so it can be discarded, and
+	// never acted on: its age, its state, and the project it belongs to are all
+	// exactly what could not be read.
+	for _, record := range unreadable {
+		plan.Kept = append(plan.Kept, KeptRun{
+			RunID:  record.RunID,
+			Reason: "its record cannot be read by this version",
+		})
+	}
 	// A project whose runs still have records is in use whatever its checkout
 	// looks like, including the runs this same plan reclaims: a store is worth
 	// removing only once nothing at all refers to it, and the next sweep sees it
@@ -87,6 +96,12 @@ func (controller Controller) Plan(now time.Time) (GCPlan, error) {
 	}
 	for _, project := range projects {
 		if _, busy := inUse[project.Key]; busy || !checkoutIsGone(project.Root) {
+			continue
+		}
+		// An unreadable record names no project, so every store has to be
+		// treated as the one it refers to until it is discarded.
+		if len(unreadable) > 0 {
+			plan.MissingProjects = append(plan.MissingProjects, project)
 			continue
 		}
 		if project.MissingSince != nil && now.Sub(*project.MissingSince) >= Retention {

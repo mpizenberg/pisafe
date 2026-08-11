@@ -18,7 +18,7 @@ func TestRebuildPlanSaysWhetherTheWorkSurvives(t *testing.T) {
 	}
 
 	var keeps bytes.Buffer
-	printRebuildPlan(&keeps, lima.StatusRunning, false, runs)
+	printRebuildPlan(&keeps, lima.StatusRunning, false, runs, len(runs))
 	for _, expected := range []string{"Keeps:", "pisafe-state", "1 active run(s)"} {
 		if !strings.Contains(keeps.String(), expected) {
 			t.Fatalf("output lacks %q:\n%s", expected, keeps.String())
@@ -31,7 +31,7 @@ func TestRebuildPlanSaysWhetherTheWorkSurvives(t *testing.T) {
 	// Without the disk the rebuild takes every run's files, so it may not offer
 	// to stop runs for a stretch that is about to be deleted either.
 	var loses bytes.Buffer
-	printRebuildPlan(&loses, lima.StatusRunning, true, runs)
+	printRebuildPlan(&loses, lima.StatusRunning, true, runs, len(runs))
 	for _, expected := range []string{"Loses:", "pisafe backup", "Forgets: 2 run record(s)"} {
 		if !strings.Contains(loses.String(), expected) {
 			t.Fatalf("output lacks %q:\n%s", expected, loses.String())
@@ -46,7 +46,7 @@ func TestRebuildPlanSaysWhetherTheWorkSurvives(t *testing.T) {
 // what a rebuild "keeps" there would describe a VM that does not exist.
 func TestRebuildPlanReportsAnAbsentInstanceAsACreation(t *testing.T) {
 	var output bytes.Buffer
-	printRebuildPlan(&output, lima.StatusAbsent, false, nil)
+	printRebuildPlan(&output, lima.StatusAbsent, false, nil, 0)
 	if !strings.Contains(output.String(), "absent") {
 		t.Fatalf("output = %q", output.String())
 	}

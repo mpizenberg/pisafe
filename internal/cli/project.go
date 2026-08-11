@@ -69,7 +69,7 @@ func listProjects(out io.Writer) error {
 		fmt.Fprintln(out, "No project stores.")
 		return nil
 	}
-	runs, err := store.List()
+	runs, unreadable, err := store.List()
 	if err != nil {
 		return err
 	}
@@ -82,10 +82,24 @@ func listProjects(out io.Writer) error {
 				held++
 			}
 		}
-		fmt.Fprintf(table, "%s\t%d\t%s\n", project.Root, held, projectStatus(project, held))
+		fmt.Fprintf(
+			table,
+			"%s\t%d\t%s\n",
+			project.Root,
+			held,
+			projectStatus(project, held, len(unreadable) > 0),
+		)
 	}
 	if err := table.Flush(); err != nil {
 		return fmt.Errorf("write project list: %w", err)
+	}
+	if len(unreadable) > 0 {
+		fmt.Fprintf(
+			out,
+			"%d run record(s) cannot be read by this version, and each could belong\n"+
+				"to any of these projects; pisafe list names them.\n",
+			len(unreadable),
+		)
 	}
 	fmt.Fprintln(
 		out,
@@ -95,12 +109,18 @@ func listProjects(out io.Writer) error {
 	return nil
 }
 
-func projectStatus(project runstate.ProjectRecord, runs int) string {
+// projectStatus says whether a store is being used. A run whose record cannot
+// be read is a use that cannot be counted, so no store is called idle while
+// one exists — calling it idle is what invites removing it.
+func projectStatus(project runstate.ProjectRecord, runs int, uncounted bool) string {
 	if project.MissingSince != nil {
 		return "checkout " + missingSince(project)
 	}
 	if runs > 0 {
 		return "in use"
+	}
+	if uncounted {
+		return "unknown"
 	}
 	return "idle"
 }

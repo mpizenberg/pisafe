@@ -53,16 +53,26 @@ func rebuildVM(ctx context.Context, request vmRebuildRequest, out io.Writer) err
 	if err != nil {
 		return err
 	}
-	runs, err := recordedRuns()
+	runs, unreadable, err := recordedRuns()
 	if err != nil {
 		return err
+	}
+	// A record this version cannot read names storage on the same disk, so it
+	// is lost by the same rebuild and forgotten with the rest. Only stopping a
+	// run first needs to understand it, and that is not what this decides.
+	recorded := make([]string, 0, len(runs)+len(unreadable))
+	for _, run := range runs {
+		recorded = append(recorded, run.RunID)
+	}
+	for _, record := range unreadable {
+		recorded = append(recorded, record.RunID)
 	}
 	// An instance provisioned before the state disk existed keeps every run's
 	// files on its own disk, so deleting it is what destroys them. An absent
 	// instance holds nothing either way.
 	loses := status != lima.StatusAbsent && !stateDisk
 
-	printRebuildPlan(out, status, loses, runs)
+	printRebuildPlan(out, status, loses, runs, len(recorded))
 	if !request.confirmed {
 		fmt.Fprintf(out, "\nNothing was changed. Rebuild with %s\n", rebuildCommand(loses))
 		return nil
@@ -110,9 +120,9 @@ func rebuildVM(ctx context.Context, request vmRebuildRequest, out io.Writer) err
 
 	fmt.Fprintln(out, "Rebuilt the VM against the current definition; its boundary verified.")
 	if loses {
-		return forgetLostRuns(ctx, runs, out)
+		return forgetLostRuns(ctx, recorded, out)
 	}
-	if len(runs) != 0 {
+	if len(recorded) != 0 {
 		fmt.Fprintln(out, "Every run kept its workspace; resume one with pisafe resume RUN.")
 	}
 	return nil
@@ -128,7 +138,13 @@ func rebuildCommand(loses bool) string {
 // printRebuildPlan says what the rebuild costs before it is asked for. What a
 // VM keeps is the whole difference between a routine cure and losing every
 // run's work, and it is not something the user can see from the outside.
-func printRebuildPlan(out io.Writer, status lima.Status, loses bool, runs []runstate.Manifest) {
+func printRebuildPlan(
+	out io.Writer,
+	status lima.Status,
+	loses bool,
+	runs []runstate.Manifest,
+	recorded int,
+) {
 	if status == lima.StatusAbsent {
 		fmt.Fprintln(out, "VM:      absent; this creates one rather than replacing anything")
 		return
@@ -158,11 +174,11 @@ func printRebuildPlan(out io.Writer, status lima.Status, loses bool, runs []runs
 			"         transcripts and the profile's pins; nothing saves a workspace.\n",
 		lima.StateDiskName,
 	)
-	if len(runs) != 0 {
+	if recorded != 0 {
 		fmt.Fprintf(
 			out,
 			"Forgets: %d run record(s), which would otherwise name storage that is gone\n",
-			len(runs),
+			recorded,
 		)
 	}
 }
@@ -194,8 +210,8 @@ func stopRunsBeforeRebuild(ctx context.Context, runs []runstate.Manifest, out io
 // forgetLostRuns clears the records of runs whose files went with the instance.
 // Every one of them describes a workspace that no longer exists, and so does
 // the SSH key it names and the connection Zed saved for it.
-func forgetLostRuns(ctx context.Context, runs []runstate.Manifest, out io.Writer) error {
-	if len(runs) == 0 {
+func forgetLostRuns(ctx context.Context, runIDs []string, out io.Writer) error {
+	if len(runIDs) == 0 {
 		return nil
 	}
 	controller, err := prepareUnverified(ctx)
@@ -203,18 +219,18 @@ func forgetLostRuns(ctx context.Context, runs []runstate.Manifest, out io.Writer
 		return err
 	}
 	failures := []error{}
-	for _, run := range runs {
-		if err := controller.Discard(ctx, run.RunID); err != nil {
+	for _, runID := range runIDs {
+		if err := controller.Discard(ctx, runID); err != nil {
 			failures = append(failures, err)
 			continue
 		}
-		forgetZedConnection(run.RunID, out)
+		forgetZedConnection(runID, out)
 	}
 	fmt.Fprintf(
 		out,
 		"Forgot %d of %d run record(s), whose storage went with the instance.\n",
-		len(runs)-len(failures),
-		len(runs),
+		len(runIDs)-len(failures),
+		len(runIDs),
 	)
 	return errors.Join(failures...)
 }
