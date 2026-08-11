@@ -149,10 +149,14 @@ Usage:
                    destination is replaced only with --force. Copying a
                    credential-shaped name in needs --unsafe, because
                    everything in the run can then read and exfiltrate it.
-  pisafe apply [RUN] [--keep-baseline|--drop-baseline]
+  pisafe apply [RUN] [--keep-baseline|--drop-baseline] [--include-force]
                    Import a run's commits as the local branch pisafe/RUN.
                    The run is stopped first and cannot be resumed afterwards;
-                   your checkout, index, and current branch are not touched.
+                   your index and current branch are not touched, and neither
+                   is your checkout except under the paths you included, where
+                   the run's work is copied back. That copy only adds and
+                   updates, and stops if a path changed both in the run and
+                   here; --include-force then takes the run's version.
                    A run that started from an uncommitted working tree asks
                    whether to import that commit too or replay only the run's
                    own commits without it.
