@@ -15,10 +15,10 @@ import (
 )
 
 const (
-	inputsArchiveName = "inputs.tar"
-	maxInputFiles     = 2048
-	maxInputBytes     = 64 << 20
-	maxInputFileBytes = 16 << 20
+	inputsArchiveName   = "inputs.tar"
+	maxArchiveFiles     = 2048
+	maxArchiveBytes     = 64 << 20
+	maxArchiveFileBytes = 16 << 20
 )
 
 // InputSelection names the untracked or ignored paths the user chose to copy
@@ -102,7 +102,7 @@ func (excluded ExcludedInputs) Select(
 		}
 	}
 
-	files, err := describeInputs(excluded.Root, sortedKeys(into.chosen))
+	files, err := describeFiles(excluded.Root, sortedKeys(into.chosen))
 	if err != nil {
 		return InputPlan{}, ExcludedInputs{}, err
 	}
@@ -289,12 +289,12 @@ func repositoryRelative(root, request string) (string, error) {
 	return relative, nil
 }
 
-func describeInputs(root string, names []string) ([]SelectedInput, error) {
-	if len(names) > maxInputFiles {
+func describeFiles(root string, names []string) ([]SelectedInput, error) {
+	if len(names) > maxArchiveFiles {
 		return nil, fmt.Errorf(
 			"selected %d input files, more than the %d-file limit",
 			len(names),
-			maxInputFiles,
+			maxArchiveFiles,
 		)
 	}
 	entries := make([]SelectedInput, 0, len(names))
@@ -316,19 +316,19 @@ func describeInputs(root string, names []string) ([]SelectedInput, error) {
 			}
 			entries = append(entries, SelectedInput{Path: name, Link: link})
 		case info.Mode().IsRegular():
-			if info.Size() > maxInputFileBytes {
+			if info.Size() > maxArchiveFileBytes {
 				return nil, fmt.Errorf(
 					"input %q is %d bytes, over the %d-byte per-file limit",
 					name,
 					info.Size(),
-					maxInputFileBytes,
+					maxArchiveFileBytes,
 				)
 			}
 			total += info.Size()
-			if total > maxInputBytes {
+			if total > maxArchiveBytes {
 				return nil, fmt.Errorf(
 					"selected inputs exceed the %d-byte total limit",
-					maxInputBytes,
+					maxArchiveBytes,
 				)
 			}
 			hash, err := fileSHA256(absolute)
@@ -438,7 +438,7 @@ func extractFileArchive(archivePath, workspace string) ([]string, error) {
 	}
 	defer file.Close()
 
-	reader := tar.NewReader(io.LimitReader(file, maxInputBytes+maxInputFiles*1024))
+	reader := tar.NewReader(io.LimitReader(file, maxArchiveBytes+maxArchiveFiles*1024))
 	extracted := []string{}
 	for {
 		header, err := reader.Next()
@@ -448,8 +448,8 @@ func extractFileArchive(archivePath, workspace string) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read input archive: %w", err)
 		}
-		if len(extracted) == maxInputFiles {
-			return nil, fmt.Errorf("input archive holds more than %d files", maxInputFiles)
+		if len(extracted) == maxArchiveFiles {
+			return nil, fmt.Errorf("archive holds more than %d files", maxArchiveFiles)
 		}
 		name := header.Name
 		if err := safePath("input", name); err != nil {
@@ -468,7 +468,7 @@ func extractFileArchive(archivePath, workspace string) ([]string, error) {
 				return nil, fmt.Errorf("create input link %q: %w", name, err)
 			}
 		case tar.TypeReg:
-			if header.Size > maxInputFileBytes {
+			if header.Size > maxArchiveFileBytes {
 				return nil, fmt.Errorf("input %q exceeds the per-file limit", name)
 			}
 			if err := writeExtractedInput(target, reader, header); err != nil {

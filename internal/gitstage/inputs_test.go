@@ -355,7 +355,7 @@ func TestSelectRejectsUnusableSelections(t *testing.T) {
 func TestSelectEnforcesSizeLimits(t *testing.T) {
 	source := newInputRepository(t)
 	large := filepath.Join(source, "large.bin")
-	if err := os.WriteFile(large, make([]byte, maxInputFileBytes+1), 0o600); err != nil {
+	if err := os.WriteFile(large, make([]byte, maxArchiveFileBytes+1), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := selectInputs(t, source, InputSelection{

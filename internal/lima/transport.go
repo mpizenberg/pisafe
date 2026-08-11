@@ -448,7 +448,9 @@ const maxApplyArtifactBytes = int64(8 << 30)
 
 // applyArtifactPattern bounds the file names an apply package may hand back,
 // so the run cannot steer the fetch outside its own package directory.
-var applyArtifactPattern = regexp.MustCompile(`^apply(-submodule-[0-9]{1,4})?\.bundle$`)
+var applyArtifactPattern = regexp.MustCompile(
+	`^(apply(-submodule-[0-9]{1,4})?\.bundle|outputs\.tar)$`,
+)
 
 var sha256Pattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 

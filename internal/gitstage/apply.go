@@ -25,6 +25,10 @@ type PreparedApply struct {
 	Untracked    []string                 `json:"untracked,omitempty"`
 	BundleSHA256 string                   `json:"bundle_sha256,omitempty"`
 	Submodules   []PreparedApplySubmodule `json:"submodules,omitempty"`
+	// Outputs is the work the run leaves under the paths the user included,
+	// carried as files because that is how it arrived.
+	Outputs       []SelectedInput `json:"outputs,omitempty"`
+	OutputsSHA256 string          `json:"outputs_sha256,omitempty"`
 	// ReplayConflicts names the paths that stopped a requested replay. It is
 	// the whole answer when it is set: the run was left as the agent left it
 	// and there is nothing to import.
@@ -66,6 +70,14 @@ func (prepared PreparedApply) Artifacts() []ApplyArtifact {
 		artifacts = append(artifacts, ApplyArtifact{
 			Name:   applyBundleName,
 			SHA256: prepared.BundleSHA256,
+		})
+	}
+	// The included work is written after the refs it accompanies, so it is
+	// fetched last.
+	if prepared.OutputsSHA256 != "" {
+		artifacts = append(artifacts, ApplyArtifact{
+			Name:   applyOutputsName,
+			SHA256: prepared.OutputsSHA256,
 		})
 	}
 	return artifacts
@@ -152,6 +164,12 @@ func PrepareApply(
 	}
 	untracked = append(untracked, superUntracked...)
 
+	outputs, outputsHash, err := captureIncludedOutputs(ctx, snapshot, workspace, packageDir)
+	if err != nil {
+		return PreparedApply{}, err
+	}
+	untracked = withoutReturned(untracked, outputs)
+
 	tip, err := gitOutput(ctx, workspace, "rev-parse", "--verify", snapshot.WorkRef+"^{commit}")
 	if err != nil {
 		return PreparedApply{}, fmt.Errorf("resolve run tip: %w", err)
@@ -182,11 +200,13 @@ func PrepareApply(
 	}
 
 	prepared := PreparedApply{
-		RunID:       snapshot.RunID,
-		Tip:         tip,
-		FinalCommit: finalCommit,
-		Untracked:   untracked,
-		Submodules:  submodules,
+		RunID:         snapshot.RunID,
+		Tip:           tip,
+		FinalCommit:   finalCommit,
+		Untracked:     untracked,
+		Submodules:    submodules,
+		Outputs:       outputs,
+		OutputsSHA256: outputsHash,
 	}
 	hash, err := captureIncremental(
 		ctx,
@@ -317,6 +337,12 @@ func ImportApply(
 			)
 		}
 		return PlannedApply{}, &BaselineReplayConflict{Paths: prepared.ReplayConflicts}
+	}
+	if (len(prepared.Outputs) == 0) != (prepared.OutputsSHA256 == "") {
+		return PlannedApply{}, errors.New("apply package describes its outputs inconsistently")
+	}
+	if err := requireOutputsUnderRoots(snapshot.IncludeRoots, prepared.Outputs); err != nil {
+		return PlannedApply{}, err
 	}
 	sourceRoot, err := filepath.EvalSymlinks(snapshot.SourceRoot)
 	if err != nil {
