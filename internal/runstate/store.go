@@ -325,14 +325,11 @@ func (store Store) Resume(runID string, capability string, startedAt time.Time) 
 // Forget removes a run's record once everything it owned has been reclaimed.
 // An active run is refused: its record is the only route back to a container
 // that is still running.
+// Forget removes a run's record and everything filed beside it. Nothing is
+// decoded on the way: what a record says is not what makes it removable, and a
+// record this version cannot read is exactly the one that most needs removing.
+// Whether the run was finished with is settled before this is reached.
 func (store Store) Forget(runID string) error {
-	manifest, err := store.Get(runID)
-	if err != nil {
-		return err
-	}
-	if manifest.State == StateActive {
-		return fmt.Errorf("run %q is active and must be stopped first", runID)
-	}
 	archive, err := store.ReturnedArchivePath(runID)
 	if err != nil {
 		return err
@@ -345,6 +342,9 @@ func (store Store) Forget(runID string) error {
 		return err
 	}
 	if err := os.Remove(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("run %q does not exist", runID)
+		}
 		return fmt.Errorf("remove run manifest: %w", err)
 	}
 	return safefile.SyncDirectory(store.root)

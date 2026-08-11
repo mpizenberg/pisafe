@@ -835,7 +835,49 @@ func TestDiscardCleansActiveAndFailedCreatingRuns(t *testing.T) {
 					t.Errorf("cleanup lacks %q:\n%s", expected, joined)
 				}
 			}
+			// A run still running is the one case where the container must be
+			// asked to stop rather than taken: its elapsed time is only
+			// accounted for while the record it is charged against still exists.
+			if initial == runstate.StateActive && !strings.Contains(joined, "stop --time") {
+				t.Errorf("an active run was discarded without being stopped:\n%s", joined)
+			}
 		})
+	}
+}
+
+// A run staged by a superseded version owns exactly what any other run owns,
+// and its record is the only thing naming it. Discarding it may not depend on
+// reading it, or a version bump would strand storage nothing could ever reach.
+func TestDiscardReclaimsARunItCannotDecode(t *testing.T) {
+	root := t.TempDir()
+	store := runstate.NewStore(root)
+	manifest := activeManifest(t, store)
+	record := filepath.Join(root, manifest.RunID+".json")
+	if err := os.WriteFile(
+		record,
+		fmt.Appendf(nil, `{"version":1,"run_id":%q}`, manifest.RunID),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	backend := &fakeBackend{}
+	ssh := &fakeSSHStore{}
+	controller := New(backend, store, ssh, testInference{})
+	if err := controller.Discard(context.Background(), manifest.RunID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(record); !os.IsNotExist(err) {
+		t.Fatalf("undecodable record survived discard: %v", err)
+	}
+	if !ssh.removed {
+		t.Fatal("discard left the SSH key behind")
+	}
+	joined := callsString(backend.calls)
+	for _, expected := range []string{"remove-storage", "remove-stage", "rm --force --ignore"} {
+		if !strings.Contains(joined, expected) {
+			t.Errorf("cleanup lacks %q:\n%s", expected, joined)
+		}
 	}
 }
 

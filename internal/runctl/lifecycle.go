@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mpizenberg/pisafe/internal/runcontainer"
+	"github.com/mpizenberg/pisafe/internal/runid"
 	"github.com/mpizenberg/pisafe/internal/runstate"
 )
 
@@ -220,19 +221,18 @@ func (controller Controller) endWhatIsNoLongerRunning(
 }
 
 // Discard reclaims a run at the user's request. An active run is stopped first
-// so its elapsed time is accounted before the container goes.
+// so its elapsed time is accounted before the container goes. The record is
+// read only to ask that one question: everything a run owns is keyed by its ID,
+// so a record this version cannot decode is still discarded rather than
+// stranding what it holds.
 func (controller Controller) Discard(ctx context.Context, runID string) error {
 	manifest, err := controller.store.Get(runID)
-	if err != nil {
-		return err
-	}
-	if manifest.State == runstate.StateActive {
-		manifest, err = controller.Stop(ctx, runID)
-		if err != nil {
+	if err == nil && manifest.State == runstate.StateActive {
+		if _, err := controller.Stop(ctx, runID); err != nil {
 			return err
 		}
 	}
-	return controller.release(ctx, manifest, "discard")
+	return controller.release(ctx, runID, "discard")
 }
 
 // release reclaims what a run owns and then removes its record. The record
@@ -240,35 +240,42 @@ func (controller Controller) Discard(ctx context.Context, runID string) error {
 // always leaves something to retry against.
 func (controller Controller) release(
 	ctx context.Context,
-	manifest runstate.Manifest,
+	runID string,
 	operation string,
 ) error {
-	if err := controller.reclaim(ctx, manifest); err != nil {
-		return controller.recordLifecycleError(manifest.RunID, operation, err)
+	if err := controller.reclaim(ctx, runID); err != nil {
+		return controller.recordLifecycleError(runID, operation, err)
 	}
-	if err := controller.store.Forget(manifest.RunID); err != nil {
-		return controller.recordLifecycleError(manifest.RunID, "record "+operation, err)
+	if err := controller.store.Forget(runID); err != nil {
+		return controller.recordLifecycleError(runID, "record "+operation, err)
 	}
 	return nil
 }
 
 // reclaim removes everything a run still owns, in the VM and on the Mac. Every
-// step is idempotent, so a partially reclaimed run can always be finished.
-func (controller Controller) reclaim(
-	ctx context.Context,
-	manifest runstate.Manifest,
-) error {
-	if _, err := controller.stopAndRemoveContainer(ctx, specForManifest(manifest, manifest.Image)); err != nil {
+// step is idempotent, so a partially reclaimed run can always be finished, and
+// every one is named by the run ID alone. The container is taken by force
+// because nothing here waits on it: a run still active was stopped gracefully
+// before this ran, so what is left is a leftover to sweep.
+func (controller Controller) reclaim(ctx context.Context, runID string) error {
+	if err := runid.Validate(runID); err != nil {
 		return err
 	}
+	if _, err := controller.podman(
+		ctx,
+		nil,
+		"rm", "--force", "--ignore", runcontainer.ContainerName(runID),
+	); err != nil {
+		return fmt.Errorf("remove run container: %w", err)
+	}
 	var failures []error
-	if err := controller.backend.RemoveRunStorage(ctx, manifest.RunID); err != nil {
+	if err := controller.backend.RemoveRunStorage(ctx, runID); err != nil {
 		failures = append(failures, err)
 	}
-	if err := controller.backend.RemoveRun(ctx, manifest.RunID); err != nil {
+	if err := controller.backend.RemoveRun(ctx, runID); err != nil {
 		failures = append(failures, err)
 	}
-	if err := controller.ssh.Remove(manifest.RunID); err != nil {
+	if err := controller.ssh.Remove(runID); err != nil {
 		failures = append(failures, err)
 	}
 	return errors.Join(failures...)

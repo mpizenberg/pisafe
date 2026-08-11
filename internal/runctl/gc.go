@@ -130,12 +130,7 @@ func (controller Controller) Collect(
 	done := GCPlan{Kept: plan.Kept, KeepImages: plan.KeepImages}
 	var failures []error
 	for _, runID := range plan.Reclaimed {
-		manifest, err := controller.store.Get(runID)
-		if err != nil {
-			failures = append(failures, err)
-			continue
-		}
-		if err := controller.release(ctx, manifest, "collect"); err != nil {
+		if err := controller.release(ctx, runID, "collect"); err != nil {
 			failures = append(failures, err)
 			continue
 		}

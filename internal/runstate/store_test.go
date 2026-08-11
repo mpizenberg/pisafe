@@ -453,20 +453,11 @@ func TestStoreRejectsApplyPlansItCannotReplaySafely(t *testing.T) {
 	}
 }
 
-func TestStoreForgetsAReclaimedRunButNeverALiveOne(t *testing.T) {
+func TestStoreForgetsARunWhateverItsRecordSays(t *testing.T) {
 	root := t.TempDir()
 	store := NewStore(root)
-	stoppedTestRun(t, store, root, "run-live")
 	stoppedTestRun(t, store, root, "run-gone")
-
-	if _, err := store.Resume("run-live", testCapability(), time.Now()); err != nil {
-		t.Fatal(err)
-	}
-	// The record is the only route back to a container that is still running.
-	if err := store.Forget("run-live"); err == nil ||
-		!strings.Contains(err.Error(), "must be stopped first") {
-		t.Fatalf("forgetting an active run = %v", err)
-	}
+	stoppedTestRun(t, store, root, "run-stale")
 
 	if _, err := store.BeginApply("run-gone", testApplyPlan("run-gone", root), nil); err != nil {
 		t.Fatal(err)
@@ -480,15 +471,25 @@ func TestStoreForgetsAReclaimedRunButNeverALiveOne(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "run-gone.json")); !os.IsNotExist(err) {
 		t.Fatalf("forgotten manifest survived: %v", err)
 	}
-	if err := store.Forget("run-gone"); err == nil {
-		t.Fatal("a run with no record was forgotten again")
+	if err := store.Forget("run-gone"); err == nil ||
+		!strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("forgetting a run with no record = %v", err)
 	}
-	runs, err := store.List()
-	if err != nil {
+
+	// A record written by a version that is gone is the one most worth
+	// removing, so removing it may not depend on understanding it.
+	stale := filepath.Join(root, "run-stale.json")
+	if err := os.WriteFile(stale, []byte(`{"version":1,"run_id":"run-stale"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if len(runs) != 1 || runs[0].RunID != "run-live" {
-		t.Fatalf("runs = %#v", runs)
+	if _, err := store.Get("run-stale"); err == nil {
+		t.Fatal("a superseded record decoded")
+	}
+	if err := store.Forget("run-stale"); err != nil {
+		t.Fatalf("forgetting a superseded record = %v", err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("superseded record survived: %v", err)
 	}
 }
 
