@@ -42,7 +42,9 @@ disproportionate to the mostly public, non-secret projects this tool targets.
   available reopens the credential-broker question and is out of scope.
 - Untracked and ignored files are excluded unless explicitly selected, and
   secret-bearing files only as an unsafe override. There is no separate
-  secret-injection mechanism.
+  secret-injection mechanism. An explicitly selected path crosses as files in
+  both directions and never as Git history; the copy back is additive and never
+  leaves the paths the user named.
 - Submodules must stage and apply. Git LFS is out of scope and must fail closed.
 - Provider login persists on the Mac across runs; Pi extensions, settings,
   tools, and sessions persist inside the sandbox.
@@ -223,7 +225,15 @@ types, and sizes, rejects special files and escaping symlinks, and warns about
 likely secrets. A file that looks like a secret may still be included, but the
 prompt must present it as an unsafe override: under open egress, everything in
 the run can read and exfiltrate it, so including one voids the run's credential
-isolation. Explicitly included inputs become part of the baseline commit.
+isolation.
+
+An included path crosses as files in both directions and never enters Git. It
+arrives in the run untracked, exactly as it sits on the Mac, so the agent cannot
+commit it by accident and the run's own history stays independent of it. What
+`--include` records is the **path the user named**, not the files under it at
+that moment: a directory that is empty at run start is still a root, and is how a
+run collects work the user wants back without committing it. Naming a path that
+no listing covers and naming one that is simply absent are different refusals.
 
 ### Submodules
 
@@ -240,14 +250,33 @@ than staged incompletely.
 
 ### `pisafe apply`
 
-Despite its name, `apply` does not check out files or merge into the current
-branch. It imports the completed history as `refs/heads/pisafe/<run>`,
-preserving the agent's commits individually. Before import it shows uncommitted
-tracked changes, new non-ignored files, and ignored outputs separately; tracked
-changes are captured as a final clearly labelled commit, and neither new files
-nor ignored build outputs are imported. Untracked files are reported and stay in
-the run, on the same terms that kept them out of it: what crosses either
+`apply` does not merge into the current branch or check out history. It imports
+the completed history as `refs/heads/pisafe/<run>`, preserving the agent's
+commits individually. Tracked changes the agent left uncommitted are captured as
+a final clearly labelled commit. New files the run created are reported and stay
+in the run, on the same terms that kept them out of it: what crosses either
 boundary is what Git tracks, plus what the user named.
+
+The one exception is what the user named. Work left under an included path is
+copied into the working tree, because that is how it arrived and committing it is
+exactly what the user chose not to do. This is the only part of an apply that
+writes files, so it is bounded deliberately:
+
+- Only paths under a recorded include root, proved on arrival rather than
+  trusted: the list is written inside the run.
+- Only what the run does not track. A path the agent committed travels as
+  history instead, never twice.
+- **Additive only.** A path the run deleted stays on the Mac and is reported as
+  kept. A run cannot delete the user's files through this channel.
+- A path that changed both in the run and on the Mac is a conflict, and one
+  conflict holds back the whole copy rather than leaving the working tree in a
+  state neither side described. A path only the Mac changed keeps the Mac's
+  version. `--include-force` overrides a conflict by taking the run's version.
+
+The refs and the files are separate steps, so a refused copy leaves the branch
+imported and the work recoverable: the run's returned files are kept beside the
+run's manifest, and `pisafe apply` on an already-imported run finishes the copy
+and nothing else, with no VM involved.
 
 The branch travels as an incremental bundle containing only commits new since
 the captured HEAD, fetched into a temporary ref and moved into place only after
@@ -565,8 +594,10 @@ creating → active → stopped → imported → reclaimed
 
 While a run exists, its record holds the run ID, project identity, captured
 source HEAD, timestamps, exact image and tool versions, baseline and final
-commit IDs, explicitly included input files by name, and the imported branch
-name. Nothing is retained once the run is reclaimed: what it
+commit IDs, the paths the user included together with the content each carried
+in, and the imported branch name. It also holds a run's returned work until that
+work reaches the working tree, so a refused copy survives. Nothing is retained
+once the run is reclaimed: what it
 produced is already in the user's repository, on a branch named `pisafe/<run>`
 after the run itself, with the base commit as its parent and the author it
 committed as — so a surviving record would only restate what git holds.

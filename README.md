@@ -117,7 +117,7 @@ pisafe resume [RUN]
 pisafe diff [RUN]
 pisafe cp [RUN]:PATH [DEST] [--force]
 pisafe cp PATH [RUN]: [--force] [--unsafe]
-pisafe apply [RUN] [--keep-baseline|--drop-baseline]
+pisafe apply [RUN] [--keep-baseline|--drop-baseline] [--include-force]
 pisafe discard RUN --confirm RUN
 pisafe gc [--dry-run]
 pisafe doctor
@@ -133,6 +133,15 @@ changes, as a baseline commit. Untracked and ignored files stay behind unless
 `--include` names them; a credential-shaped path additionally needs
 `--include-unsafe`, because everything in the run can read and exfiltrate it.
 The command prints an `ssh -F` line that reaches the run from any SSH client.
+
+An included path crosses as files rather than as history, so it arrives in the
+run untracked just as it sits here, and `apply` copies the work left under it
+back into your working tree. What `--include` records is the path you named, not
+the files in it at the time: `--include plans/` on a directory that is empty, or
+ignored, or both is how a run hands back work you never wanted committed. The
+copy only ever adds and updates — a file the run deleted stays here — and a path
+that changed both in the run and here holds the whole copy back until you
+resolve it or pass `--include-force`.
 
 `zed` opens a run's workspace in Zed. A run's alias is defined only in pisafe's
 own per-run SSH config, and Zed hands `ssh` nothing but what a saved connection

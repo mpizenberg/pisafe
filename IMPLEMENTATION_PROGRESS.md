@@ -50,8 +50,16 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   refuses tracked files, paths outside the repository, escaping symlinks,
   special files, nested repositories, and over-limit selections;
   credential-shaped names need `--include-unsafe`. They travel as a tar beside
-  the bundle, are re-validated on extraction against the names in the staged
-  snapshot, and join the baseline commit.
+  the bundle and are re-validated on extraction against the records in the
+  staged snapshot. They are extracted *after* the baseline commit and left
+  untracked, so an included path never enters the run's history and `--include`
+  composes with `--drop-baseline`.
+- What `--include` records is the path named, not only the files under it:
+  `Select` returns the resolved files and the roots together. A directory Git
+  reports as excluded but that holds no files is a legitimate root, which is what
+  makes `--include plans/` work on an empty directory. A path no listing covers
+  and a path that is merely absent give different refusals. Each carried-in file
+  records a SHA-256, which is what the copy back compares against.
 - What a run leaves behind is listed once per run, with a directory nobody
   tracks standing for what is under it, and a request naming such a directory is
   expanded from the filesystem so the credential check and the per-file limits
@@ -90,10 +98,10 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   than one lists them with their states and stops. `discard` is deliberately
   outside this: its confirmation argument is the command. Nothing inside a run
   takes part in the choice.
-- `pisafe apply [RUN] [--keep-baseline|--drop-baseline]` stops an active run,
-  captures it with `pisafe-guest prepare-apply` in a throwaway `--network=none`
-  container mounted only on the workspace, streams each bundle back bounded and
-  SHA-256 verified,
+- `pisafe apply [RUN] [--keep-baseline|--drop-baseline] [--include-force]` stops
+  an active run, captures it with `pisafe-guest prepare-apply` in a throwaway
+  `--network=none` container mounted only on the workspace, streams each bundle
+  back bounded and SHA-256 verified,
   imports into temporary refs, records the plan in the manifest, and only then
   moves refs. A recorded plan is replayed rather than redone, so apply on a run
   that already has one never touches the run. The run becomes `imported` only
@@ -101,6 +109,22 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   applied again. Apply runs the controller's *current* image, and verifies the
   run's storage first (a fixed-capacity filesystem is mounted per VM boot, not
   per run).
+- Work a run leaves under an included path comes back as files. `prepare-apply`
+  expands the recorded roots against the workspace, subtracts what the run
+  tracks — a path the agent committed travels as history, never twice — and
+  ships `outputs.tar` through the same verified transport as the bundles;
+  `ImportApply` proves every returned path is safe and under a recorded root
+  before planning anything. The archive is kept beside the manifest before the
+  run's package is removed, so a copy that is refused can be finished with the VM
+  gone.
+- The copy into the working tree is the only part of an apply that writes files.
+  It only adds and updates: a path the run deleted stays and is reported as kept.
+  A path that changed both in the run and on the Mac is a conflict, and one
+  conflict holds back the whole copy; a path only the Mac changed keeps the Mac's
+  version. `--include-force` takes the run's version instead. It runs after the
+  refs move, so a refusal leaves the branch imported and the work pending in the
+  manifest; `pisafe apply` on an imported run with pending work finishes only the
+  copy.
 - A run whose history starts with a baseline commit is asked about once, before
   anything is captured: import it with everything after it, or replay only the
   run's own commits onto the captured HEAD. The replay is a `git rebase --onto`
@@ -1248,6 +1272,11 @@ These explain why parts of the code look the way they do:
 
 ## Known gaps
 
+- `pisafe diff` lists untracked paths with `--exclude-standard`, so work under an
+  included root that the repository ignores is invisible while the run is going.
+  It arrives at apply, but a user watching a run cannot see the plan documents
+  accumulate. The roots are recorded in the snapshot, so `diff` has what it needs
+  to report them separately.
 - `pisafe connect` hands over the terminal and reports nothing afterwards, so a
   session that ends because the run hit its wall-clock limit looks the same as
   one the user quit.
@@ -1279,7 +1308,10 @@ These explain why parts of the code look the way they do:
 - Apply uses the controller's current run image, which must still exist in the
   VM; a pruned image fails apply as it fails resume.
 - A run's apply response is bounded at 1 MiB, so a run leaving roughly twenty
-  thousand untracked files fails apply instead of reporting them.
+  thousand untracked files fails apply instead of reporting them. Returned
+  included work shares that budget: each file costs its path plus a hash, and the
+  2048-file archive limit caps it, so a selection near that limit with long paths
+  narrows the room left for the untracked list.
 - Broker-side token refresh has only ever run against a stub: the live session
   never crossed an access-token expiry. The first long-lived broker exercises it.
 - The OAuth flow and embedded catalog mirror the pinned Pi AI 0.82.0 client;

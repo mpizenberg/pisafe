@@ -992,6 +992,43 @@ history holds them. New entries are appended in full.
   these files are by definition outside Git, tar carries the executable bit and
   symlinks, and it reuses the existing size- and SHA-256-verified upload path.
   The staged snapshot, not the archive, decides which names are legitimate.
+- An included path crosses as files in both directions and never enters Git.
+  Committing it into the baseline was simpler on the way in and is what the code
+  did, but it made the run's history depend on content the user had deliberately
+  not committed: the agent could commit an ignored file back as history, and
+  `--include` could not be combined with `--drop-baseline` at all, because
+  replaying without the baseline conflicted on paths the run never touched as
+  history. Carrying them as files removed the second problem outright rather
+  than special-casing it.
+- What `--include` records is the path the user named, not the file list it
+  resolved to. Re-resolving from the original command-line arguments at apply
+  time was rejected: they are host paths that may be gone or relative to another
+  working directory, while the snapshot is the record both sides already trust.
+  This is what makes `--include DIR` meaningful for a directory that is empty at
+  run start — previously refused as "not an untracked or ignored file", which
+  named the wrong cause — and it is what apply re-expands to find work the run
+  created. The roots are a persisted snapshot field, so revisiting the shape
+  costs a manifest version.
+- Apply writes files into the working tree, but only under the paths the user
+  included. This is a deliberate exception to apply otherwise never touching the
+  working tree: the alternative is that work created under an included path is
+  silently lost, which is what the old behaviour did. The channel is bounded by
+  proving each returned path is safe and under a recorded root — the list is
+  written inside the run — and by never deleting.
+- Copy-back is additive and refuses as a whole. Mirroring deletions would give a
+  sandboxed run the ability to delete the user's files, which is not a capability
+  an isolation tool should hand out for a convenience feature. Skipping only the
+  conflicting files was rejected because a partial copy leaves the working tree
+  in a state neither side described; refusing everything matches how
+  `ImportApply` already verifies each object set before anything user-visible
+  changes. A conflict is decided against the SHA-256 recorded when the run was
+  staged, which is why a carried-in file records one.
+- The copy runs after the refs are committed, not as a precondition for them. As
+  a precondition it would be atomic with the import, but a conflict over a
+  scratch file would then block importing real code work. The returned archive is
+  moved to the Mac before the run's package is deleted, so finishing a refused
+  copy never needs the VM — at the cost of one file per pending run in the state
+  directory.
 - A submodule is staged from its checked-out HEAD, not from the gitlink the
   superproject index records, and the superproject baseline then records where
   it actually ended up. Reconstructing the recorded gitlink would need a commit

@@ -112,7 +112,10 @@ Usage:
                    Create an isolated run from the current Git repository.
                    Untracked and ignored files stay out unless --include names
                    them; a credential-shaped path needs --include-unsafe,
-                   which voids the run's credential isolation.
+                   which voids the run's credential isolation. An included path
+                   travels as files, never as commits, and apply copies the work
+                   left under it back here. Naming a directory that is empty for
+                   now is how a run hands back work you do not want committed.
   pisafe connect [RUN] [-- COMMAND...]
                    Open a shell in a run's workspace, where pi starts the
                    agent. With -- COMMAND, run that instead and exit with
