@@ -60,7 +60,7 @@ func runExtension(ctx context.Context, args []string, out io.Writer) error {
 }
 
 func listExtensions(ctx context.Context, vm lima.VM, out io.Writer) error {
-	if err := vm.EnsureGlobalStorage(ctx); err != nil {
+	if err := ensureProfileStorage(ctx, vm); err != nil {
 		return err
 	}
 	record, err := vm.ReadProfileRecord(ctx)
@@ -319,7 +319,7 @@ func removeExtension(
 	if err := profile.ValidatePackageName(name); err != nil {
 		return err
 	}
-	if err := vm.EnsureGlobalStorage(ctx); err != nil {
+	if err := ensureProfileStorage(ctx, vm); err != nil {
 		return err
 	}
 	record, err := vm.ReadProfileRecord(ctx)
@@ -353,6 +353,20 @@ func validatePackageSpec(packageSpec string) error {
 		}
 	}
 	return profile.ValidatePackageName(name)
+}
+
+// ensureProfileStorage brings up the VM a profile command reaches and lays out
+// the filesystem the profile lives on. The boundary records go unchecked
+// because nothing reaching the profile this way fetches: reading it or emptying
+// it admits nothing the deny set governs, while the cure for a record that no
+// longer holds is a rebuild that ends every run that is working. Taking an
+// extension back out is also the thing most worth still being able to do on a
+// VM whose boundary is in doubt.
+func ensureProfileStorage(ctx context.Context, vm lima.VM) error {
+	if err := vm.StartUnverified(ctx); err != nil {
+		return err
+	}
+	return vm.EnsureGlobalStorage(ctx)
 }
 
 // ensureRunImage gives the extension commands the same image a run gets. The

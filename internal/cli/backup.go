@@ -22,14 +22,7 @@ func runBackup(ctx context.Context, args []string, out io.Writer) error {
 	if len(args) != 1 {
 		return errBackupUsage
 	}
-	// Backing up reads the VM and writes only here. A VM whose boundary records
-	// no longer hold still holds transcripts nothing can refetch, and refusing
-	// to copy them to the Mac protects nothing either record describes.
-	vm := lima.New()
-	if err := vm.StartUnverified(ctx); err != nil {
-		return err
-	}
-	return writeBackup(ctx, vm, args[0], out)
+	return writeBackup(ctx, lima.New(), args[0], out)
 }
 
 func runRestore(ctx context.Context, args []string, out io.Writer) error {
@@ -70,7 +63,7 @@ func writeBackup(
 	if err != nil {
 		return err
 	}
-	if err := vm.EnsureGlobalStorage(ctx); err != nil {
+	if err := ensureProfileStorage(ctx, vm); err != nil {
 		return err
 	}
 	extensions, err := vm.ReadProfileRecord(ctx)

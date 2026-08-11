@@ -195,24 +195,36 @@ history holds them. New entries are appended in full.
   stand-in listener inside the one test was not taken, because it would race a
   real broker for the port and fail for a reason unrelated to the boundary.
 - The security-profile and firewall records are verified before a command that
-  may start a run, and not before one that reaches a run already there. `diff`,
-  `cp`, and `apply` read or write a run's workspace through a container with no
-  network, no home, and none of the shared profile; `stop` and `discard` take a
-  run's claim on the VM away. Neither record bears on any of them, while a VM
-  that fails either check has one cure — recreating it — that deletes every
-  run's storage. Verifying everywhere was the safer-looking option and is the
-  one rejected: it destroyed exactly the work it was asked to protect, since a
-  stale VM could not hand a run's commits back and the instruction it printed
+  may start a run or fetch over the network, and not before one that only
+  reaches what is already there. `diff`, `cp`, and `apply` read or write a run's
+  workspace through a container with no network, no home, and none of the shared
+  profile; `stop` and `discard` take a run's claim on the VM away; `extension
+  list`, `extension remove`, `tool list`, `tool remove`, `profile reset`, and
+  `backup` read the profile or empty it. Neither record bears on any of them,
+  while a VM that fails either check has one cure — recreating it — that deletes
+  every run's storage. Verifying everywhere was the safer-looking option and is
+  the one rejected: it destroyed exactly the work it was asked to protect, since
+  a stale VM could not hand a run's commits back and the instruction it printed
   was the one that would lose them, and it refused to stop a run left alive
   under the very boundary the failed check called untrustworthy.
+- Writing to the profile does not by itself require a verified boundary; only
+  fetching does. `extension remove`, `tool remove`, and `profile reset` rewrite
+  what every later run mounts, exactly as `restore` does, and they are exempt
+  where `restore` is not: what separates them is that restore is the one command
+  that installs packages over the network, in a `--network=pasta` container the
+  deny set governs. Holding removal to the records was rejected because it made
+  a VM under suspicion the one VM whose extensions could not be taken back out.
 - `backup` is exempt and `restore` is not, although they are one pair. Backup is
   the only half that ever runs against a stale VM: restore's target is the VM
-  that has just replaced it, so the exemption would buy it nothing. What restore
-  would give up is real — it is the one command that installs packages over the
-  network, in a `--network=pasta` container the deny set governs, and the one
-  that rewrites the profile every later run mounts. Exempting both was rejected
-  for that; exempting neither was rejected because it left recreation, the only
-  cure a stale VM has, with no way to save the transcripts nothing can refetch.
+  that has just replaced it, so the exemption would buy it nothing. Exempting
+  neither was rejected because it left recreation, the only cure a stale VM has,
+  with no way to save the transcripts nothing can refetch.
+- Every command that reaches the profile without fetching starts the VM it needs
+  rather than failing on a stopped one. Reporting "start the VM first" was
+  rejected: each of these commands is a single VM contact whose whole purpose is
+  the profile, so the instruction would only ever be the step the user then
+  performs. The four that install go on reaching the VM through the image path,
+  which has already brought it up verified.
 - The run's sshd renders its `SetEnv` from the same list the container is given
   rather than from a second one kept by hand. The hand-kept copy carried three
   of the eight declared variables, and the one it dropped was

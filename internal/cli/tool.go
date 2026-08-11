@@ -42,7 +42,7 @@ func runTool(ctx context.Context, args []string, out io.Writer) error {
 }
 
 func listTools(ctx context.Context, vm lima.VM, out io.Writer) error {
-	if err := vm.EnsureGlobalStorage(ctx); err != nil {
+	if err := ensureProfileStorage(ctx, vm); err != nil {
 		return err
 	}
 	tools, err := vm.ReadProfileTools(ctx)
@@ -187,7 +187,7 @@ func removeTool(
 	if err := profile.ValidatePackageName(name); err != nil {
 		return err
 	}
-	if err := vm.EnsureGlobalStorage(ctx); err != nil {
+	if err := ensureProfileStorage(ctx, vm); err != nil {
 		return err
 	}
 	installed, err := vm.ReadProfileTools(ctx)

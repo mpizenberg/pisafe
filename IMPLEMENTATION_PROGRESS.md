@@ -237,6 +237,14 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   clock or firewall verification, so an older or locally modified security
   definition fails closed. Both it and the firewall check name `pisafe vm
   rebuild`, which is the cure they prescribe.
+- `VM.StartUnverified` starts the VM without holding it to either record, for
+  the commands that reach a run already there or reach the profile without
+  fetching. `extension list`, `extension remove`, `tool list`, `tool remove`,
+  `profile reset`, and `backup` go through one `ensureProfileStorage` helper
+  that starts the VM this way and then lays out the profile filesystem, so a
+  stopped VM is started rather than reported. The four commands that install
+  reach the VM through `ensureRunImage` instead, which brings it up verified,
+  installs the run image, and lays out the same filesystem.
 - `pisafe vm rebuild` reports what a rebuild costs and changes nothing until
   `--confirm`. Confirmed, it stops every active run — charging each from its own
   container's account and publishing what it produced — then deletes the
@@ -1108,6 +1116,11 @@ Verified against a real ARM64 VM:
   with the transcript in `/sessions`, ran the restored tool, and loaded the
   restored extension. A second backup into the same directory added the new
   transcript and kept its own copy of one the store had rewritten in place.
+- **A stopped VM is started by the commands that need it**, checked live
+  against a stopped instance: `pisafe extension list` brought the VM up and
+  answered, where the same command built before the change failed with limactl's
+  "instance is stopped" instead. `pisafe tool list` and `pisafe backup` then
+  answered against the instance it left running.
 - **`pisafe profile reset` has no live test**, deliberately: there is one
   profile and nothing scopes a test to a profile of its own, so a live test
   would empty whatever the user has installed. It is covered by the transport's

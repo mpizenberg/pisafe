@@ -25,7 +25,7 @@ func runProfile(ctx context.Context, args []string, out io.Writer) error {
 // is rebuilt last so a run's PATH ends up pointing at an empty directory rather
 // than a missing one.
 func resetProfile(ctx context.Context, vm lima.VM, out io.Writer) error {
-	if err := vm.EnsureGlobalStorage(ctx); err != nil {
+	if err := ensureProfileStorage(ctx, vm); err != nil {
 		return err
 	}
 	if err := vm.WriteProfileRecord(ctx, profile.Record{}); err != nil {

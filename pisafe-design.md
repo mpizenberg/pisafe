@@ -588,15 +588,20 @@ creating → active → stopped → imported → reclaimed
   generation, anything concluding that nothing refers to a shared thing treats
   it as a reference it cannot resolve and waits.
 - A VM that fails its boundary checks still hands work back, still lets go of
-  it, and still exports what nothing can refetch. `diff`, `cp`, and `apply`
-  reach a run's workspace through a container with no network, no home, and
-  none of the shared profile; `stop` and `discard` only end what a run holds;
-  `backup` reads the VM and writes to the Mac. Neither the host-network deny set
-  nor the security profile bears on those, and neither is verified before them.
-  Only a command that may start a run is held to the records. `restore` stays
-  verified: it installs over the network and rewrites the profile every run
-  mounts, and the VM it puts a backup into is the new one, never the VM that
+  it, still exports what nothing can refetch, and still lets the profile be
+  emptied. `diff`, `cp`, and `apply` reach a run's workspace through a container
+  with no network, no home, and none of the shared profile; `stop` and `discard`
+  only end what a run holds; `backup` reads the VM and writes to the Mac;
+  `extension list`, `extension remove`, `tool list`, `tool remove`, and `profile
+  reset` read the profile or take things out of it. Neither the host-network
+  deny set nor the security profile bears on those, and neither is verified
+  before them. Only a command that may start a run or fetch over the network is
+  held to the records. `restore` stays verified because it installs over the
+  network, and the VM it puts a backup into is the new one, never the VM that
   failed.
+- A command that reaches the profile without fetching starts the VM it needs.
+  None of them is a step in a longer session, so a stopped VM is a thing to
+  start rather than a thing to report.
 - `pisafe vm rebuild` is what a failed boundary check names, so the cure is a
   command rather than a sequence the user assembles. Nothing an unreachable VM
   does can refuse it: a run it cannot stop is settled by the next command that
