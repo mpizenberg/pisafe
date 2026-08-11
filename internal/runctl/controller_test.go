@@ -548,7 +548,10 @@ func TestStartPreparedActivatesOnlyAfterMaterialization(t *testing.T) {
 	}
 }
 
-func TestStartPreparedRollsBackAndRecordsFailure(t *testing.T) {
+// A creation that failed keeps its record, saying what went wrong. Reclaiming
+// what it held is the other test's promise; this one is that the run is still
+// there to be asked about afterwards.
+func TestStartPreparedRecordsWhatFailedTheCreation(t *testing.T) {
 	backend := &fakeBackend{failAt: "pisafe-guest materialize"}
 	store := runstate.NewStore(t.TempDir())
 	ssh := &fakeSSHStore{}
@@ -573,39 +576,44 @@ func TestStartPreparedRollsBackAndRecordsFailure(t *testing.T) {
 		!strings.Contains(manifest.LastError, "materialize staged repository") {
 		t.Fatalf("manifest = %#v", manifest)
 	}
-	joined := callsString(backend.calls)
-	for _, expected := range []string{
-		"podman rm --force --ignore pisafe-run-run-123",
-		"remove-storage",
-		"remove-stage",
-	} {
-		if !strings.Contains(joined, expected) {
-			t.Errorf("rollback calls lack %q:\n%s", expected, joined)
-		}
-	}
 	if !ssh.removed {
 		t.Fatal("failed run SSH credentials were not removed")
 	}
 }
 
-func TestStartPreparedCleansStorageAfterAmbiguousCreateFailure(t *testing.T) {
-	backend := &fakeBackend{failAt: "create-storage"}
-	store := runstate.NewStore(t.TempDir())
-	controller := New(backend, store, &fakeSSHStore{}, testInference{})
+// A creation is released the same way however far it got. Nothing records which
+// steps ran: the stage may not exist when the storage call fails, and neither
+// may exist when the stage call does, but every removal is idempotent and
+// asking costs a VM round-trip where guessing wrong costs a leak.
+func TestStartPreparedReleasesEverythingWhereverItFailed(t *testing.T) {
+	for _, failAt := range []string{"stage", "create-storage", "import"} {
+		backend := &fakeBackend{failAt: failAt}
+		ssh := &fakeSSHStore{}
+		controller := New(backend, runstate.NewStore(t.TempDir()), ssh, testInference{})
 
-	if _, err := controller.StartPrepared(
-		context.Background(),
-		testPrepared(),
-		testProject,
-		testImage,
-		testIdentity,
-		nil,
-	); err == nil {
-		t.Fatal("StartPrepared unexpectedly succeeded")
-	}
-	joined := callsString(backend.calls)
-	if !strings.Contains(joined, "remove-storage") {
-		t.Fatalf("controller did not clean potentially created storage:\n%s", joined)
+		if _, err := controller.StartPrepared(
+			context.Background(),
+			testPrepared(),
+			testProject,
+			testImage,
+			testIdentity,
+			nil,
+		); err == nil {
+			t.Fatalf("%s: StartPrepared unexpectedly succeeded", failAt)
+		}
+		joined := callsString(backend.calls)
+		for _, expected := range []string{
+			"podman rm --force --ignore pisafe-run-run-123",
+			"remove-storage",
+			"remove-stage",
+		} {
+			if !strings.Contains(joined, expected) {
+				t.Errorf("failing at %s left %q undone:\n%s", failAt, expected, joined)
+			}
+		}
+		if !ssh.removed {
+			t.Errorf("failing at %s left the run's SSH credentials", failAt)
+		}
 	}
 }
 

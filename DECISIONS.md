@@ -649,11 +649,20 @@ history holds them. New entries are appended in full.
   exists rather than creating one, so every helper change forces a VM
   recreation — which destroys every project store, and is why such changes are
   batched and why nothing in a later slice added a privileged action.
-- A project filesystem is ensured, never created, and never rolled back. Many
-  runs of one project reach it and none may assume it is the first; a run that
-  fails after ensuring it leaves it behind, because it is shared state that
+- A project filesystem is ensured, never created, and never released with a run.
+  Many runs of one project reach it and none may assume it is the first; a run
+  that fails after ensuring it leaves it behind, because it is shared state that
   outlives every run. It is also ensured ahead of the manifest record, since it
   is the one allocation deliberately never undone and selection needs it.
+- A creation that fails is released by the same `reclaim` that releases a
+  finished run, tracking nothing about how far it got. Four flags used to record
+  which allocations had been reached so that a creation failing at its first
+  step issued no removals for what it had not made; every one of those removals
+  is idempotent, so the flags bought VM round-trips on a rare path and cost a
+  second reclamation path that had to be kept in step with the first. What the
+  flags protected — the shared project and global filesystems — is protected
+  instead by being ensured before the record exists, so nothing reclaimable is
+  shared and nothing shared is reclaimable.
 - Shared mounts carry neither `nodev` nor `nosuid`, because Podman refuses any
   other option alongside `:O`. They are the only mounts in a run without them
   and it costs nothing: creating a device needs `CAP_MKNOD` and the run drops

@@ -634,9 +634,11 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
 - `runctl.StartPrepared` composes stage upload, private-storage import, per-run
   key generation, network-disabled SSH init, hardened container start, host-key
   pinning, in-container materialization, transfer cleanup, activation, and
-  bounded rollback. Rollback removes partial SSH state with the container,
-  filesystem, and VM stage; allocation commands are treated as possibly
-  successful even when their transport response fails. Activation records the
+  bounded release. A creation that fails is released by the same `reclaim` a
+  finished run is — container, run filesystem, VM stage, and SSH state, all
+  named by the run ID — without recording how far it got, because every removal
+  is idempotent and an allocation whose transport response failed may have
+  succeeded anyway. Activation records the
   baseline commit returned by actual materialization, not the host placeholder.
 - `pisafe run` resolves the Git root, mints a project-derived run ID with a UTC
   timestamp plus 48 bits of entropy, discovers Mac networks, creates or reuses

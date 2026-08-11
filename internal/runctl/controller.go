@@ -130,9 +130,9 @@ func (controller Controller) StartPrepared(
 	if err := controller.store.RegisterProject(project); err != nil {
 		return runstate.Manifest{}, err
 	}
-	// Neither shared filesystem is rolled back with a failed run. Both outlive
-	// every run that reaches them, so they are ensured before the run has
-	// anything to roll back.
+	// Neither shared filesystem is released with a failed run. Both outlive every
+	// run that reaches them, so they are ensured before the run has anything to
+	// release.
 	if err := controller.backend.EnsureProjectStorage(ctx, spec.ProjectKey); err != nil {
 		return runstate.Manifest{}, err
 	}
@@ -158,10 +158,10 @@ func (controller Controller) StartPrepared(
 		return runstate.Manifest{}, err
 	}
 
-	remoteAllocated := false
-	storageAllocated := false
-	containerAllocated := false
-	sshAllocated := false
+	// A creation that fails anywhere past here is reclaimed exactly as a
+	// finished run is. Nothing tracks how far it got: everything a run owns is
+	// named by its ID and every removal is idempotent, so releasing what was
+	// never allocated costs a VM round-trip and never a wrong answer.
 	defer func() {
 		if returnErr == nil {
 			return
@@ -171,14 +171,7 @@ func (controller Controller) StartPrepared(
 			30*time.Second,
 		)
 		defer cancelCleanup()
-		cleanupErr := controller.rollback(
-			cleanupContext,
-			spec,
-			remoteAllocated,
-			storageAllocated,
-			containerAllocated,
-			sshAllocated,
-		)
+		cleanupErr := controller.reclaim(cleanupContext, spec.RunID)
 		recordErr := returnErr
 		if cleanupErr != nil {
 			recordErr = errors.Join(returnErr, cleanupErr)
@@ -194,14 +187,11 @@ func (controller Controller) StartPrepared(
 	if err != nil {
 		return runstate.Manifest{}, fmt.Errorf("prepare run SSH credentials: %w", err)
 	}
-	sshAllocated = true
 
-	remoteAllocated = true
 	if _, err := controller.backend.CreateStage(ctx, prepared); err != nil {
 		return runstate.Manifest{}, fmt.Errorf("stream stage into VM: %w", err)
 	}
 
-	storageAllocated = true
 	if err := controller.backend.CreateRunStorage(ctx, spec.RunID); err != nil {
 		return runstate.Manifest{}, err
 	}
@@ -229,7 +219,6 @@ func (controller Controller) StartPrepared(
 	if err != nil {
 		return runstate.Manifest{}, err
 	}
-	containerAllocated = true
 	if _, err := controller.podman(ctx, nil, runArgs...); err != nil {
 		return runstate.Manifest{}, fmt.Errorf("start run container: %w", err)
 	}
@@ -277,7 +266,6 @@ func (controller Controller) StartPrepared(
 	if err := controller.backend.RemoveRun(ctx, spec.RunID); err != nil {
 		return runstate.Manifest{}, fmt.Errorf("remove VM staging directory: %w", err)
 	}
-	remoteAllocated = false
 
 	if err := controller.configureIdentity(ctx, spec, identity); err != nil {
 		return runstate.Manifest{}, err
@@ -442,40 +430,4 @@ func (controller Controller) podman(
 		stdin,
 		append([]string{"podman"}, args...)...,
 	)
-}
-
-func (controller Controller) rollback(
-	ctx context.Context,
-	spec runcontainer.Spec,
-	remoteAllocated bool,
-	storageAllocated bool,
-	containerAllocated bool,
-	sshAllocated bool,
-) error {
-	var failures []error
-	if containerAllocated {
-		if _, err := controller.podman(
-			ctx,
-			nil,
-			"rm", "--force", "--ignore", spec.ContainerName(),
-		); err != nil {
-			failures = append(failures, fmt.Errorf("remove failed container: %w", err))
-		}
-	}
-	if storageAllocated {
-		if err := controller.backend.RemoveRunStorage(ctx, spec.RunID); err != nil {
-			failures = append(failures, fmt.Errorf("remove failed storage: %w", err))
-		}
-	}
-	if remoteAllocated {
-		if err := controller.backend.RemoveRun(ctx, spec.RunID); err != nil {
-			failures = append(failures, fmt.Errorf("remove failed remote stage: %w", err))
-		}
-	}
-	if sshAllocated {
-		if err := controller.ssh.Remove(spec.RunID); err != nil {
-			failures = append(failures, fmt.Errorf("remove failed SSH credentials: %w", err))
-		}
-	}
-	return errors.Join(failures...)
 }

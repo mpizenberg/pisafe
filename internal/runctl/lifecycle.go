@@ -253,10 +253,12 @@ func (controller Controller) release(
 }
 
 // reclaim removes everything a run still owns, in the VM and on the Mac. Every
-// step is idempotent, so a partially reclaimed run can always be finished, and
-// every one is named by the run ID alone. The container is taken by force
-// because nothing here waits on it: a run still active was stopped gracefully
-// before this ran, so what is left is a leftover to sweep.
+// step is idempotent and every one is named by the run ID alone, so a partially
+// reclaimed run can always be finished and a creation that failed part-way is
+// released without anyone tracking how far it got. The container is taken by
+// force because nothing here waits on it: a run that was working was stopped
+// gracefully before this ran, and a creation that failed never handed its
+// container to anyone, so either way what is left is a leftover to sweep.
 func (controller Controller) reclaim(ctx context.Context, runID string) error {
 	if err := runid.Validate(runID); err != nil {
 		return err
