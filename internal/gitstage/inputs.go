@@ -32,13 +32,51 @@ func (selection InputSelection) empty() bool {
 	return len(selection.Include) == 0 && len(selection.Unsafe) == 0
 }
 
+// InputPlan is what one selection resolved to. Files is what the run receives;
+// Roots is what the user named, which the run re-expands to find the work it
+// must hand back. A root can hold no files yet and still be a root: that is how
+// an empty directory collects what the run creates under it.
+type InputPlan struct {
+	Files []SelectedInput
+	Roots []string
+}
+
 // SelectedInput is one selected path with the metadata the archive preserves.
-// Modes are normalized: only the executable bit survives.
+// Modes are normalized: only the executable bit survives. SHA256 records the
+// content the run was given, which is what later decides whether the host's
+// copy of that path moved while the run held it.
 type SelectedInput struct {
-	Path       string
-	Executable bool
-	Link       string
-	Size       int64
+	Path       string `json:"path"`
+	Executable bool   `json:"executable,omitempty"`
+	Link       string `json:"link,omitempty"`
+	Size       int64  `json:"size,omitempty"`
+	SHA256     string `json:"sha256,omitempty"`
+}
+
+// selecting accumulates one selection as its requests are resolved: the files
+// to carry in, the excluded entries the selection emptied, and the roots the
+// user named.
+type selecting struct {
+	chosen map[string]bool
+	taken  map[string]bool
+	roots  map[string]bool
+}
+
+func newSelecting() *selecting {
+	return &selecting{
+		chosen: map[string]bool{},
+		taken:  map[string]bool{},
+		roots:  map[string]bool{},
+	}
+}
+
+func sortedKeys(set map[string]bool) []string {
+	names := make([]string, 0, len(set))
+	for name := range set {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // Select resolves user-supplied paths against what the run would otherwise not
@@ -48,54 +86,54 @@ type SelectedInput struct {
 // the two lists a run prints are decided together and cannot disagree.
 func (excluded ExcludedInputs) Select(
 	selection InputSelection,
-) ([]SelectedInput, ExcludedInputs, error) {
+) (InputPlan, ExcludedInputs, error) {
 	if selection.empty() {
-		return nil, excluded, nil
+		return InputPlan{}, excluded, nil
 	}
-	chosen, taken := map[string]bool{}, map[string]bool{}
+	into := newSelecting()
 	for _, request := range selection.Include {
-		if err := excluded.choose(request, chosen, taken, false); err != nil {
-			return nil, ExcludedInputs{}, err
+		if err := excluded.choose(request, into, false); err != nil {
+			return InputPlan{}, ExcludedInputs{}, err
 		}
 	}
 	for _, request := range selection.Unsafe {
-		if err := excluded.choose(request, chosen, taken, true); err != nil {
-			return nil, ExcludedInputs{}, err
+		if err := excluded.choose(request, into, true); err != nil {
+			return InputPlan{}, ExcludedInputs{}, err
 		}
 	}
 
-	names := make([]string, 0, len(chosen))
-	for name := range chosen {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	inputs, err := describeInputs(excluded.Root, names)
+	files, err := describeInputs(excluded.Root, sortedKeys(into.chosen))
 	if err != nil {
-		return nil, ExcludedInputs{}, err
+		return InputPlan{}, ExcludedInputs{}, err
 	}
-	return inputs, excluded.remaining(chosen, taken), nil
+	plan := InputPlan{Files: files, Roots: sortedKeys(into.roots)}
+	return plan, excluded.remaining(into.chosen, into.taken), nil
 }
 
-// choose expands one request into concrete files and records which excluded
-// entries it emptied.
-func (excluded ExcludedInputs) choose(
-	request string,
-	chosen, taken map[string]bool,
-	unsafe bool,
-) error {
+// choose expands one request into concrete files, records the root the user
+// named, and records which excluded entries the request emptied.
+func (excluded ExcludedInputs) choose(request string, into *selecting, unsafe bool) error {
 	name, err := repositoryRelative(excluded.Root, request)
 	if err != nil {
 		return err
 	}
-	matches, err := excluded.expand(name, taken)
+	matches, covered, err := excluded.expand(name, into.taken)
 	if err != nil {
 		return err
 	}
-	if len(matches) == 0 {
+	if !covered {
 		return fmt.Errorf(
-			"%q is not an untracked or ignored file in this repository",
+			"%q is not an untracked or ignored path in this repository",
 			request,
 		)
+	}
+	// A directory Git reports as excluded may hold no files at all. It is still
+	// a root: the run collects work under it even though nothing is carried in.
+	if len(matches) == 0 {
+		info, statErr := os.Lstat(filepath.Join(excluded.Root, filepath.FromSlash(name)))
+		if statErr != nil || !info.IsDir() {
+			return fmt.Errorf("%q does not exist in this repository", request)
+		}
 	}
 	for _, match := range matches {
 		if !unsafe && LooksLikeSecret(match) {
@@ -106,23 +144,31 @@ func (excluded ExcludedInputs) choose(
 				match,
 			)
 		}
-		chosen[match] = true
+		into.chosen[match] = true
 	}
+	into.roots[name] = true
 	return nil
 }
 
-// expand names the files one request stands for. An entry Git collapsed into a
+// expand names the files one request stands for, and reports whether any
+// excluded entry covered the request at all. An entry Git collapsed into a
 // directory is read from the filesystem instead of from the listing, so a
 // request can be an entry, an ancestor of one, or a path inside one, and a
 // directory always contributes its files one by one — which is what the
-// credential check and the per-file limits need to see.
-func (excluded ExcludedInputs) expand(name string, taken map[string]bool) ([]string, error) {
-	matches := []string{}
+// credential check and the per-file limits need to see. Covering a request and
+// yielding files are different answers: an excluded directory that is empty
+// does the first without the second.
+func (excluded ExcludedInputs) expand(
+	name string,
+	taken map[string]bool,
+) (matches []string, covered bool, err error) {
+	matches = []string{}
 	for _, entry := range slices.Concat(excluded.Untracked, excluded.Ignored) {
 		directory := strings.TrimSuffix(entry, "/")
 		if directory == entry {
 			if entry == name || strings.HasPrefix(entry, name+"/") {
 				matches = append(matches, entry)
+				covered = true
 			}
 			continue
 		}
@@ -136,13 +182,14 @@ func (excluded ExcludedInputs) expand(name string, taken map[string]bool) ([]str
 		} else {
 			taken[entry] = true
 		}
+		covered = true
 		files, err := walkInput(excluded.Root, requested)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		matches = append(matches, files...)
 	}
-	return matches, nil
+	return matches, covered, nil
 }
 
 // walkInput lists what one selectable path contributes: itself when it is not a
@@ -284,10 +331,15 @@ func describeInputs(root string, names []string) ([]SelectedInput, error) {
 					maxInputBytes,
 				)
 			}
+			hash, err := fileSHA256(absolute)
+			if err != nil {
+				return nil, fmt.Errorf("hash input %q: %w", name, err)
+			}
 			entries = append(entries, SelectedInput{
 				Path:       name,
 				Executable: info.Mode().Perm()&0o100 != 0,
 				Size:       info.Size(),
+				SHA256:     hash,
 			})
 		default:
 			return nil, fmt.Errorf("input %q is not a regular file or symlink", name)
@@ -309,7 +361,9 @@ func checkLinkStaysInside(root, name, link string) error {
 	return nil
 }
 
-func writeInputsArchive(root, archivePath string, entries []SelectedInput) error {
+// writeFileArchive packs selected files for transfer across the boundary. Both
+// directions use it: what a run is given, and what it hands back.
+func writeFileArchive(root, archivePath string, entries []SelectedInput) error {
 	file, err := os.OpenFile(archivePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return fmt.Errorf("create input archive: %w", err)

@@ -16,7 +16,7 @@ func selectInputs(
 	t *testing.T,
 	source string,
 	selection InputSelection,
-) ([]SelectedInput, ExcludedInputs, error) {
+) (InputPlan, ExcludedInputs, error) {
 	t.Helper()
 	excluded, err := ListExcludedInputs(context.Background(), source)
 	if err != nil {
@@ -82,7 +82,7 @@ func TestStageIncludesSelectedInputsInBaselineCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(snapshot.Inputs, ",") !=
+	if inputPaths(snapshot.Inputs) !=
 		"build/artifact.bin,build/nested.log,link.txt,notes.txt,tool.sh" {
 		t.Fatalf("inputs = %#v", snapshot.Inputs)
 	}
@@ -136,7 +136,7 @@ func TestSelectRequiresUnsafeFlagForCredentialNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inputPaths(included) != ".env" {
+	if inputPaths(included.Files) != ".env" {
 		t.Fatalf("included = %#v", included)
 	}
 }
@@ -162,7 +162,7 @@ func TestSelectExpandsAndSubtractsCollapsedDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inputPaths(whole) != "build/artifact.bin,build/nested.log" {
+	if inputPaths(whole.Files) != "build/artifact.bin,build/nested.log" {
 		t.Fatalf("whole = %#v", whole)
 	}
 	if strings.Join(remaining.Ignored, ",") != ".env" {
@@ -175,7 +175,7 @@ func TestSelectExpandsAndSubtractsCollapsedDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inputPaths(part) != "build/nested.log" {
+	if inputPaths(part.Files) != "build/nested.log" {
 		t.Fatalf("part = %#v", part)
 	}
 	if strings.Join(remaining.Ignored, ",") != ".env,build/" {
@@ -204,8 +204,62 @@ func TestSelectRefusesARepositoryInsideASelectedDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inputPaths(inputs) != "build/vendor/vendored.txt" {
+	if inputPaths(inputs.Files) != "build/vendor/vendored.txt" {
 		t.Fatalf("inputs = %#v", inputs)
+	}
+}
+
+// TestSelectRecordsRootsForEmptyDirectories covers the difference between a
+// path Git has never heard of and one it reports as excluded that holds nothing
+// yet. The second is what a run collects work under, so it is a root even
+// though it carries no files in.
+func TestSelectRecordsRootsForEmptyDirectories(t *testing.T) {
+	source := newInputRepository(t)
+	mustWrite(t, filepath.Join(source, ".gitignore"), "build/\n.env\nplans/\n")
+	runGit(t, source, "commit", "-qm", "ignore plans", "--", ".gitignore")
+	if err := os.Mkdir(filepath.Join(source, "plans"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, remaining, err := selectInputs(t, source, InputSelection{
+		Include: []string{
+			filepath.Join(source, "plans"),
+			filepath.Join(source, "notes.txt"),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inputPaths(plan.Files) != "notes.txt" {
+		t.Fatalf("files = %#v", plan.Files)
+	}
+	if strings.Join(plan.Roots, ",") != "notes.txt,plans" {
+		t.Fatalf("roots = %#v", plan.Roots)
+	}
+	// An empty root leaves nothing behind, so it drops out of the excluded
+	// report exactly as a directory whose files were all taken does.
+	if strings.Join(remaining.Ignored, ",") != ".env,build/" {
+		t.Fatalf("remaining = %#v", remaining.Ignored)
+	}
+}
+
+// TestSelectDistinguishesUnknownFromAbsent keeps the two refusals apart: a path
+// no listing covers is not selectable at all, while a path an excluded
+// directory covers but that is not there is simply missing.
+func TestSelectDistinguishesUnknownFromAbsent(t *testing.T) {
+	source := newInputRepository(t)
+
+	_, _, err := selectInputs(t, source, InputSelection{
+		Include: []string{filepath.Join(source, "tracked.txt")},
+	})
+	if err == nil || !strings.Contains(err.Error(), "not an untracked or ignored path") {
+		t.Fatalf("err = %v", err)
+	}
+	_, _, err = selectInputs(t, source, InputSelection{
+		Include: []string{filepath.Join(source, "build", "absent.log")},
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("err = %v", err)
 	}
 }
 
@@ -314,7 +368,10 @@ func TestMaterializeRejectsInputArchiveDisagreeingWithSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared.Snapshot.Inputs = append(prepared.Snapshot.Inputs, "never-archived.txt")
+	prepared.Snapshot.Inputs = append(
+		prepared.Snapshot.Inputs,
+		SelectedInput{Path: "never-archived.txt"},
+	)
 
 	_, err = Materialize(ctx, prepared, filepath.Join(t.TempDir(), "workspace"))
 	if err == nil || !strings.Contains(err.Error(), "does not match the staged snapshot") {

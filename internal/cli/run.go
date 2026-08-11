@@ -138,9 +138,18 @@ func printRunResult(out io.Writer, result runstart.Result, inferenceConfigured b
 	if result.Manifest.Snapshot.BaselineCommit != "" {
 		fmt.Fprintln(out, "Baseline:  tracked working-tree changes were flattened into one commit")
 	}
-	if len(result.Included) != 0 {
-		fmt.Fprintf(out, "Included:  %d selected input file(s)\n", len(result.Included))
-		printNames(out, namedList{names: result.Included})
+	// The selected paths are what the run hands back at apply, so they are the
+	// summary; the files carried in are the count under it. A path holding
+	// nothing yet is still worth printing, because work created under it in the
+	// run comes home.
+	if len(result.Roots) != 0 {
+		fmt.Fprintf(
+			out,
+			"Included:  %d selected path(s), %d file(s) carried in\n",
+			len(result.Roots),
+			len(result.Included),
+		)
+		printNames(out, namedList{names: result.Roots})
 	}
 	if len(result.Excluded.Untracked) != 0 || len(result.Excluded.Ignored) != 0 {
 		fmt.Fprintf(

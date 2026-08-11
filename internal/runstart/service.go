@@ -37,10 +37,14 @@ type Controller interface {
 	) (runstate.Manifest, error)
 }
 
+// Result reports one started run. Included names the files carried in; Roots
+// names what the user asked for, which can hold no files yet and still be the
+// place the run's work comes back from.
 type Result struct {
 	Manifest runstate.Manifest
 	Excluded gitstage.ExcludedInputs
 	Included []string
+	Roots    []string
 }
 
 type Service struct {
@@ -157,9 +161,14 @@ func (service Service) Start(
 	if err != nil {
 		return Result{}, err
 	}
+	included := make([]string, 0, len(prepared.Snapshot.Inputs))
+	for _, input := range prepared.Snapshot.Inputs {
+		included = append(included, input.Path)
+	}
 	return Result{
 		Manifest: manifest,
 		Excluded: remaining,
-		Included: prepared.Snapshot.Inputs,
+		Included: included,
+		Roots:    prepared.Snapshot.IncludeRoots,
 	}, nil
 }

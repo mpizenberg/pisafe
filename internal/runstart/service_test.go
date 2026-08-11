@@ -233,11 +233,11 @@ func TestStartReportsSelectedInputsAndDropsThemFromExclusions(t *testing.T) {
 		_ context.Context,
 		request gitstage.PrepareRequest,
 	) (gitstage.PreparedStage, error) {
-		snapshot := gitstage.Snapshot{RunID: request.RunID}
-		for _, input := range request.Inputs {
-			snapshot.Inputs = append(snapshot.Inputs, input.Path)
-		}
-		return gitstage.PreparedStage{Snapshot: snapshot}, nil
+		return gitstage.PreparedStage{Snapshot: gitstage.Snapshot{
+			RunID:        request.RunID,
+			Inputs:       request.Inputs.Files,
+			IncludeRoots: request.Inputs.Roots,
+		}}, nil
 	}
 
 	result, err := service.Start(

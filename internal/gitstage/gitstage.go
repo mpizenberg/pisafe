@@ -32,13 +32,19 @@ var (
 	ErrLFSNotSupported = errors.New("Git LFS repositories are not supported yet")
 )
 
+// Snapshot describes one staged run. Inputs is what was carried in, with the
+// content each file had at that moment; IncludeRoots is what the user named,
+// which is what the run re-expands to find the work it hands back. A run staged
+// before included paths round-tripped has inputs but no roots, and so hands
+// nothing back.
 type Snapshot struct {
 	RunID          string           `json:"run_id"`
 	SourceRoot     string           `json:"source_root"`
 	SourceHead     string           `json:"source_head"`
 	WorkRef        string           `json:"work_ref"`
 	BaselineCommit string           `json:"baseline_commit,omitempty"`
-	Inputs         []string         `json:"inputs,omitempty"`
+	Inputs         []SelectedInput  `json:"inputs,omitempty"`
+	IncludeRoots   []string         `json:"include_roots,omitempty"`
 	Submodules     []SubmoduleStage `json:"submodules,omitempty"`
 	CreatedAt      time.Time        `json:"created_at"`
 }
@@ -152,7 +158,7 @@ type PrepareRequest struct {
 	SourcePath string
 	PackageDir string
 	RunID      string
-	Inputs     []SelectedInput
+	Inputs     InputPlan
 }
 
 // ExcludedInputs is everything in the repository a run does not receive, as Git
@@ -327,18 +333,15 @@ func Prepare(ctx context.Context, request PrepareRequest) (PreparedStage, error)
 		}
 	}()
 
-	names := make([]string, 0, len(request.Inputs))
-	for _, input := range request.Inputs {
-		names = append(names, input.Path)
-	}
 	prepared := StagePackage(packageDir, Snapshot{
-		RunID:      runID,
-		SourceRoot: root,
-		SourceHead: head,
-		WorkRef:    "refs/heads/work/" + runID,
-		Inputs:     names,
-		Submodules: submodules,
-		CreatedAt:  time.Now().UTC(),
+		RunID:        runID,
+		SourceRoot:   root,
+		SourceHead:   head,
+		WorkRef:      "refs/heads/work/" + runID,
+		Inputs:       request.Inputs.Files,
+		IncludeRoots: request.Inputs.Roots,
+		Submodules:   submodules,
+		CreatedAt:    time.Now().UTC(),
 	})
 	if err := captureRepository(ctx, root, prepared.BundlePath, prepared.PatchPath); err != nil {
 		return PreparedStage{}, err
@@ -358,7 +361,7 @@ func Prepare(ctx context.Context, request PrepareRequest) (PreparedStage, error)
 		return PreparedStage{}, err
 	}
 	if prepared.InputsPath != "" {
-		if err := writeInputsArchive(root, prepared.InputsPath, request.Inputs); err != nil {
+		if err := writeFileArchive(root, prepared.InputsPath, prepared.Snapshot.Inputs); err != nil {
 			return PreparedStage{}, err
 		}
 	}
@@ -582,9 +585,12 @@ func restoreInputs(ctx context.Context, prepared PreparedStage, workspace string
 	return nil
 }
 
-func sameNames(first, second []string) bool {
-	left := append([]string(nil), first...)
-	right := append([]string(nil), second...)
+func sameNames(expected []SelectedInput, extracted []string) bool {
+	left := make([]string, 0, len(expected))
+	for _, input := range expected {
+		left = append(left, input.Path)
+	}
+	right := append([]string(nil), extracted...)
 	sort.Strings(left)
 	sort.Strings(right)
 	return slices.Equal(left, right)

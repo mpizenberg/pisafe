@@ -406,6 +406,7 @@ func decodeMaterializedSnapshot(
 		materialized.SourceHead != hostSnapshot.SourceHead ||
 		materialized.WorkRef != hostSnapshot.WorkRef ||
 		!slices.Equal(materialized.Inputs, hostSnapshot.Inputs) ||
+		!slices.Equal(materialized.IncludeRoots, hostSnapshot.IncludeRoots) ||
 		!sameSubmodules(materialized.Submodules, hostSnapshot.Submodules) ||
 		!materialized.CreatedAt.Equal(hostSnapshot.CreatedAt) {
 		return gitstage.Snapshot{}, errors.New("materialized snapshot does not match prepared run")

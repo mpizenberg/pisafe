@@ -108,6 +108,7 @@ func TestPrintRunResultShowsExactConnectionAndExclusions(t *testing.T) {
 			Ignored:   []string{"build/one", "build/two"},
 		},
 		Included: []string{"fixtures/sample.json"},
+		Roots:    []string{"fixtures", "plans"},
 	}
 	if err := printRunResult(&output, result, false); err != nil {
 		t.Fatal(err)
@@ -119,8 +120,8 @@ func TestPrintRunResultShowsExactConnectionAndExclusions(t *testing.T) {
 		"ssh -F '/Users/alice/Library/Application Support/pisafe/ssh.config' pisafe-project-run",
 		"tracked working-tree changes were flattened",
 		"1 untracked, 2 ignored",
-		"Included:  1 selected input file(s)",
-		`"fixtures/sample.json"`,
+		"Included:  2 selected path(s), 1 file(s) carried in",
+		`"plans"`,
 		"pisafe zed project-run",
 		"inference unavailable",
 	} {
