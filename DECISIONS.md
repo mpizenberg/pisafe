@@ -1065,6 +1065,27 @@ history holds them. New entries are appended in full.
   covers the repositories this is built for, and recursion multiplies the
   artifact, path-safety, and apply-journal surface. Lifting the limit is
   additive.
+- A run that attaches a submodule of its own has its whole apply refused, rather
+  than landing the branch with a warning. The superproject branch still carries
+  every file change, which is what made warning tempting, but the branch is
+  unusable exactly where submodules matter and nothing on the Mac can be told
+  where to fetch the missing repository from. Refusing costs nothing that is
+  gone: it happens before any ref moves, and the run is still there to be
+  connected to and corrected.
+- Each half of an apply was verified against what the Mac staged and neither
+  against the other, so nothing related the superproject's gitlinks to the
+  submodules imported beside it. The pointers the run moved are now checked for
+  presence in the repository they name — presence, not reachability from the
+  imported tip, because moving a pin to any commit the submodule already has is
+  an ordinary change and reachability would refuse a downgrade. Only pointers
+  the run changed are examined; one it left alone names what the source commit
+  already named.
+- For a submodule that was staged, that check cannot currently fail: a run may
+  not leave a submodule below its staged base, and the final commit records
+  where each one actually ended, so the gitlink always equals the tip the bundle
+  carries. It is kept anyway. The property belongs to the branch pisafe hands
+  over, and having it hold by coincidence of two rules in another function is
+  how it would later stop holding without anything saying so.
 - The apply journal records only ref creations, because apply only ever creates
   `pisafe/<run>`. It records no ref names either: the branch and the incoming
   ref both follow from the journal's run ID, so a tampered manifest cannot name

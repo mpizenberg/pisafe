@@ -247,6 +247,15 @@ repositories, creating a `pisafe/<run>` ref in each changed submodule so its
 commits stay reachable, and reports which submodule commits the imported branch
 expects.
 
+The set of submodules a run may hand back is fixed when it is staged. Every
+submodule pointer the run's history moves must name a commit the corresponding
+repository on the Mac then holds, or the apply is refused before any ref moves:
+a branch whose gitlink points into nothing cannot be checked out with
+`--recurse-submodules`, and nothing carries the objects of a repository the run
+attached for itself. Presence is the requirement, not reachability from what
+was imported beside it, because a pin may legitimately move to any commit its
+submodule already has.
+
 Git LFS is out of scope: a repository using it is detected and refused rather
 than staged incompletely.
 

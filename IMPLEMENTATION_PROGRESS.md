@@ -86,6 +86,13 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   `ErrApplyNeedsReconciliation` rather than overwriting. Submodule refs are
   created first, so an interruption can leave commits reachable but never a
   branch whose gitlinks are not.
+- `ImportApply` also relates the two halves it verified separately: every
+  submodule pointer the run's history moves, found by comparing the imported
+  commit with the captured source commit, must name a commit the repository at
+  that path then holds. A submodule the run attached for itself was never staged
+  and has no repository on the Mac, so it is named and the apply is refused
+  before any ref moves. Presence is what is required, not reachability from the
+  tip imported beside it.
 - A run commits as its user: `pisafe run` resolves the identity Git would use
   in the source repository and installs it in the run's own global config. A
   repository with no `user.name`/`user.email` refuses to start a run. Only
@@ -745,7 +752,11 @@ with a fake VM boundary:
   submodules and LFS, mismatched artifacts, path-escape refusal, gitlink
   resolving to exactly the imported commit, an unchanged submodule getting no
   branch, journal replay as a no-op, a contested ref stopping for
-  reconciliation, and rollback removing only what apply created. End to end: a
+  reconciliation, and rollback removing only what apply created. A run that
+  attaches a submodule of its own is refused by name and leaves no branch in
+  either repository; a fabricated tree whose gitlink names a commit the
+  submodule does not have is refused too, built with plumbing because the run
+  path cannot produce one. End to end: a
   stopped run captured, imported, and marked imported while the checkout stays
   untouched; a second apply refused; a recorded plan finished without touching
   the run; a contested ref leaving the run stopped with its plan intact.

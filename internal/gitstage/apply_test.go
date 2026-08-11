@@ -267,6 +267,59 @@ func TestImportApplyDemandsTheBundleForASubmoduleTheRunAdvanced(t *testing.T) {
 	}
 }
 
+func TestApplyRefusesASubmoduleTheRunAdded(t *testing.T) {
+	ctx := context.Background()
+	source, workspace, snapshot := stageWithSubmodule(t, "annexing-run")
+
+	// What a run may hand back is fixed when it is staged. A repository the
+	// agent attaches afterwards is outside that set, so its objects live only in
+	// the run and the branch would point into nothing.
+	addition := newRepository(t)
+	runGit(
+		t,
+		workspace,
+		"-c", "protocol.file.allow=always",
+		"submodule", "add", "--quiet", addition, "annexed",
+	)
+	runGit(t, workspace, "commit", "-qm", "attach a submodule of the run's own")
+
+	_, err := Apply(ctx, snapshot, workspace, KeepBaseline)
+	if err == nil || !strings.Contains(err.Error(), `added a submodule at "annexed"`) {
+		t.Fatalf("added submodule err = %v", err)
+	}
+	for _, repository := range []string{source, filepath.Join(source, "dependency")} {
+		if _, err := gitOutput(
+			ctx,
+			repository,
+			"rev-parse", "--verify", "refs/heads/pisafe/annexing-run",
+		); err == nil {
+			t.Fatalf("%s gained a branch from a refused apply", repository)
+		}
+	}
+}
+
+func TestApplyRefusesAGitlinkTheSubmoduleCannotResolve(t *testing.T) {
+	ctx := context.Background()
+	source, _, snapshot := stageWithSubmodule(t, "dangling-run")
+
+	// Two checks elsewhere keep a staged submodule's pointer resolvable: a
+	// submodule may not end below its staged base, and the run's final commit
+	// records where it actually ended. This builds the tree those forbid, so the
+	// branch keeps the property itself rather than inheriting it.
+	missing := strings.Repeat("c0ffee01", 5)
+	runGit(t, source, "update-index", "--cacheinfo", "160000,"+missing+",dependency")
+	tree := runGit(t, source, "write-tree")
+	tip := runGit(t, source, "commit-tree", tree, "-p", snapshot.SourceHead, "-m", "moved pin")
+
+	err := requireSubmodulesPresent(ctx, source, snapshot, tip)
+	if err == nil || !strings.Contains(err.Error(), "does not have") {
+		t.Fatalf("dangling gitlink err = %v", err)
+	}
+	if !strings.Contains(err.Error(), missing) {
+		t.Fatalf("error does not name the commit: %v", err)
+	}
+}
+
 func TestPreparedApplyNamesOnlyTheBundlesItProduced(t *testing.T) {
 	_, workspace, snapshot := stageWithSubmodule(t, "artifact-run")
 	submoduleWorkspace := filepath.Join(workspace, "dependency")

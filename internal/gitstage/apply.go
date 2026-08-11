@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -440,6 +441,9 @@ func ImportApply(
 	} else if err := requireAbsentRef(ctx, sourceRoot, targetRef); err != nil {
 		return PlannedApply{}, err
 	}
+	if err := requireSubmodulesPresent(ctx, sourceRoot, snapshot, prepared.Tip); err != nil {
+		return PlannedApply{}, err
+	}
 	journal.Steps = append(journal.Steps, ApplyStep{
 		Repository: sourceRoot,
 		Commit:     prepared.Tip,
@@ -487,6 +491,107 @@ func importBundle(
 		return fmt.Errorf("imported tip mismatch: wanted %s, got %s", expectedTip, imported)
 	}
 	return nil
+}
+
+// gitlink is one submodule pointer a commit records: where it sits, and the
+// commit it names there.
+type gitlink struct {
+	path   string
+	commit string
+}
+
+const gitlinkMode = "160000"
+
+// requireSubmodulesPresent proves the branch about to land can be checked out
+// with its submodules. What a run may hand back is fixed when it is staged, and
+// a submodule it adds is outside that set: no bundle carries the new
+// repository's objects, nothing on the Mac holds them, and every other check
+// passes on a superproject whose tree points into nothing.
+//
+// A pointer to a staged submodule is checked too, though its commit is one the
+// bundle beside it necessarily carries. That holds only because two things
+// elsewhere are true — a submodule may not end below its staged base, and the
+// final commit records where each one actually ended — and the property is the
+// branch's to keep rather than theirs to imply.
+//
+// Only the pointers the run changed are examined, because one it left alone
+// names what the source commit already named. Presence is the whole question:
+// moving a pin to a commit the submodule already has is a change like any
+// other, whichever direction it moves.
+func requireSubmodulesPresent(
+	ctx context.Context,
+	sourceRoot string,
+	snapshot Snapshot,
+	tip string,
+) error {
+	moved, err := changedGitlinks(ctx, sourceRoot, snapshot.SourceHead, tip)
+	if err != nil {
+		return err
+	}
+	for _, link := range moved {
+		if err := safePath("submodule", link.path); err != nil {
+			return err
+		}
+		staged := slices.ContainsFunc(
+			snapshot.Submodules,
+			func(submodule SubmoduleStage) bool { return submodule.Path == link.path },
+		)
+		if !staged {
+			return fmt.Errorf(
+				"the run added a submodule at %q; pisafe staged no repository there, "+
+					"so its history cannot be carried back",
+				link.path,
+			)
+		}
+		repository := filepath.Join(sourceRoot, filepath.FromSlash(link.path))
+		// --quiet makes an object the submodule does not have exit 1 rather than
+		// print, so success here means the commit is there to check out.
+		_, err := gitOutput(
+			ctx, repository, "rev-parse", "--verify", "--quiet", link.commit+"^{commit}",
+		)
+		if err == nil {
+			continue
+		}
+		if isExitCode(err, 1) {
+			return fmt.Errorf(
+				"submodule %q: the run's history expects commit %s, which the "+
+					"submodule does not have and the run handed back no way to obtain",
+				link.path,
+				link.commit,
+			)
+		}
+		return fmt.Errorf("submodule %q: resolve expected commit: %w", link.path, err)
+	}
+	return nil
+}
+
+// changedGitlinks reports the submodule pointers one commit records differently
+// from another, as the path and the commit now named there. A pointer the newer
+// commit no longer carries is not among them: a removed submodule leaves
+// nothing to resolve.
+func changedGitlinks(ctx context.Context, repository, from, to string) ([]gitlink, error) {
+	output, err := gitOutputBytes(
+		ctx,
+		repository,
+		"diff-tree", "-r", "-z", "--no-commit-id", "--no-renames", from, to,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("compare recorded submodule pointers: %w", err)
+	}
+	// The raw format alternates one metadata record with the path it describes.
+	records := splitNUL(output)
+	links := make([]gitlink, 0, len(records)/2)
+	for index := 0; index+1 < len(records); index += 2 {
+		fields := strings.Fields(records[index])
+		if len(fields) != 5 {
+			return nil, fmt.Errorf("unreadable comparison of submodule pointers")
+		}
+		if fields[1] != gitlinkMode {
+			continue
+		}
+		links = append(links, gitlink{path: records[index+1], commit: fields[3]})
+	}
+	return links, nil
 }
 
 func requireAbsentRef(ctx context.Context, repository, ref string) error {
