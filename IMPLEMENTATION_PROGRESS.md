@@ -465,6 +465,11 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   `pisafe logout NAME` removes one whether or not it still works. A run is never
   configured with a provider whose API has no canonical path, so an upstream
   pisafe cannot route reaches no run rather than being relayed by guess.
+- One table in `broker` keyed by the API name carries everything that name
+  decides: the relayed path, the base-URL suffix a run's client expects, whether
+  the capability is wrapped as a JWT, the header the Mac's key travels upstream
+  in, and whether refusals use Anthropic's error envelope or OpenAI's. Nothing
+  else switches on the name, and a test holds every named API to a complete row.
 - A stored secret is read only when the broker relays a request, whichever kind
   of login it is. Starting a run renders `models.json`, which carries no
   upstream credential, and assembling the catalog asks the keychain only whether

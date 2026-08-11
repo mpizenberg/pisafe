@@ -79,6 +79,53 @@ func TestCanonicalPathAndEndpointPerAPI(t *testing.T) {
 	}
 }
 
+// Every API pisafe names has to carry a complete row, because nothing switches
+// on the name any more to notice a missing one: a constant without a row routes
+// nowhere and would authenticate upstream under an empty header name.
+func TestEveryNamedAPIHasAShape(t *testing.T) {
+	named := []string{
+		APIAnthropicMessages,
+		APIOpenAICompletions,
+		APIOpenAIResponses,
+		APIOpenAICodexResponses,
+	}
+	for _, api := range named {
+		shape, known := apiShapes[api]
+		if !known {
+			t.Errorf("%s has no shape", api)
+			continue
+		}
+		if shape.path == "" || shape.keyHeader == "" {
+			t.Errorf("%s shape = %+v", api, shape)
+		}
+	}
+	if len(apiShapes) != len(named) {
+		t.Errorf("%d shapes for %d named APIs", len(apiShapes), len(named))
+	}
+}
+
+func TestUpstreamKeyAuthSpellsTheKeyTheWayEachAPIExpects(t *testing.T) {
+	for api, expected := range map[string][2]string{
+		APIAnthropicMessages:    {"X-Api-Key", "secret"},
+		APIOpenAICompletions:    {"Authorization", "Bearer secret"},
+		APIOpenAIResponses:      {"Authorization", "Bearer secret"},
+		APIOpenAICodexResponses: {"Authorization", "Bearer secret"},
+	} {
+		headers, err := UpstreamKeyAuth(api, "secret")
+		if err != nil {
+			t.Fatalf("%s: %v", api, err)
+		}
+		if len(headers) != 1 || headers.Get(expected[0]) != expected[1] {
+			t.Errorf("%s headers = %v", api, headers)
+		}
+	}
+	// An API with no row has no convention to spell a key by, and guessing one
+	// would send the Mac's secret upstream in a header nothing asked for.
+	if _, err := UpstreamKeyAuth("invented", "secret"); err == nil {
+		t.Error("an unknown API produced upstream credentials")
+	}
+}
+
 // A catalog that cannot be routed must never reach a run: the name is what
 // separates two upstreams, and a run configured with an ambiguous one would
 // send a request to whichever provider happened to be checked first.

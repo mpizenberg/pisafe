@@ -60,22 +60,75 @@ func ValidateName(name string) error {
 	return nil
 }
 
-// CanonicalPath is the only request path the broker relays. It matches what
-// the pinned Pi client emits for the configured API against the models.json
-// base URL written into each run. An API pisafe does not know has no path, so
-// its route matches nothing a client could send rather than guessing one.
+// apiShape is everything the wire format of one upstream decides. Each field
+// was a switch on the API name in a different file, which is four chances for
+// one API to be described four ways; adding an API is now adding a row. An API
+// with no row has no path, and a route that matches nothing a client could send
+// is what makes an upstream pisafe cannot relay refuse itself.
+type apiShape struct {
+	// path is the only request path the broker relays, matching what the pinned
+	// Pi client emits against the base URL written into each run.
+	path string
+	// baseSuffix completes that base URL. The Anthropic and Codex clients append
+	// their whole request path themselves; the OpenAI clients expect /v1 to be
+	// there already.
+	baseSuffix string
+	// jwtAPIKey wraps the run's capability in an unsigned JWT shape. The pinned
+	// Pi Codex client refuses an apiKey that does not parse as a JWT and derives
+	// its chatgpt-account-id header from one of its claims, so the payload
+	// carries a placeholder account ID — the broker sets the real one upstream —
+	// and the capability rides as the signature segment, which nothing decodes.
+	jwtAPIKey bool
+	// keyHeader and keyPrefix are how the Mac's own key travels upstream.
+	keyHeader string
+	keyPrefix string
+	// anthropicErrors renders a refusal in Anthropic's error envelope instead of
+	// the OpenAI one every other client reads.
+	anthropicErrors bool
+}
+
+var apiShapes = map[string]apiShape{
+	APIAnthropicMessages: {
+		path:            "/v1/messages",
+		keyHeader:       "X-Api-Key",
+		anthropicErrors: true,
+	},
+	APIOpenAICompletions: {
+		path:       "/v1/chat/completions",
+		baseSuffix: "/v1",
+		keyHeader:  "Authorization",
+		keyPrefix:  "Bearer ",
+	},
+	APIOpenAIResponses: {
+		path:       "/v1/responses",
+		baseSuffix: "/v1",
+		keyHeader:  "Authorization",
+		keyPrefix:  "Bearer ",
+	},
+	APIOpenAICodexResponses: {
+		path:      "/codex/responses",
+		jwtAPIKey: true,
+		keyHeader: "Authorization",
+		keyPrefix: "Bearer ",
+	},
+}
+
+// CanonicalPath is the only request path the broker relays for this provider.
 func (provider Provider) CanonicalPath() string {
-	switch provider.API {
-	case APIAnthropicMessages:
-		return "/v1/messages"
-	case APIOpenAICompletions:
-		return "/v1/chat/completions"
-	case APIOpenAIResponses:
-		return "/v1/responses"
-	case APIOpenAICodexResponses:
-		return "/codex/responses"
+	return apiShapes[provider.API].path
+}
+
+// UpstreamKeyAuth is how one API expects a plain key to authenticate a request
+// upstream. A credential source holds the secret; the convention for spelling
+// it belongs here with the rest of what the API decides.
+func UpstreamKeyAuth(api, key string) (http.Header, error) {
+	shape, known := apiShapes[api]
+	if !known {
+		return nil, fmt.Errorf("cannot authenticate upstream for unknown API %q", api)
 	}
-	return ""
+	headers := http.Header{}
+	headers.Set(shape.keyHeader, shape.keyPrefix+key)
+	return headers, nil
 }
 
 func (provider Provider) upstreamEndpoint() string {
@@ -89,25 +142,20 @@ func (provider Provider) route() string {
 	return "/" + provider.Name + provider.CanonicalPath()
 }
 
-// runBaseURL is the models.json baseUrl inside a run. The Anthropic and
-// Codex clients append their full request paths themselves while the OpenAI
-// clients expect the /v1 prefix in the base URL.
+// runBaseURL is the models.json baseUrl inside a run.
 func (provider Provider) runBaseURL() string {
-	base := fmt.Sprintf("http://%s:%d/%s", lima.BrokerAddress, lima.BrokerPort, provider.Name)
-	if provider.API == APIOpenAICompletions || provider.API == APIOpenAIResponses {
-		return base + "/v1"
-	}
-	return base
+	return fmt.Sprintf(
+		"http://%s:%d/%s%s",
+		lima.BrokerAddress,
+		lima.BrokerPort,
+		provider.Name,
+		apiShapes[provider.API].baseSuffix,
+	)
 }
 
-// runAPIKey is the models.json apiKey inside a run. The pinned Pi Codex
-// client refuses an apiKey that does not parse as a JWT and derives its
-// chatgpt-account-id header from one of its claims, so the capability is
-// wrapped in an unsigned JWT shape: a placeholder account ID in the payload
-// (the broker sets the real one upstream) and the capability riding as the
-// signature segment, which nothing decodes.
+// runAPIKey is the models.json apiKey inside a run.
 func (provider Provider) runAPIKey(capability string) string {
-	if provider.API != APIOpenAICodexResponses {
+	if !apiShapes[provider.API].jwtAPIKey {
 		return capability
 	}
 	header := base64.StdEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))

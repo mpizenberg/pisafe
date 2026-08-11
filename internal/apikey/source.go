@@ -46,11 +46,5 @@ func (source *Source) UpstreamAuth(ctx context.Context) (http.Header, error) {
 			return nil, fmt.Errorf("the stored key for %s is empty", source.name)
 		}
 	}
-	headers := http.Header{}
-	if source.api == broker.APIAnthropicMessages {
-		headers.Set("X-Api-Key", source.key)
-	} else {
-		headers.Set("Authorization", "Bearer "+source.key)
-	}
-	return headers, nil
+	return broker.UpstreamKeyAuth(source.api, source.key)
 }

@@ -1337,6 +1337,21 @@ history holds them. New entries are appended in full.
   does not speak. Naming all four APIs and refusing the rest costs a run
   nothing — no login path can produce another — and turns a guess into a
   refusal at the one place that already refuses catalogs no run could use.
+- Everything an API name decides lives in one table in `broker`, keyed by the
+  name: the relayed path, the suffix that completes a run's base URL, whether
+  the capability is JWT-wrapped, the header the Mac's key travels upstream in,
+  and which error envelope a refusal is written in. Each was a switch in a
+  different file, which is five chances to describe one API five ways, and the
+  two furthest apart — the header a key is sent in and the envelope an error
+  comes back in — were the ones most likely to drift. Adding an API is adding a
+  row; the only thing outside the table is `apikey.validateAPI`, which answers a
+  different question, whether a login the user writes by hand may declare it at
+  all, and excludes the Codex flow that pisafe owns.
+- Making an unroutable API unrepresentable rather than refused was considered
+  and dropped as machinery with nothing left to catch. Every `Provider` is built
+  from one of the four constants or from a record whose `Validate` has already
+  bounded its API, so a validating type at the parse boundary would restate a
+  check that already runs there.
 - A login is removable whether or not it is still usable, whichever kind it is.
   `logout` used to confirm the login existed by loading it — the whole key
   catalog for a key, the parsed and validated credential for the subscription —

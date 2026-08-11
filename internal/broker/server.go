@@ -248,7 +248,7 @@ func (server *Server) writeError(
 	writer.WriteHeader(status)
 	escaped := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(message)
 	var body string
-	if provider.API == APIAnthropicMessages {
+	if apiShapes[provider.API].anthropicErrors {
 		body = `{"type":"error","error":{"type":"invalid_request_error","message":"` +
 			escaped + `"}}`
 	} else {
