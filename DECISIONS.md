@@ -263,10 +263,12 @@ history holds them. New entries are appended in full.
   container added later inherits all of it instead of restating it. Writing the
   prologue down once is what showed that the container generating a run's SSH
   host key had no memory or PID limit at all; it has the run's now. One
-  difference survives and is not understood: the container that fetches and
-  unpacks an npm tarball mounts its scratch `/tmp` without `noexec` where every
-  other container has it, and whether npm needs that is unverified, so making
-  the base uniformly strict is backlog work behind a live install rather than a
+  difference survives and is not understood: `packageArgs` mounts its scratch
+  `/tmp` without `noexec` where every other container has it. Install needs
+  somewhere to unpack a downloaded tarball, but resolve shares that base and
+  only runs `npm pack --dry-run`, so it holds an exemption it has no use for and
+  is the half whose output comes back from the network. Narrowing it to install,
+  or dropping it entirely, is backlog work behind a live install rather than a
   silent change inside a deduplication.
 - The Mac's on-link deny set is canonicalized in exactly one place. `hostnet`
   reports the prefixes it observed; `lima.CanonicalIPv4Prefixes` masks,
