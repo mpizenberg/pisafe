@@ -60,8 +60,8 @@ func runGC(ctx context.Context, args []string, out io.Writer) error {
 }
 
 func printCollection(out io.Writer, plan runctl.GCPlan, images []string, dryRun bool) {
-	if plan.Empty() && len(images) == 0 &&
-		len(plan.Kept) == 0 && len(plan.MissingProjects) == 0 {
+	if plan.Empty() && len(images) == 0 && len(plan.Kept) == 0 &&
+		len(plan.MissingProjects) == 0 && len(plan.UnreadableProjects) == 0 {
 		fmt.Fprintln(out, "Nothing to collect.")
 		return
 	}
@@ -102,6 +102,15 @@ func printCollection(out io.Writer, plan runctl.GCPlan, images []string, dryRun 
 		),
 		projectLabels(plan.MissingProjects),
 	)
+	printCollected(
+		out,
+		"Unreadable:",
+		fmt.Sprintf(
+			"%d project record(s) this version cannot read; their stores are left whole",
+			len(plan.UnreadableProjects),
+		),
+		unreadableProjectLabels(plan.UnreadableProjects),
+	)
 	if len(plan.Kept) == 0 {
 		return
 	}
@@ -123,6 +132,18 @@ func projectLabels(projects []runstate.ProjectRecord) []string {
 	labels := make([]string, 0, len(projects))
 	for _, project := range projects {
 		labels = append(labels, fmt.Sprintf("%q (%s)", project.Root, missingSince(project)))
+	}
+	return labels
+}
+
+// unreadableProjectLabels names each store by its key, which is what its record
+// is filed under and all that is known about it. A key opens with the directory
+// name the checkout had, so it is also the most a user gets towards recognising
+// which project this is.
+func unreadableProjectLabels(projects []runstate.UnreadableProject) []string {
+	labels := make([]string, 0, len(projects))
+	for _, project := range projects {
+		labels = append(labels, fmt.Sprintf("%s (%s)", project.Key, project.Reason))
 	}
 	return labels
 }

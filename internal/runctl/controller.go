@@ -68,7 +68,7 @@ type StateStore interface {
 	RecordError(string, error) (runstate.Manifest, error)
 	RegisterProject(runid.Project) error
 	HasProject(string) (bool, error)
-	ListProjects() ([]runstate.ProjectRecord, error)
+	ListProjects() ([]runstate.ProjectRecord, []runstate.UnreadableProject, error)
 	MarkProjectMissing(string, time.Time) error
 	ForgetProject(string) error
 }

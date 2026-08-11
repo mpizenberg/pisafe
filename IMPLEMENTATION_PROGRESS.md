@@ -524,6 +524,16 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   filesystem denies starts the same seven-day window an imported run gets, with
   the stamp on the record; presence is rechecked every sweep, and a project any
   run record still names is skipped entirely.
+- `Store.ListProjects` separates the records this version can read from the ones
+  it cannot, as `Store.List` does for runs. An unreadable one is reported by the
+  key its file is named by and never acted on: `gc` neither stamps nor reclaims
+  it, `project list` shows it as `unreadable` with the reason, and `backup`
+  copies its transcripts out under that key but leaves it out of the manifest,
+  because a restore puts a store back under a checkout and which checkout it
+  came from is what could not be read. Unlike an unreadable run record it holds
+  no other store back, since its key names exactly one. A `.json` file in the
+  projects directory whose name is not a valid key is not a record at all: it is
+  skipped, so every reported key is one the VM will accept.
 
 ### The global profile: extensions and tools
 
@@ -1328,15 +1338,12 @@ These explain why parts of the code look the way they do:
 
 ## Known gaps
 
-- Project records get only half of "a record pisafe cannot read must still be
-  nameable and removable". `ForgetProject` already removes one by key without
-  decoding it, and `project drop PATH` derives that key from the checkout, so a
-  record nothing can read is still removable. But `ListProjects` still returns
-  on the first record it cannot read, which would take `project list`, `gc`, and
-  `backup` with it — `backup` being the one that matters, since silently
-  skipping a store loses transcripts nothing else holds. The same treatment run
-  records got closes it; the version has never moved off 1, so nothing has hit
-  it yet.
+- A project record this version cannot read is reported and its transcripts
+  still export, but removing it means naming the checkout it belonged to, which
+  is exactly what could not be read: `project drop` takes a path and derives the
+  key from it. The key is shown, and it opens with the checkout's directory
+  name, so a user who recognises the project can still drop it. Nothing takes a
+  key directly. The project record version has never moved off 1.
 - `pisafe diff` lists untracked paths with `--exclude-standard`, so work under an
   included root that the repository ignores is invisible while the run is going.
   It arrives at apply, but a user watching a run cannot see the plan documents

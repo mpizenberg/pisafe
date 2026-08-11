@@ -58,7 +58,7 @@ func TestDroppingAStoreTakesItsFilesystemBeforeItsRecord(t *testing.T) {
 	if calls := callsString(backend.calls); calls != "remove-project-storage "+testProject.Key {
 		t.Fatalf("calls =\n%s", calls)
 	}
-	projects, err := store.ListProjects()
+	projects, _, err := store.ListProjects()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestRebindingCarriesTheTranscriptsAndLeavesTheCaches(t *testing.T) {
 		t.Fatalf("a cache was carried over a rebind:\n%s", calls)
 	}
 
-	projects, err := store.ListProjects()
+	projects, _, err := store.ListProjects()
 	if err != nil {
 		t.Fatal(err)
 	}

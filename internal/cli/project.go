@@ -61,11 +61,11 @@ func listProjects(out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	projects, err := store.ListProjects()
+	projects, unreadableProjects, err := store.ListProjects()
 	if err != nil {
 		return err
 	}
-	if len(projects) == 0 {
+	if len(projects) == 0 && len(unreadableProjects) == 0 {
 		fmt.Fprintln(out, "No project stores.")
 		return nil
 	}
@@ -90,8 +90,22 @@ func listProjects(out io.Writer) error {
 			projectStatus(project, held, len(unreadable) > 0),
 		)
 	}
+	// A store whose record cannot be read is listed under the key it is filed
+	// by, because which checkout it came from is exactly what could not be read.
+	for _, project := range unreadableProjects {
+		fmt.Fprintf(table, "%s\t-\tunreadable\n", project.Key)
+	}
 	if err := table.Flush(); err != nil {
 		return fmt.Errorf("write project list: %w", err)
+	}
+	for _, project := range unreadableProjects {
+		fmt.Fprintf(
+			out,
+			"%s: %s.\nIts store is left whole and pisafe backup still copies its "+
+				"transcripts out.\n",
+			project.Key,
+			project.Reason,
+		)
 	}
 	if len(unreadable) > 0 {
 		fmt.Fprintf(

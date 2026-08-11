@@ -196,7 +196,7 @@ func TestASweepReclaimsAStoreOnlyAfterItsCheckoutStaysGone(t *testing.T) {
 	if last.kind != "remove-project-storage" || last.args[0] != gone.Key {
 		t.Fatalf("last call = %#v", last)
 	}
-	records, err := store.ListProjects()
+	records, _, err := store.ListProjects()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,6 +255,66 @@ func TestASweepReleasesNoStoreWhileARecordCannotBeRead(t *testing.T) {
 	}
 	if len(plan.Reclaimed) != 0 {
 		t.Fatalf("an unreadable record was acted on: %#v", plan.Reclaimed)
+	}
+}
+
+// TestASweepReportsAProjectRecordItCannotReadAndReleasesTheRest is where
+// project records part company with run records. An unreadable run record could
+// belong to any project, so it holds every store back; a project record is
+// filed under the key of the one store it names, so it holds back only itself.
+// Releasing it is what is refused — the checkout it came from is exactly what
+// could not be read, and its store holds transcripts nothing reproduces.
+func TestASweepReportsAProjectRecordItCannotReadAndReleasesTheRest(t *testing.T) {
+	root := t.TempDir()
+	store := runstate.NewStore(root)
+	backend := &fakeBackend{}
+	controller := New(backend, store, &fakeSSHStore{}, testInference{})
+	gone := registerCheckout(t, store, t.TempDir(), "released")
+	if err := os.RemoveAll(gone.Root); err != nil {
+		t.Fatal(err)
+	}
+	long := time.Now().UTC().Add(-10 * Retention)
+	if err := store.MarkProjectMissing(gone.Key, long); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(root, "projects", "widget-00000000.json"),
+		[]byte(`{"version":99,"key":"widget-00000000","root":"/tmp/widget"}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	plan, err := controller.Plan(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.UnreadableProjects) != 1 ||
+		plan.UnreadableProjects[0].Key != "widget-00000000" ||
+		!strings.Contains(plan.UnreadableProjects[0].Reason, "version 99") {
+		t.Fatalf("unreadable = %#v", plan.UnreadableProjects)
+	}
+	if len(plan.ReclaimedProjects) != 1 || plan.ReclaimedProjects[0].Key != gone.Key {
+		t.Fatalf("a readable store was held back by a record beside it: %#v", plan)
+	}
+
+	done, err := controller.Collect(context.Background(), plan, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(done.UnreadableProjects) != 1 {
+		t.Fatalf("collection stopped reporting what it could not read: %#v", done)
+	}
+	for _, call := range backend.calls {
+		if len(call.args) > 0 && call.args[0] == "widget-00000000" {
+			t.Fatalf("an unreadable record's store was touched: %#v", call)
+		}
+	}
+	if _, unreadable, err := store.ListProjects(); err != nil {
+		t.Fatal(err)
+	} else if len(unreadable) != 1 {
+		t.Fatalf("an unreadable record was removed: %#v", unreadable)
 	}
 }
 

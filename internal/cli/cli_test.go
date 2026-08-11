@@ -809,6 +809,10 @@ func TestPrintCollectionSeparatesWhatWasDoneFromWhatWasKept(t *testing.T) {
 			Root:         "/Users/dev/gadget",
 			MissingSince: &missing,
 		}},
+		UnreadableProjects: []runstate.UnreadableProject{{
+			Key:    "sprocket-22222222",
+			Reason: "unsupported project record version 99",
+		}},
 	}
 	var done bytes.Buffer
 	printCollection(&done, plan, []string{"sha256:abc"}, false)
@@ -822,6 +826,9 @@ func TestPrintCollectionSeparatesWhatWasDoneFromWhatWasKept(t *testing.T) {
 		"Missing:",
 		`"/Users/dev/widget" (missing since 2026-07-24)`,
 		"move one back to keep its transcripts",
+		"Unreadable:",
+		"sprocket-22222222 (unsupported project record version 99)",
+		"their stores are left whole",
 		"Kept:",
 		"run-stopped (stopped with work that was never imported)",
 	} {

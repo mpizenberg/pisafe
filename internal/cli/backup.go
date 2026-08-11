@@ -59,7 +59,7 @@ func writeBackup(
 	if err != nil {
 		return err
 	}
-	recorded, err := store.ListProjects()
+	recorded, unreadable, err := store.ListProjects()
 	if err != nil {
 		return err
 	}
@@ -81,32 +81,24 @@ func writeBackup(
 		if err != nil {
 			return err
 		}
-		// A project's filesystem is mounted per VM boot, and archiving one that
-		// is not mounted finds no session directory and reports no transcripts.
-		// Nothing else here would fail, so the backup would claim to hold a
-		// store it had not read.
-		if err := vm.EnsureProjectStorage(ctx, project.Key); err != nil {
-			return err
-		}
-		refused, err := backupSessions(ctx, vm, directory, project.Key)
+		transcripts, err := backupProject(ctx, vm, directory, project.Key, record.Root, out)
 		if err != nil {
 			return err
 		}
-		transcripts, err := backup.Sessions(directory, project.Key)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(out, "%s: %d transcript(s)\n", record.Root, len(transcripts))
-		if refused > 0 {
-			fmt.Fprintf(
-				out,
-				"  %d file(s) in its session store are not named like transcripts "+
-					"and were left in the VM\n",
-				refused,
-			)
-		}
-		if len(transcripts) > 0 {
+		if transcripts > 0 {
 			held.Projects = append(held.Projects, project)
+		}
+	}
+	// A store whose record cannot be read is copied out like any other: the key
+	// its file is named by is all that reaching it takes, and its transcripts
+	// are the part nothing reproduces. It stays out of the manifest because a
+	// restore puts a store back under the checkout it belonged to, and which
+	// checkout that was is what could not be read.
+	for _, record := range unreadable {
+		if _, err := backupProject(
+			ctx, vm, directory, record.Key, record.Key, out,
+		); err != nil {
+			return err
 		}
 	}
 	held.CreatedAt = time.Now().UTC()
@@ -123,7 +115,56 @@ func writeBackup(
 		len(tools.Tools),
 		directory,
 	)
+	if len(unreadable) > 0 {
+		fmt.Fprintf(
+			out,
+			"%d store(s) have a record this version cannot read. Their transcripts "+
+				"are in\nthe backup under their key; a restore cannot put them "+
+				"back, because which\ncheckout each belongs to is what could not be "+
+				"read. pisafe project list names them.\n",
+			len(unreadable),
+		)
+	}
 	return nil
+}
+
+// backupProject copies one store's transcripts into the backup and reports how
+// many arrived. Only the key is needed to reach a store, which is what lets a
+// record this version cannot read keep its transcripts anyway; label is what
+// the user recognises the store by.
+func backupProject(
+	ctx context.Context,
+	vm lima.VM,
+	directory string,
+	key string,
+	label string,
+	out io.Writer,
+) (int, error) {
+	// A project's filesystem is mounted per VM boot, and archiving one that is
+	// not mounted finds no session directory and reports no transcripts. Nothing
+	// else here would fail, so the backup would claim to hold a store it had not
+	// read.
+	if err := vm.EnsureProjectStorage(ctx, key); err != nil {
+		return 0, err
+	}
+	refused, err := backupSessions(ctx, vm, directory, key)
+	if err != nil {
+		return 0, err
+	}
+	transcripts, err := backup.Sessions(directory, key)
+	if err != nil {
+		return 0, err
+	}
+	fmt.Fprintf(out, "%s: %d transcript(s)\n", label, len(transcripts))
+	if refused > 0 {
+		fmt.Fprintf(
+			out,
+			"  %d file(s) in its session store are not named like transcripts "+
+				"and were left in the VM\n",
+			refused,
+		)
+	}
+	return len(transcripts), nil
 }
 
 // backupSessions streams one project's session store into the backup. The

@@ -35,6 +35,12 @@ type GCPlan struct {
 	// ReclaimedProjects are stores whose checkout stayed gone for a whole
 	// window: cache, session store, and filesystem together.
 	ReclaimedProjects []runstate.ProjectRecord
+	// UnreadableProjects are project records this version cannot read.
+	// Collection reports them and acts on none of them: whether the checkout is
+	// gone is exactly what could not be read. They hold up nothing else, because
+	// a project record's key is the name of its own file — so unlike a run
+	// record that cannot be read, one of these leaves no other store in doubt.
+	UnreadableProjects []runstate.UnreadableProject
 }
 
 func (plan GCPlan) Empty() bool {
@@ -90,10 +96,11 @@ func (controller Controller) Plan(now time.Time) (GCPlan, error) {
 			}
 		}
 	}
-	projects, err := controller.store.ListProjects()
+	projects, unreadableProjects, err := controller.store.ListProjects()
 	if err != nil {
 		return GCPlan{}, err
 	}
+	plan.UnreadableProjects = unreadableProjects
 	for _, project := range projects {
 		if _, busy := inUse[project.Key]; busy || !checkoutIsGone(project.Root) {
 			continue
@@ -142,7 +149,11 @@ func (controller Controller) Collect(
 	plan GCPlan,
 	now time.Time,
 ) (GCPlan, error) {
-	done := GCPlan{Kept: plan.Kept, KeepImages: plan.KeepImages}
+	done := GCPlan{
+		Kept:               plan.Kept,
+		KeepImages:         plan.KeepImages,
+		UnreadableProjects: plan.UnreadableProjects,
+	}
 	var failures []error
 	for _, runID := range plan.Reclaimed {
 		if err := controller.release(ctx, runID, "collect"); err != nil {

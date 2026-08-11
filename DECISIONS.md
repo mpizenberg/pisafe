@@ -454,6 +454,26 @@ history holds them. New entries are appended in full.
   project removal — treats such a record as a reference it cannot resolve and
   waits instead. Reversing this means restoring a state where one stale file
   disables `list`, `gc`, and every project command at once.
+- A project record this version cannot read is reported and never acted on,
+  rather than discardable the way a run's is. The two are not symmetric:
+  discarding a superseded run record costs that run, which is the price
+  versioning-without-migration is allowed to charge, while a project store holds
+  session transcripts nothing reproduces. So `ListProjects` hands unreadable
+  records back beside the readable ones, `gc` neither stamps nor reclaims them,
+  and `backup` copies their transcripts out under the key its file is named by —
+  reaching a store takes only that key. They stay out of the backup manifest,
+  because a restore puts a store back under a checkout and which checkout it
+  came from is precisely what could not be read; the alternative, refusing the
+  whole backup, is the failure mode this whole rule exists to prevent. The
+  rejected simpler option was to skip them silently, which loses the one thing
+  in a store that has no second source.
+- A `.json` file in the projects directory whose name is not a valid project key
+  is not a record and is skipped, rather than reported as one that cannot be
+  read. Everything a caller may do with an unreadable record goes through its
+  key: report it, reach its filesystem, remove it. Reporting a name no store
+  could have been created under would promise a filesystem that is not behind
+  it. Run records differ deliberately — a run ID is what a user types, so a
+  badly-named file there is worth naming even though nothing can act on it.
 - A manifest records only what it cannot derive and something reads. The
   workspace path is `/work/<project>`, so it is computed from the project name —
   which is validated as an identifier, as every name the slug generator produces

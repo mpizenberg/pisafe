@@ -596,6 +596,16 @@ creating → active → stopped → imported → reclaimed
   it sits beside one. Because such a record names no project and no cache
   generation, anything concluding that nothing refers to a shared thing treats
   it as a reference it cannot resolve and waits.
+- What a project record cannot say is which checkout its store came from, and
+  that is the whole of what it exists to record — so an unreadable one is
+  reported and never acted on. It costs nothing beyond itself: the key its file
+  is named by is the name of one store, so no other store is in doubt because it
+  sits beside one, and reaching a store takes only that key. Its transcripts
+  still export, under the key, and outside the manifest a restore reads: putting
+  a store back means putting it back under a checkout, which is what could not
+  be read. Reclaiming it is the one thing refused outright, because a run's
+  superseded record costs that run while a project's would cost transcripts
+  nothing reproduces.
 - A VM that fails its boundary checks still hands work back, still lets go of
   it, still exports what nothing can refetch, and still lets the profile be
   emptied. `diff`, `cp`, and `apply` reach a run's workspace through a container

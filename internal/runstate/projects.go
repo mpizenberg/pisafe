@@ -77,29 +77,58 @@ func (store Store) RegisterProject(project runid.Project) error {
 	return safefile.Replace(path, append(content, '\n'), 0o600)
 }
 
-func (store Store) ListProjects() ([]ProjectRecord, error) {
+// UnreadableProject is a project record that is there and cannot be understood
+// — written by a version that is gone, or damaged. Only the key its file is
+// named by is known, and a key is what names a store, so that is enough to
+// report it and to reach the filesystem behind it.
+//
+// What such a record cannot say is which checkout it belongs to, and that is
+// the whole of what a project record exists to record. So it is never acted on:
+// unlike a run, whose superseded record costs that run alone, a project store
+// holds transcripts nothing reproduces.
+type UnreadableProject struct {
+	Key    string
+	Reason string
+}
+
+// ListProjects returns every project record, separating the ones this version
+// can read from the ones it cannot. A caller acting on where a checkout is may
+// ignore the second list; a caller about to decide what is worth keeping may
+// not, because an unreadable record still names a store full of transcripts.
+func (store Store) ListProjects() ([]ProjectRecord, []UnreadableProject, error) {
 	entries, err := os.ReadDir(store.projectRoot())
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("list project records: %w", err)
+		return nil, nil, fmt.Errorf("list project records: %w", err)
 	}
 	records := make([]ProjectRecord, 0, len(entries))
+	var unreadable []UnreadableProject
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
 			continue
 		}
 		key := entry.Name()[:len(entry.Name())-len(".json")]
+		// A file not named like a key names no store: nothing here created it,
+		// and no filesystem can be reached through it. Reporting it as a record
+		// that cannot be read would promise a store behind it that is not there.
+		if runid.Validate(key) != nil {
+			continue
+		}
 		record, err := store.getProject(key)
 		if err != nil {
-			// One unreadable record stops the listing, so it has to say which.
-			return nil, fmt.Errorf("project %q: %w", key, err)
+			unreadable = append(unreadable, UnreadableProject{
+				Key:    key,
+				Reason: err.Error(),
+			})
+			continue
 		}
 		records = append(records, record)
 	}
 	sort.Slice(records, func(i, j int) bool { return records[i].Key < records[j].Key })
-	return records, nil
+	sort.Slice(unreadable, func(i, j int) bool { return unreadable[i].Key < unreadable[j].Key })
+	return records, unreadable, nil
 }
 
 // HasProject reports whether a store is recorded under this key, without asking
