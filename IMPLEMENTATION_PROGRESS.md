@@ -86,6 +86,13 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   `ErrApplyNeedsReconciliation` rather than overwriting. Submodule refs are
   created first, so an interruption can leave commits reachable but never a
   branch whose gitlinks are not.
+- An `ImportApply` that fails rolls its own part-built journal back, so a
+  refusal past the first fetch leaves no incoming ref behind and pins no objects
+  of an apply that never happened. The bundles are fetched with a forced
+  refspec, which is what makes that independent of the cleanup running at all: a
+  ref left by an import that was killed is overwritten by the next one rather
+  than refusing it for a history that no longer fast-forwards it. A ref holding
+  a commit other than the one imported there is never deleted.
 - `ImportApply` also relates the two halves it verified separately: every
   submodule pointer the run's history moves, found by comparing the imported
   commit with the captured source commit, must name a commit the repository at

@@ -1127,6 +1127,16 @@ history holds them. New entries are appended in full.
   previous value and an untested branch is worse than an absent one. Submodule refs are committed before the superproject ref,
   since the reverse order could leave a superproject branch whose gitlinks name
   commits no ref keeps reachable.
+- The incoming ref is scratch, not a lock, so bundles are fetched into it with a
+  forced refspec. Left alone, a leftover from an import that was killed becomes
+  a precondition: the next fetch succeeds only while the new tip fast-forwards
+  the old one, so a run whose history was amended or reset is refused for a
+  reason unconnected to what is wrong. Cleaning up on failure — which
+  `ImportApply` now also does, by rolling back its part-built journal — cannot
+  by itself establish this, because no cleanup runs after a crash or a kill.
+  Nothing is given up: the ref is named by the run, written by nothing else, and
+  a recorded journal is always finished rather than redone, so no forced fetch
+  can land on a ref that is keeping a pending apply's objects alive.
 - Apply stops an active run before capturing it, refuses a second apply, and
   captures in a throwaway `--network=none` container over the run's workspace
   rather than exec-ing into the live run container. It therefore works whether

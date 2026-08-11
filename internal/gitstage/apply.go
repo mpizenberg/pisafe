@@ -321,13 +321,18 @@ func createIncrementalBundle(
 // temporary refs before anything user-visible changes, and returns the journal
 // that CommitApply then executes. The transferred bundles are read from
 // packageDir under the names the run was told to use.
+//
+// An import that fails takes its temporary refs with it, so a refusal past the
+// first fetch — a branch already taken, an unresolvable gitlink — leaves the
+// repository as it found it and does not pin the objects of an apply that never
+// happened.
 func ImportApply(
 	ctx context.Context,
 	snapshot Snapshot,
 	prepared PreparedApply,
 	packageDir string,
 	choice BaselineChoice,
-) (PlannedApply, error) {
+) (planned PlannedApply, returnErr error) {
 	if runid.Validate(snapshot.RunID) != nil || prepared.RunID != snapshot.RunID {
 		return PlannedApply{}, fmt.Errorf("apply package does not match run")
 	}
@@ -367,6 +372,15 @@ func ImportApply(
 	journal := ApplyJournal{RunID: snapshot.RunID}
 	targetRef := journal.Ref()
 	temporaryRef := journal.TemporaryRef()
+	// A journal built only part-way is undone exactly as a committed one is:
+	// nothing user-visible has moved yet, so every step rolls back to discarding
+	// the temporary ref it imported into. The context is kept alive because a
+	// cancelled apply is when there is most to clean up.
+	defer func() {
+		if returnErr != nil {
+			_ = RollbackApply(context.WithoutCancel(ctx), journal)
+		}
+	}()
 	result := ApplyResult{
 		Branch:      strings.TrimPrefix(targetRef, "refs/heads/"),
 		Tip:         prepared.Tip,
@@ -473,13 +487,18 @@ func importBundle(
 	if err := gitRun(ctx, repository, nil, nil, "bundle", "verify", bundlePath); err != nil {
 		return fmt.Errorf("verify apply bundle: %w", err)
 	}
+	// The refspec is forced because the destination is pisafe's own scratch,
+	// named by the run and written by nothing else. An import that died where no
+	// cleanup could run — a crash, a kill — must not turn its leftover into a
+	// precondition, refusing a later apply for a history that was rewritten
+	// rather than for anything wrong with it.
 	if err := gitRun(
 		ctx,
 		repository,
 		nil,
 		nil,
 		"fetch", "--quiet", "--no-write-fetch-head",
-		bundlePath, bundleRef+":"+temporaryRef,
+		bundlePath, "+"+bundleRef+":"+temporaryRef,
 	); err != nil {
 		return fmt.Errorf("import apply bundle: %w", err)
 	}
@@ -488,6 +507,10 @@ func importBundle(
 		return fmt.Errorf("resolve imported tip: %w", err)
 	}
 	if imported != expectedTip {
+		// Nothing downstream records this repository, so the ref holding what the
+		// bundle actually carried goes with the refusal rather than keeping those
+		// objects reachable.
+		discardTemporaryRef(ctx, repository, temporaryRef, imported)
 		return fmt.Errorf("imported tip mismatch: wanted %s, got %s", expectedTip, imported)
 	}
 	return nil
@@ -625,22 +648,17 @@ func CommitApply(ctx context.Context, journal ApplyJournal) error {
 				return err
 			}
 		}
-		discardTemporaryRef(ctx, journal, step)
+		discardTemporaryRef(ctx, step.Repository, journal.TemporaryRef(), step.Commit)
 	}
 	return nil
 }
 
-// discardTemporaryRef drops the ref a repository's bundle was imported into. A
-// repository that needed no bundle has none, and one holding anything but the
-// imported commit is not ours to delete; both are left as they are.
-func discardTemporaryRef(ctx context.Context, journal ApplyJournal, step ApplyStep) {
-	_ = gitRun(
-		ctx,
-		step.Repository,
-		nil,
-		nil,
-		"update-ref", "-d", journal.TemporaryRef(), step.Commit,
-	)
+// discardTemporaryRef drops the ref a bundle was imported into, and only while
+// it still holds the commit that was imported there. A repository that needed
+// no bundle has no such ref, and one holding anything else was put there by
+// something other than this import; both are left as they are.
+func discardTemporaryRef(ctx context.Context, repository, ref, commit string) {
+	_ = gitRun(ctx, repository, nil, nil, "update-ref", "-d", ref, commit)
 }
 
 // RollbackApply removes the refs a partial CommitApply created. A ref that no
@@ -650,7 +668,7 @@ func RollbackApply(ctx context.Context, journal ApplyJournal) error {
 		return err
 	}
 	for _, step := range journal.Steps {
-		discardTemporaryRef(ctx, journal, step)
+		discardTemporaryRef(ctx, step.Repository, journal.TemporaryRef(), step.Commit)
 		done, err := stepIsComplete(ctx, journal, step)
 		if err != nil || !done {
 			continue

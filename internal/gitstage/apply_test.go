@@ -365,6 +365,81 @@ func TestPreparedApplyNamesOnlyTheBundlesItProduced(t *testing.T) {
 	}
 }
 
+// TestAnImportThatFailsPartWayKeepsNoTemporaryRef matters because the ref an
+// import fetches into is created before anything checks whether the branch can
+// land. A submodule imported first and a superproject refused afterwards is the
+// ordinary shape of that, and what it must not do is leave the submodule
+// pinning the commits of an apply that never happened.
+func TestAnImportThatFailsPartWayKeepsNoTemporaryRef(t *testing.T) {
+	ctx := context.Background()
+	source, workspace, snapshot := stageWithSubmodule(t, "abandoned-import-run")
+	submoduleWorkspace := filepath.Join(workspace, "dependency")
+	mustWrite(t, filepath.Join(submoduleWorkspace, "tracked.txt"), "submodule work\n")
+	runGit(t, submoduleWorkspace, "add", "tracked.txt")
+	runGit(t, submoduleWorkspace, "commit", "-qm", "submodule change")
+	mustWrite(t, filepath.Join(workspace, "tracked.txt"), "superproject work\n")
+
+	// The superproject's branch is taken, so its import is refused after the
+	// submodule beside it has already been fetched.
+	runGit(t, source, "update-ref", "refs/heads/pisafe/abandoned-import-run", snapshot.SourceHead)
+
+	if _, err := Apply(ctx, snapshot, workspace, KeepBaseline); !errors.Is(err, ErrBranchExists) {
+		t.Fatalf("err = %v, want ErrBranchExists", err)
+	}
+	for _, repository := range []string{source, filepath.Join(source, "dependency")} {
+		if _, err := gitOutput(
+			ctx,
+			repository,
+			"rev-parse", "--verify", "refs/pisafe/incoming/abandoned-import-run",
+		); err == nil {
+			t.Errorf("%s kept the temporary ref of an import that failed", repository)
+		}
+	}
+	if _, err := gitOutput(
+		ctx,
+		filepath.Join(source, "dependency"),
+		"rev-parse", "--verify", "refs/heads/pisafe/abandoned-import-run",
+	); err == nil {
+		t.Error("a submodule branch survived an import the superproject refused")
+	}
+}
+
+// TestAnImportOverwritesALeftoverTemporaryRef is the case cleanup cannot
+// cover: an import killed between the fetch and anything else leaves its
+// scratch behind. That ref must never become a precondition — a run whose
+// history was amended no longer fast-forwards it, and being refused for that
+// says nothing about what is actually wrong.
+func TestAnImportOverwritesALeftoverTemporaryRef(t *testing.T) {
+	ctx := context.Background()
+	source, workspace, snapshot := stageWithSubmodule(t, "leftover-import-run")
+	mustWrite(t, filepath.Join(workspace, "tracked.txt"), "superproject work\n")
+
+	// An unrelated commit stands in for the tip a killed import left: nothing
+	// the run is about to hand back descends from it.
+	tree := runGit(t, source, "hash-object", "-t", "tree", "/dev/null")
+	stranded := runGit(t, source, "commit-tree", tree, "-m", "stranded")
+	runGit(t, source, "update-ref", "refs/pisafe/incoming/leftover-import-run", stranded)
+
+	result, err := Apply(ctx, snapshot, workspace, KeepBaseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := runGit(
+		t,
+		source,
+		"rev-parse", "refs/heads/pisafe/leftover-import-run",
+	); got != result.Tip {
+		t.Fatalf("branch = %s, want %s", got, result.Tip)
+	}
+	if _, err := gitOutput(
+		ctx,
+		source,
+		"rev-parse", "--verify", "refs/pisafe/incoming/leftover-import-run",
+	); err == nil {
+		t.Error("the temporary ref outlived the apply that overwrote it")
+	}
+}
+
 func planApply(t *testing.T, snapshot Snapshot, workspace string) PlannedApply {
 	t.Helper()
 	packageDir := t.TempDir()
