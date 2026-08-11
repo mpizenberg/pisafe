@@ -192,10 +192,11 @@ func (excluded ExcludedInputs) expand(
 	return matches, covered, nil
 }
 
-// walkInput lists what one selectable path contributes: itself when it is not a
-// directory, every file beneath it when it is. Nothing is followed through a
-// symlink, and a path that is not there contributes nothing, which leaves a
-// request naming it unselectable rather than failing over a missing file.
+// walkInput lists what one path contributes: itself when it is not a directory,
+// every file beneath it when it is. Both directions use it, so its errors name
+// no direction. Nothing is followed through a symlink, and a path that is not
+// there contributes nothing, which leaves a request naming it unselectable
+// rather than failing over a missing file.
 func walkInput(root, name string) ([]string, error) {
 	base := filepath.Join(root, filepath.FromSlash(name))
 	info, err := os.Lstat(base)
@@ -203,7 +204,7 @@ func walkInput(root, name string) ([]string, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("inspect input %q: %w", name, err)
+		return nil, fmt.Errorf("inspect %q: %w", name, err)
 	}
 	if !info.IsDir() {
 		return []string{name}, nil
@@ -211,7 +212,7 @@ func walkInput(root, name string) ([]string, error) {
 	files := []string{}
 	walkErr := filepath.WalkDir(base, func(current string, entry fs.DirEntry, err error) error {
 		if err != nil {
-			return fmt.Errorf("read input %q: %w", name, err)
+			return fmt.Errorf("read %q: %w", name, err)
 		}
 		relative, err := filepath.Rel(root, current)
 		if err != nil {
@@ -220,7 +221,7 @@ func walkInput(root, name string) ([]string, error) {
 		relative = filepath.ToSlash(relative)
 		if entry.Name() == ".git" {
 			return fmt.Errorf(
-				"input %q contains the Git repository %q; name paths inside it instead",
+				"%q contains the Git repository %q, which cannot cross as loose files",
 				name,
 				path.Dir(relative),
 			)
@@ -303,7 +304,7 @@ func describeFiles(root string, names []string) ([]SelectedInput, error) {
 		absolute := filepath.Join(root, filepath.FromSlash(name))
 		info, err := os.Lstat(absolute)
 		if err != nil {
-			return nil, fmt.Errorf("inspect input %q: %w", name, err)
+			return nil, fmt.Errorf("inspect %q: %w", name, err)
 		}
 		switch {
 		case info.Mode()&fs.ModeSymlink != 0:

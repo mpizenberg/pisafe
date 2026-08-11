@@ -119,8 +119,11 @@ func TestCopyBackFillsAnEmptyIncludedDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := os.MkdirAll(filepath.Join(workspace, "plans"), 0o700); err != nil {
-		t.Fatal(err)
+	// The empty root has to exist in the run for the agent to write into it,
+	// because Git carries no directory and the archive carried no file.
+	info, err := os.Lstat(filepath.Join(workspace, "plans"))
+	if err != nil || !info.IsDir() {
+		t.Fatalf("empty included directory is missing from the run: %v", err)
 	}
 	mustWrite(t, filepath.Join(workspace, "plans", "2026-08-11-task.md"), "planned in the run\n")
 

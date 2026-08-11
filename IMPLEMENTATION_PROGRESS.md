@@ -59,7 +59,9 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   reports as excluded but that holds no files is a legitimate root, which is what
   makes `--include plans/` work on an empty directory. A path no listing covers
   and a path that is merely absent give different refusals. Each carried-in file
-  records a SHA-256, which is what the copy back compares against.
+  records a SHA-256, which is what the copy back compares against. A root that
+  carried no files is created as a directory in the run: neither Git nor the
+  archive carries an empty one, and the agent needs somewhere to write.
 - What a run leaves behind is listed once per run, with a directory nobody
   tracks standing for what is under it, and a request naming such a directory is
   expanded from the filesystem so the credential check and the per-file limits
@@ -124,7 +126,9 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   version. `--include-force` takes the run's version instead. It runs after the
   refs move, so a refusal leaves the branch imported and the work pending in the
   manifest; `pisafe apply` on an imported run with pending work finishes only the
-  copy.
+  copy. All-or-nothing is the conflict decision, taken for every path before any
+  is written; a copy interrupted partway is recovered by retrying, since each
+  file is replaced whole and one already holding the run's content is skipped.
 - A run whose history starts with a baseline commit is asked about once, before
   anything is captured: import it with everything after it, or replay only the
   run's own commits onto the captured HEAD. The replay is a `git rebase --onto`

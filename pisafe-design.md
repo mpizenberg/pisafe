@@ -232,8 +232,10 @@ arrives in the run untracked, exactly as it sits on the Mac, so the agent cannot
 commit it by accident and the run's own history stays independent of it. What
 `--include` records is the **path the user named**, not the files under it at
 that moment: a directory that is empty at run start is still a root, and is how a
-run collects work the user wants back without committing it. Naming a path that
-no listing covers and naming one that is simply absent are different refusals.
+run collects work the user wants back without committing it. Such a root is
+created in the run, because neither Git nor the archive carries an empty
+directory and the agent has to have somewhere to write. Naming a path that no
+listing covers and naming one that is simply absent are different refusals.
 
 ### Submodules
 
@@ -277,6 +279,12 @@ The refs and the files are separate steps, so a refused copy leaves the branch
 imported and the work recoverable: the run's returned files are kept beside the
 run's manifest, and `pisafe apply` on an already-imported run finishes the copy
 and nothing else, with no VM involved.
+
+All-or-nothing describes the conflict decision, which is made for every path
+before any is written. A copy that fails partway — a full disk, a path whose
+parent is not a directory — is recovered by retrying rather than by unwinding:
+each file is replaced whole, and a path already holding what the run holds is
+skipped on the next pass, so repeating the copy converges instead of redoing it.
 
 The branch travels as an incremental bundle containing only commits new since
 the captured HEAD, fetched into a temporary ref and moved into place only after

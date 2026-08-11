@@ -477,7 +477,7 @@ func Materialize(ctx context.Context, prepared PreparedStage, workspace string) 
 
 	// Inputs land once the run's history is settled, because they are not part
 	// of it. They sit beside it as files, exactly as they do on the host.
-	if err := restoreInputs(prepared, workspace); err != nil {
+	if err := restoreIncluded(prepared, workspace); err != nil {
 		return Snapshot{}, err
 	}
 
@@ -552,6 +552,40 @@ func FinalizeTracked(ctx context.Context, workspace string) (commitID string, un
 		return "", nil, fmt.Errorf("resolve final commit: %w", err)
 	}
 	return commitID, untracked, nil
+}
+
+// restoreIncluded puts the selected paths in place: the files the archive
+// carries, and a directory for every root that arrived holding none. Naming a
+// path rather than a file list is what lets a run collect work under an empty
+// directory, which needs that directory to be there to write into.
+func restoreIncluded(prepared PreparedStage, workspace string) error {
+	if err := restoreInputs(prepared, workspace); err != nil {
+		return err
+	}
+	for _, root := range prepared.Snapshot.IncludeRoots {
+		if err := safePath("include root", root); err != nil {
+			return err
+		}
+		if rootHasFiles(root, prepared.Snapshot.Inputs) {
+			continue
+		}
+		if err := os.MkdirAll(
+			filepath.Join(workspace, filepath.FromSlash(root)),
+			0o700,
+		); err != nil {
+			return fmt.Errorf("create included directory %q: %w", root, err)
+		}
+	}
+	return nil
+}
+
+func rootHasFiles(root string, inputs []SelectedInput) bool {
+	for _, input := range inputs {
+		if underAnyRoot(input.Path, []string{root}) {
+			return true
+		}
+	}
+	return false
 }
 
 // restoreInputs unpacks the selected inputs into the workspace and leaves them
