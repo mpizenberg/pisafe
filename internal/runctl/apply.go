@@ -42,7 +42,7 @@ func (controller Controller) Apply(
 	case runstate.StateImported:
 		// The history is already in. A run whose included work was held back
 		// still has something left to do, and it is all that is left.
-		if manifest.Included == nil {
+		if manifest.Returned == nil {
 			return runstate.Manifest{}, gitstage.ApplyResult{}, fmt.Errorf(
 				"run %q is already imported as %s",
 				runID,
@@ -50,7 +50,7 @@ func (controller Controller) Apply(
 			)
 		}
 		result := gitstage.ApplyResult{Branch: manifest.ImportedBranch}
-		manifest, result.Included, err = controller.writeIncluded(manifest, force)
+		manifest, result.Included, err = controller.writeReturned(manifest, force)
 		return manifest, result, err
 	default:
 		return runstate.Manifest{}, gitstage.ApplyResult{}, fmt.Errorf(
@@ -110,14 +110,14 @@ func (controller Controller) finishApply(
 			controller.recordLifecycleError(runID, "record apply", err)
 	}
 	result := planned.Result
-	manifest, result.Included, err = controller.writeIncluded(manifest, force)
+	manifest, result.Included, err = controller.writeReturned(manifest, force)
 	return manifest, result, err
 }
 
-// keepIncludedArchive moves the fetched outputs archive out of the transfer
+// keepReturnedArchive moves the fetched outputs archive out of the transfer
 // directory and into the run's own state, where it waits for the copy.
-func (controller Controller) keepIncludedArchive(runID, packageDir string) error {
-	target, err := controller.store.IncludedArchivePath(runID)
+func (controller Controller) keepReturnedArchive(runID, packageDir string) error {
+	target, err := controller.store.ReturnedArchivePath(runID)
 	if err != nil {
 		return err
 	}
@@ -131,29 +131,29 @@ func (controller Controller) keepIncludedArchive(runID, packageDir string) error
 	return nil
 }
 
-// writeIncluded copies a run's returned work into the source working tree and
+// writeReturned copies a run's returned work into the source working tree and
 // forgets it once it is there. A refusal leaves both the archive and the record
 // in place: the branch is imported either way, and the work is not lost.
-func (controller Controller) writeIncluded(
+func (controller Controller) writeReturned(
 	manifest runstate.Manifest,
 	force bool,
 ) (runstate.Manifest, gitstage.IncludedResult, error) {
-	if manifest.Included == nil {
+	if manifest.Returned == nil {
 		return manifest, gitstage.IncludedResult{}, nil
 	}
-	archive, err := controller.store.IncludedArchivePath(manifest.RunID)
+	archive, err := controller.store.ReturnedArchivePath(manifest.RunID)
 	if err != nil {
 		return manifest, gitstage.IncludedResult{}, err
 	}
-	result, err := gitstage.CopyBack(manifest.Snapshot, manifest.Included, archive, force)
+	result, err := gitstage.CopyBack(manifest.Snapshot, manifest.Returned, archive, force)
 	if err != nil {
 		return manifest, result, err
 	}
-	manifest, err = controller.store.ClearIncluded(manifest.RunID)
+	manifest, err = controller.store.ClearReturned(manifest.RunID)
 	if err != nil {
 		return manifest, result, controller.recordLifecycleError(
 			manifest.RunID,
-			"record included work",
+			"record returned work",
 			err,
 		)
 	}
@@ -218,7 +218,7 @@ func (controller Controller) importRun(
 	// The returned work outlives this package: it is written after the refs
 	// move, and a refusal must be completable when the VM is long gone.
 	if len(planned.Outputs) != 0 {
-		if err := controller.keepIncludedArchive(manifest.RunID, packageDir); err != nil {
+		if err := controller.keepReturnedArchive(manifest.RunID, packageDir); err != nil {
 			cleanupContext, cancelCleanup := lifecycleCleanupContext(ctx)
 			defer cancelCleanup()
 			return gitstage.PlannedApply{},

@@ -77,10 +77,10 @@ type Manifest struct {
 	// may not all have moved yet. It exists only between BeginApply and
 	// CompleteApply, and is what makes an interrupted apply replayable.
 	Apply *gitstage.PlannedApply `json:"apply,omitempty"`
-	// Included is the work a run handed back under the paths the user chose
+	// Returned is the work a run handed back under the paths the user chose
 	// that has not reached the working tree yet. It outlives the ref import, so
 	// a refused copy-back is completed later rather than lost.
-	Included             []gitstage.SelectedInput `json:"included,omitempty"`
+	Returned             []gitstage.SelectedInput `json:"returned,omitempty"`
 	ActiveLimitSeconds   int64                    `json:"active_limit_seconds"`
 	ActiveElapsedSeconds int64                    `json:"active_elapsed_seconds"`
 	ActiveStartedAt      *time.Time               `json:"active_started_at,omitempty"`
@@ -333,12 +333,12 @@ func (store Store) Forget(runID string) error {
 	if manifest.State == StateActive {
 		return fmt.Errorf("run %q is active and must be stopped first", runID)
 	}
-	archive, err := store.IncludedArchivePath(runID)
+	archive, err := store.ReturnedArchivePath(runID)
 	if err != nil {
 		return err
 	}
 	if err := os.Remove(archive); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove included work archive: %w", err)
+		return fmt.Errorf("remove returned work archive: %w", err)
 	}
 	path, err := store.manifestPath(runID)
 	if err != nil {
@@ -356,7 +356,7 @@ func (store Store) Forget(runID string) error {
 func (store Store) BeginApply(
 	runID string,
 	planned gitstage.PlannedApply,
-	included []gitstage.SelectedInput,
+	returned []gitstage.SelectedInput,
 ) (Manifest, error) {
 	manifest, err := store.Get(runID)
 	if err != nil {
@@ -372,40 +372,40 @@ func (store Store) BeginApply(
 		return Manifest{}, err
 	}
 	manifest.Apply = &planned
-	manifest.Included = included
+	manifest.Returned = returned
 	manifest.LastError = ""
 	manifest.UpdatedAt = store.now().UTC()
 	return store.replace(manifest)
 }
 
-// ClearIncluded drops a run's pending included work once it has been written to
-// the working tree, archive and record together.
-func (store Store) ClearIncluded(runID string) (Manifest, error) {
+// ClearReturned drops a run's pending returned work once it has been written
+// to the working tree, archive and record together.
+func (store Store) ClearReturned(runID string) (Manifest, error) {
 	manifest, err := store.Get(runID)
 	if err != nil {
 		return Manifest{}, err
 	}
-	path, err := store.IncludedArchivePath(runID)
+	path, err := store.ReturnedArchivePath(runID)
 	if err != nil {
 		return Manifest{}, err
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return Manifest{}, fmt.Errorf("remove included work archive: %w", err)
+		return Manifest{}, fmt.Errorf("remove returned work archive: %w", err)
 	}
-	manifest.Included = nil
+	manifest.Returned = nil
 	manifest.UpdatedAt = store.now().UTC()
 	return store.replace(manifest)
 }
 
-// IncludedArchivePath is where a run's returned work waits between the ref
+// ReturnedArchivePath is where a run's returned work waits between the ref
 // import and its copy into the working tree. It lives beside the manifest
 // rather than in the run, so completing a refused copy-back never needs the VM
 // again.
-func (store Store) IncludedArchivePath(runID string) (string, error) {
+func (store Store) ReturnedArchivePath(runID string) (string, error) {
 	if err := runid.Validate(runID); err != nil {
 		return "", err
 	}
-	return filepath.Join(store.root, runID+".outputs.tar"), nil
+	return filepath.Join(store.root, runID+".returned.tar"), nil
 }
 
 // CompleteApply marks a run imported. Callers reach it only once every ref in

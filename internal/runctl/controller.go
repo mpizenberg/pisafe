@@ -63,8 +63,8 @@ type StateStore interface {
 	Forget(string) error
 	BeginApply(string, gitstage.PlannedApply, []gitstage.SelectedInput) (runstate.Manifest, error)
 	CompleteApply(string) (runstate.Manifest, error)
-	ClearIncluded(string) (runstate.Manifest, error)
-	IncludedArchivePath(string) (string, error)
+	ClearReturned(string) (runstate.Manifest, error)
+	ReturnedArchivePath(string) (string, error)
 	RecordError(string, error) (runstate.Manifest, error)
 	RegisterProject(runid.Project) error
 	HasProject(string) (bool, error)
