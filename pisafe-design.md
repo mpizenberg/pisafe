@@ -297,7 +297,10 @@ skipped on the next pass, so repeating the copy converges instead of redoing it.
 
 The branch travels as an incremental bundle containing only commits new since
 the captured HEAD, fetched into a temporary ref and moved into place only after
-verification, so an interrupted transfer cannot leave a partial branch.
+verification, so an interrupted transfer cannot leave a partial branch. That
+temporary ref is scratch and never a gate: an import that is refused takes it
+with it, and one left behind by an import that was killed is overwritten rather
+than allowed to refuse the next attempt for a reason of its own.
 
 Because superproject and submodule refs live in separate repositories with no
 cross-repository transaction, `apply` is journaled and idempotent: import and
