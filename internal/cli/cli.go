@@ -161,7 +161,8 @@ Usage:
                    whether to import that commit too or replay only the run's
                    own commits without it.
   pisafe discard RUN --confirm RUN
-                   Permanently delete one exact run workspace
+                   Permanently delete one exact run workspace. Works from any
+                   state, including a record too old for this version to read.
   pisafe project list
                    Show every project store pisafe holds: where its checkout
                    is, how many runs still belong to it, and whether the
@@ -267,7 +268,9 @@ Usage:
   pisafe list      Show every run's record against what the VM has. A run
                    recorded active with no container is named as one, because
                    the record alone cannot tell a spent budget from a VM that
-                   went down.
+                   went down. A record too old for this version to read is
+                   listed as unreadable rather than hidden; it still holds a
+                   workspace, and discarding it is what gives that space back.
   pisafe help      Show this help
 
 A command that takes RUN finds it without being told when the checkout you are

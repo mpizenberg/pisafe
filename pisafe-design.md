@@ -580,6 +580,13 @@ creating → active → stopped → imported → reclaimed
   and a restore run twice changes nothing.
 - Never reclaim a run with unimported commits merely because it is old. Warn and
   require explicit discard.
+- A record pisafe cannot read must still be nameable and removable. Records are
+  versioned rather than migrated, so a superseded one has to cost its own run
+  and nothing else: it is listed with the reason it cannot be read, `discard`
+  releases everything it holds, and no other record becomes unreachable because
+  it sits beside one. Because such a record names no project and no cache
+  generation, anything concluding that nothing refers to a shared thing treats
+  it as a reference it cannot resolve and waits.
 - A VM that fails its boundary checks still hands work back, still lets go of
   it, and still exports what nothing can refetch. `diff`, `cp`, and `apply`
   reach a run's workspace through a container with no network, no home, and

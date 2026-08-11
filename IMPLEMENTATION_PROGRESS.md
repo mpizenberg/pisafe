@@ -185,7 +185,15 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   image is never a candidate, and an image still in use is reported rather than
   forced away. A plan that cannot be built stops collection entirely.
 - `pisafe discard RUN --confirm RUN` reclaims from any state, removing the
-  record with the resources. Failed `creating` records use the same path.
+  record with the resources. Failed `creating` records use the same path, and so
+  does a record no version here can decode: reclamation is keyed by the run ID
+  alone, and the record is read only to decide whether to stop the run first.
+- A record written by a superseded manifest version is listed as `unreadable`
+  with the reason and the discard that releases its workspace, rather than
+  ending the listing. Commands that conclude nothing refers to something —
+  project store reclamation, `project reset`, `project remove`, cache
+  eviction — treat one as a reference they cannot resolve and hold off until it
+  is discarded, because it names no project key and no cache generation.
 
 ### Host network and Lima backend
 
@@ -241,7 +249,8 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
 - An instance provisioned before the state disk existed keeps `/var/lib/pisafe`
   on the disk being deleted. `Manager.HasStateDisk` detects it, the plan says so,
   and the rebuild is refused until `--discard-state`, which also discards the
-  run records that would otherwise name storage that is gone.
+  run records that would otherwise name storage that is gone — including any
+  this version cannot read, which the same rebuild takes the storage of.
 - Any state Lima calls neither running nor stopped is `StatusBroken`: the
   instance exists and can be replaced, but nothing may be concluded about what
   runs inside it. Starting one is refused, naming the rebuild, and `pisafe list`
@@ -479,7 +488,9 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   into a dot-entry staging directory inside the namespace, stamps, and renames
   into place. A key that already has a generation, or an empty upper, publishes
   nothing. Eviction keeps the newest generation per namespace and spares any
-  generation a recorded run may still mount.
+  generation a recorded run may still mount; while a record cannot be read,
+  which generations are held is unknowable and nothing is evicted at all,
+  though publishing still happens.
 - Sessions ride the same overlay mechanism at `/sessions`, named by
   `PI_CODING_AGENT_SESSION_DIR`, and are written back differently: promotion
   adds the run's finished transcripts to the project store by rename from a
@@ -555,7 +566,9 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
 - `pisafe project list` reports every store pisafe holds by the checkout path
   its record names — resolved, so the printed form is the one that hashes to the
   key — with how many run records still belong to it and whether the checkout is
-  still there. It reads records only and starts nothing.
+  still there. It reads records only and starts nothing. While any run record
+  cannot be read, no store is reported idle: the count it would be idle by is
+  the count that could not be taken.
 - `pisafe project reset [PATH]` empties every cache namespace of one project and
   leaves the session store alone; `pisafe project drop PATH --confirm PATH`
   takes the whole store, transcripts included; `pisafe project rebind OLD-PATH`
@@ -563,7 +576,8 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
   by copying the transcripts into a fresh store — additively, skipping any name
   the destination holds — and leaving the caches behind. A rebind refuses a
   destination that already has a store, and both drop and rebind refuse while
-  any run record names the project.
+  any run record names the project, or while one exists that cannot be read and
+  so might.
 - `pisafe profile reset --confirm` empties the extension, tool, and pin
   directories rather than removing what the record names, so a tree left by an
   install that failed after fetching goes with everything else.
@@ -633,7 +647,9 @@ quota-backed VM storage. **Do not add a local-workspace fallback.**
 - `pisafe list` renders each record against that same `podman ps`: a run
   recorded active with no container is labelled as one, `(limit reached)` is
   printed only for a container the VM still has, and a VM that could not be
-  asked prints neither label and says so.
+  asked prints neither label and says so. A record this version cannot decode
+  is listed too, as `unreadable`, followed by the reason and the discard that
+  releases its workspace; it is the only thing naming that storage.
 - `pisafe forward [RUN] [LOCAL:]PORT...` reaches a server a run is hosting. Each
   port becomes an `ssh -L` listener on the Mac's loopback carried to the same
   address inside the container, so nothing binds in the VM and nothing outside
@@ -744,9 +760,14 @@ with a fake VM boundary:
   it reclaimed with container, storage, stage, SSH key, and record all gone,
   after which every command refuses it as unknown; an unimported run only
   reported whatever its age, keeping its image and seeing no backend call; a
-  discarded run leaving a later sweep nothing. The store's own test covers
-  removal directly: a reclaimed record is deleted, disappears from listings,
-  cannot be deleted twice, and an active run's record is refused. Image pruning
+  discarded run leaving a later sweep nothing; and a project store whose window
+  has run out held back while any record cannot be read, that record reported
+  with its reason and never acted on. The store's own test covers removal
+  directly: a reclaimed record is deleted, disappears from listings, cannot be
+  deleted twice, and one written by a superseded version is removed without
+  being understood. Discard's own test covers an undecodable record reaching
+  the container, storage, stage, and SSH key, and an active run still being
+  stopped before any of it. Image pruning
   covers the label filter, Podman's bare hex ID, an unlabelled image surviving,
   the current recipe recognized without a lookup, a missing recipe digest
   refused, and an in-use image reported without stopping the sweep.
@@ -1276,6 +1297,15 @@ These explain why parts of the code look the way they do:
 
 ## Known gaps
 
+- Project records get only half of "a record pisafe cannot read must still be
+  nameable and removable". `ForgetProject` already removes one by key without
+  decoding it, and `project drop PATH` derives that key from the checkout, so a
+  record nothing can read is still removable. But `ListProjects` still returns
+  on the first record it cannot read, which would take `project list`, `gc`, and
+  `backup` with it — `backup` being the one that matters, since silently
+  skipping a store loses transcripts nothing else holds. The same treatment run
+  records got closes it; the version has never moved off 1, so nothing has hit
+  it yet.
 - `pisafe diff` lists untracked paths with `--exclude-standard`, so work under an
   included root that the repository ignores is invisible while the run is going.
   It arrives at apply, but a user watching a run cannot see the plan documents

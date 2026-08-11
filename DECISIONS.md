@@ -423,12 +423,23 @@ history holds them. New entries are appended in full.
   atomically require the SSH connection record, version 3 made active-budget
   accounting and deadlines durable, version 4 bound the inference capability to
   the active state, version 5 required the project key a run's shared storage is
-  reached through, and version 6 recorded the cache generation the run resolved
-  to. Each time, no released records existed, and a compatibility path would
-  have weakened the invariant being added or inferred untrustworthy history —
-  and for versions 5 and 6 the VM recreation that per-project storage forced
-  had destroyed the old runs' storage regardless. Any future change after real
-  users exist needs an explicit migration.
+  reached through, version 6 recorded the cache generation the run resolved to,
+  and version 7 recorded a size and digest per included file rather than a bare
+  path. A compatibility path would each time have weakened the invariant being
+  added or inferred untrustworthy history; version 7 could not have one at all,
+  because the digests are taken from host files at staging time and a run
+  already staged has none to compute them from.
+- What a superseded record costs is bounded by staying nameable, not by a
+  migration. A record this version cannot read is listed as unreadable with the
+  reason, and `discard` releases everything it holds, because reclamation is
+  keyed by the run ID the filename already carries. This is what makes
+  versioning-without-migration honest now that released records exist: the
+  version bump costs the run, never the storage behind it, and never the
+  commands that would otherwise enumerate past it. Anything that concludes
+  nothing refers to a thing — project reclamation, cache reset and eviction,
+  project removal — treats such a record as a reference it cannot resolve and
+  waits instead. Reversing this means restoring a state where one stale file
+  disables `list`, `gc`, and every project command at once.
 - A manifest records only what it cannot derive and something reads. The
   workspace path is `/work/<project>`, so it is computed from the project name —
   which is validated as an identifier, as every name the slug generator produces
