@@ -678,7 +678,8 @@ and errors, and fail-closed behavior when the broker or upstream is down.
 12. Cleanup never deletes an unimported run without explicit confirmation.
 13. A repository with submodules stages, runs, and applies with superproject and
     submodule commits preserved and reachable via per-submodule `pisafe/<run>`
-    refs.
+    refs, and every submodule pointer the imported branch records resolves in
+    the repository it names.
 14. `pisafe cp` refuses traversal paths, escaping symlinks, and special files,
     enforces size and count limits, and never overwrites without confirmation.
     Copying into a run lands only inside its workspace, under the name the Mac
