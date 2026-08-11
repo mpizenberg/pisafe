@@ -51,7 +51,7 @@ func newInputRepository(t *testing.T) string {
 	return source
 }
 
-func TestStageIncludesSelectedInputsInBaselineCommit(t *testing.T) {
+func TestStageCopiesInputsBesideHistoryRatherThanIntoIt(t *testing.T) {
 	ctx := context.Background()
 	source := newInputRepository(t)
 	if err := os.Symlink("notes.txt", filepath.Join(source, "link.txt")); err != nil {
@@ -86,29 +86,87 @@ func TestStageIncludesSelectedInputsInBaselineCommit(t *testing.T) {
 		"build/artifact.bin,build/nested.log,link.txt,notes.txt,tool.sh" {
 		t.Fatalf("inputs = %#v", snapshot.Inputs)
 	}
-	if snapshot.BaselineCommit == "" {
-		t.Fatal("selected inputs did not produce a baseline commit")
+	// Nothing an input carries reaches the index, so a repository whose tracked
+	// state is clean needs no baseline commit at all.
+	if snapshot.BaselineCommit != "" {
+		t.Fatalf("inputs produced a baseline commit %q", snapshot.BaselineCommit)
 	}
 	assertFile(t, filepath.Join(workspace, "notes.txt"), "untracked note\n")
 	assertFile(t, filepath.Join(workspace, "build", "artifact.bin"), "output\n")
 
-	// Ignored inputs must be committed despite the staged .gitignore, and the
-	// workspace must be clean so the agent starts from a consistent state.
-	if tracked := runGit(t, workspace, "ls-files", "build/artifact.bin"); tracked == "" {
-		t.Fatal("ignored input was not committed")
+	if tracked := runGit(t, workspace, "ls-files", "build/", "notes.txt", "tool.sh"); tracked != "" {
+		t.Fatalf("inputs entered the run's history: %q", tracked)
 	}
-	if status := runGit(t, workspace, "status", "--short"); status != "" {
+	// The run sees them as the host does: ignored where the staged .gitignore
+	// ignores them, untracked otherwise.
+	if status := runGit(t, workspace, "status", "--short"); status !=
+		"?? link.txt\n?? notes.txt\n?? tool.sh" {
 		t.Fatalf("workspace status = %q", status)
 	}
-	if mode := runGit(t, workspace, "ls-files", "-s", "tool.sh"); !strings.HasPrefix(mode, "100755") {
-		t.Fatalf("executable input mode = %q", mode)
+
+	// Mode and link target survive on disk, where they now live.
+	info, err := os.Lstat(filepath.Join(workspace, "tool.sh"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if mode := runGit(t, workspace, "ls-files", "-s", "link.txt"); !strings.HasPrefix(mode, "120000") {
-		t.Fatalf("symlink input mode = %q", mode)
+	if info.Mode().Perm()&0o100 == 0 {
+		t.Fatalf("executable input lost its mode: %v", info.Mode())
+	}
+	if link, err := os.Readlink(filepath.Join(workspace, "link.txt")); err != nil ||
+		link != "notes.txt" {
+		t.Fatalf("symlink input = %q (%v)", link, err)
 	}
 
 	// The source keeps its own untracked state; staging copies, never moves.
 	assertFile(t, filepath.Join(source, "notes.txt"), "untracked note\n")
+}
+
+// TestApplyDropsBaselineWithSelectedInputs covers what kept --include and
+// --baseline drop apart while inputs were committed: the baseline held the
+// included files, so replaying without it conflicted on paths the run never
+// touched as history. Carrying them as files removes the conflict entirely.
+func TestApplyDropsBaselineWithSelectedInputs(t *testing.T) {
+	ctx := context.Background()
+	source := newInputRepository(t)
+	mustWrite(t, filepath.Join(source, "tracked.txt"), "uncommitted host work\n")
+
+	inputs, _, err := selectInputs(t, source, InputSelection{
+		Include: []string{filepath.Join(source, "build")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	snapshot, err := Stage(ctx, PrepareRequest{
+		SourcePath: source,
+		RunID:      "drop-inputs-run",
+		Inputs:     inputs,
+	}, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.BaselineCommit == "" {
+		t.Fatal("dirty tracked file did not produce a baseline commit")
+	}
+
+	mustWrite(t, filepath.Join(workspace, "build", "artifact.bin"), "rebuilt in the run\n")
+	mustWrite(t, filepath.Join(workspace, "feature.txt"), "agent work\n")
+	runGit(t, workspace, "add", "feature.txt")
+	runGit(t, workspace, "commit", "-qm", "agent commit")
+
+	result, err := Apply(ctx, snapshot, workspace, DropBaseline)
+	if err != nil {
+		t.Fatalf("apply with dropped baseline: %v", err)
+	}
+	branch := "refs/heads/" + result.Branch
+	if listed := runGit(t, source, "ls-tree", "-r", "--name-only", branch); listed !=
+		".gitignore\nfeature.txt\ntracked.txt" {
+		t.Fatalf("imported tree = %q", listed)
+	}
+	// The baseline is gone, so the host's uncommitted work is not in the branch.
+	if content := runGit(t, source, "show", branch+":tracked.txt"); content != "initial" {
+		t.Fatalf("tracked.txt on branch = %q", content)
+	}
 }
 
 func TestSelectRequiresUnsafeFlagForCredentialNames(t *testing.T) {
@@ -343,7 +401,7 @@ func TestExtractInputsRejectsUnsafeArchiveEntries(t *testing.T) {
 			t.Fatal(err)
 		}
 		workspace := t.TempDir()
-		if _, err := extractInputs(archive, workspace); err == nil {
+		if _, err := extractFileArchive(archive, workspace); err == nil {
 			t.Errorf("%s was extracted", name)
 		}
 	}

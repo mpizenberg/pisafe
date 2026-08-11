@@ -427,11 +427,11 @@ func copyInputContent(writer io.Writer, sourcePath string, size int64) error {
 	return nil
 }
 
-// extractInputs unpacks the transferred archive into the staged workspace. It
+// extractFileArchive unpacks a transferred archive into a directory. It
 // re-validates every entry: the archive crosses the boundary as data, and the
-// workspace already contains a Git repository that inputs must never reach
-// into.
-func extractInputs(archivePath, workspace string) ([]string, error) {
+// destination holds a Git repository the archive must never reach into. Both
+// directions use it, so neither side trusts the other's names.
+func extractFileArchive(archivePath, workspace string) ([]string, error) {
 	file, err := os.Open(archivePath)
 	if err != nil {
 		return nil, fmt.Errorf("open input archive: %w", err)

@@ -450,16 +450,13 @@ func Materialize(ctx context.Context, prepared PreparedStage, workspace string) 
 			return Snapshot{}, fmt.Errorf("apply tracked baseline: %w", err)
 		}
 	}
-	if err := restoreInputs(ctx, prepared, workspace); err != nil {
-		return Snapshot{}, err
-	}
 	submodules, err := restoreSubmodules(ctx, prepared, workspace)
 	if err != nil {
 		return Snapshot{}, err
 	}
 
-	// The tracked patch, the selected inputs, and every submodule gitlink are
-	// all staged by now, so one question decides whether a baseline is needed.
+	// The tracked patch and every submodule gitlink are staged by now, so one
+	// question decides whether a baseline is needed.
 	baseline := ""
 	staged, err := indexDiffersFromHead(ctx, workspace)
 	if err != nil {
@@ -473,6 +470,12 @@ func Materialize(ctx context.Context, prepared PreparedStage, workspace string) 
 		if err != nil {
 			return Snapshot{}, fmt.Errorf("resolve baseline commit: %w", err)
 		}
+	}
+
+	// Inputs land once the run's history is settled, because they are not part
+	// of it. They sit beside it as files, exactly as they do on the host.
+	if err := restoreInputs(prepared, workspace); err != nil {
+		return Snapshot{}, err
 	}
 
 	cleanup = false
@@ -548,10 +551,12 @@ func FinalizeTracked(ctx context.Context, workspace string) (commitID string, un
 	return commitID, untracked, nil
 }
 
-// restoreInputs unpacks and stages the selected inputs so they join the
-// baseline commit. The snapshot, not the archive, decides what belongs in the
-// run: an archive naming anything else is refused.
-func restoreInputs(ctx context.Context, prepared PreparedStage, workspace string) error {
+// restoreInputs unpacks the selected inputs into the workspace and leaves them
+// there, untracked. An included path crosses as files in both directions, so
+// the run's history never contains one and the agent cannot commit it by
+// accident. The snapshot, not the archive, decides what belongs in the run: an
+// archive naming anything else is refused.
+func restoreInputs(prepared PreparedStage, workspace string) error {
 	expected := prepared.Snapshot.Inputs
 	if len(expected) == 0 {
 		return nil
@@ -559,28 +564,12 @@ func restoreInputs(ctx context.Context, prepared PreparedStage, workspace string
 	if prepared.InputsPath == "" {
 		return errors.New("staged snapshot lists inputs but no archive was transferred")
 	}
-	extracted, err := extractInputs(prepared.InputsPath, workspace)
+	extracted, err := extractFileArchive(prepared.InputsPath, workspace)
 	if err != nil {
 		return err
 	}
 	if !sameNames(expected, extracted) {
 		return errors.New("input archive does not match the staged snapshot")
-	}
-	// Selected inputs are untracked, and may be ignored, so staging them needs
-	// an explicit override. The literal prefix keeps a file name that happens
-	// to look like pathspec magic from changing what is staged.
-	pathspecs := make([]string, 0, len(extracted))
-	for _, name := range extracted {
-		pathspecs = append(pathspecs, ":(literal)"+name)
-	}
-	if err := gitRun(
-		ctx,
-		workspace,
-		strings.NewReader(strings.Join(pathspecs, "\x00")),
-		nil,
-		"add", "--force", "--pathspec-from-file=-", "--pathspec-file-nul",
-	); err != nil {
-		return fmt.Errorf("stage selected inputs: %w", err)
 	}
 	return nil
 }
