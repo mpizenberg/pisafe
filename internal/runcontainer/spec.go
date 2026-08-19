@@ -26,8 +26,7 @@ const (
 	// dependencies for every project at once, which is a fraction of what one
 	// project's dependency cache is, and nothing writes it except a command the
 	// user runs deliberately.
-	DefaultGlobal    = int64(2 * 1024 * 1024 * 1024)
-	DefaultWallClock = int64(8 * 60 * 60)
+	DefaultGlobal = int64(2 * 1024 * 1024 * 1024)
 	// packageSeconds bounds an install. It is generous for fetching one
 	// package and its dependencies, and short enough that a wedged registry
 	// fails the command rather than hanging it.
@@ -244,7 +243,6 @@ type Spec struct {
 	MemoryBytes int64
 	PIDs        int
 	TmpBytes    int64
-	WallSeconds int64
 }
 
 func DefaultSpec(runID, projectKey, imageID string) Spec {
@@ -256,7 +254,6 @@ func DefaultSpec(runID, projectKey, imageID string) Spec {
 		MemoryBytes: DefaultMemory,
 		PIDs:        DefaultPIDs,
 		TmpBytes:    DefaultTemporary,
-		WallSeconds: DefaultWallClock,
 	}
 }
 
@@ -291,9 +288,6 @@ func (spec Spec) Validate() error {
 	}
 	if spec.TmpBytes <= 0 {
 		return fmt.Errorf("temporary-filesystem limit is required")
-	}
-	if spec.WallSeconds <= 0 {
-		return fmt.Errorf("wall-clock limit is required")
 	}
 	return nil
 }
@@ -525,15 +519,20 @@ func (spec Spec) container(kind string) container {
 	}
 }
 
-func (spec Spec) RunArgs() ([]string, error) {
+// RunArgs starts a run's container for wallSeconds, which is what the run has
+// left of its lifetime rather than anything the container's shape decides.
+func (spec Spec) RunArgs(wallSeconds int64) ([]string, error) {
 	if err := spec.Validate(); err != nil {
 		return nil, err
+	}
+	if wallSeconds <= 0 {
+		return nil, fmt.Errorf("run has no time left to start a container with")
 	}
 	settings := spec.container("")
 	settings.name = spec.ContainerName()
 	settings.internet = true
 	settings.cpus = spec.CPUs
-	settings.timeoutSeconds = spec.WallSeconds
+	settings.timeoutSeconds = wallSeconds
 	settings.tmpBytes = spec.TmpBytes
 	args := append(
 		settings.args(),
@@ -837,7 +836,7 @@ func (spec Spec) ImportArgs(
 
 // inspectionArgs builds a throwaway container over the run's persistent
 // workspace, up to and including the image. Inspecting a run needs no network,
-// no home, and no part of its wall-clock budget, so it gets none of them, and
+// no home, and none of the run's remaining time, so it gets none of them, and
 // it works whether or not the run container exists.
 func (spec Spec) inspectionArgs(
 	kind string,

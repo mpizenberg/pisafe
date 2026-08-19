@@ -617,11 +617,11 @@ func TestStartPreparedReleasesEverythingWhereverItFailed(t *testing.T) {
 	}
 }
 
-func TestLifecycleStopsAndResumesWithRemainingBudget(t *testing.T) {
+func TestLifecycleStopsAndResumesWithinTheRunsLifetime(t *testing.T) {
 	store := runstate.NewStore(t.TempDir())
 	manifest := activeManifest(t, store)
 	spec := specForManifest(manifest, manifest.Image)
-	runArgs, err := spec.RunArgs()
+	runArgs, err := spec.RunArgs(runstate.LifetimeSeconds)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -641,7 +641,7 @@ func TestLifecycleStopsAndResumesWithRemainingBudget(t *testing.T) {
 		t.Fatalf("stopped = %#v, container = %#v", stopped, backend.container)
 	}
 	remaining := runstate.RemainingSeconds(stopped, time.Now())
-	if remaining <= 0 || remaining > manifest.ActiveLimitSeconds {
+	if remaining <= 0 || remaining > runstate.LifetimeSeconds {
 		t.Fatalf("remaining = %d", remaining)
 	}
 
@@ -654,8 +654,8 @@ func TestLifecycleStopsAndResumesWithRemainingBudget(t *testing.T) {
 		backend.container.State.Status != "running" {
 		t.Fatalf("resumed = %#v, container = %#v", resumed, backend.container)
 	}
-	if !strings.Contains(callsString(backend.calls), "--timeout "+fmt.Sprint(remaining)) {
-		t.Fatalf("resume did not apply remaining timeout:\n%s", callsString(backend.calls))
+	if got := lastTimeoutSeconds(t, backend.calls); got > remaining || got < remaining-2 {
+		t.Fatalf("resume applied --timeout %d, want about %d", got, remaining)
 	}
 	if !runstate.ValidInferenceCapability(resumed.InferenceCapability) ||
 		resumed.InferenceCapability == manifest.InferenceCapability {
@@ -670,10 +670,9 @@ func TestLifecycleStopsAndResumesWithRemainingBudget(t *testing.T) {
 }
 
 // A VM that is rebooted or recreated keeps every run's storage and leaves none
-// of its containers, so a record left saying active is the stale half. Charging
-// the wall clock for the outage would spend the whole budget of a run that was
-// not running.
-func TestStopChargesNothingForAContainerTheVMTookWithIt(t *testing.T) {
+// of its containers, so a record left saying active is the stale half. Settling
+// it is all that is left to do, and the run's lifetime is untouched by it.
+func TestStopSettlesARunWhoseContainerTheVMTookWithIt(t *testing.T) {
 	store := runstate.NewStore(t.TempDir())
 	manifest := activeManifest(t, store)
 	backend := &fakeBackend{}
@@ -683,11 +682,11 @@ func TestStopChargesNothingForAContainerTheVMTookWithIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stopped.State != runstate.StateStopped || stopped.ActiveElapsedSeconds != 0 {
+	if stopped.State != runstate.StateStopped {
 		t.Fatalf("stopped = %#v", stopped)
 	}
-	if got := runstate.RemainingSeconds(stopped, time.Now()); got != manifest.ActiveLimitSeconds {
-		t.Fatalf("remaining = %d of %d", got, manifest.ActiveLimitSeconds)
+	if got := runstate.RemainingSeconds(stopped, time.Now()); got != runstate.LifetimeSeconds {
+		t.Fatalf("remaining = %d of %d", got, runstate.LifetimeSeconds)
 	}
 	// What the run produced is the reason to settle the record rather than
 	// leave it: the transcript belongs to the project and nothing refetches it.
@@ -711,14 +710,9 @@ func TestResumeAdoptsARunTheVMLeftBehind(t *testing.T) {
 		backend.container.State.Status != "running" {
 		t.Fatalf("resumed = %#v, container = %#v", resumed, backend.container)
 	}
-	if resumed.ActiveElapsedSeconds != 0 {
-		t.Fatalf("resume charged %d seconds for the outage", resumed.ActiveElapsedSeconds)
-	}
-	if !strings.Contains(
-		callsString(backend.calls),
-		"--timeout "+fmt.Sprint(manifest.ActiveLimitSeconds),
-	) {
-		t.Fatalf("resume did not restore the whole budget:\n%s", callsString(backend.calls))
+	if got := lastTimeoutSeconds(t, backend.calls); got != runstate.LifetimeSeconds {
+		t.Fatalf("resume applied --timeout %d, want the whole lifetime %d",
+			got, runstate.LifetimeSeconds)
 	}
 }
 
@@ -728,7 +722,7 @@ func TestResumeRefusesARunWhoseContainerIsStillRunning(t *testing.T) {
 	store := runstate.NewStore(t.TempDir())
 	manifest := activeManifest(t, store)
 	spec := specForManifest(manifest, manifest.Image)
-	runArgs, err := spec.RunArgs()
+	runArgs, err := spec.RunArgs(runstate.LifetimeSeconds)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -753,7 +747,7 @@ func TestResumeCleansContainerAfterAmbiguousStartFailure(t *testing.T) {
 	store := runstate.NewStore(t.TempDir())
 	manifest := activeManifest(t, store)
 	spec := specForManifest(manifest, manifest.Image)
-	runArgs, err := spec.RunArgs()
+	runArgs, err := spec.RunArgs(runstate.LifetimeSeconds)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -803,12 +797,11 @@ func TestDiscardCleansActiveAndFailedCreatingRuns(t *testing.T) {
 				spec := runcontainer.DefaultSpec(prepared.Snapshot.RunID, testProject.Key, testImage)
 				var err error
 				manifest, err = store.Create(runstate.Manifest{
-					RunID:              spec.RunID,
-					Project:            "project",
-					ProjectKey:         testProject.Key,
-					Snapshot:           prepared.Snapshot,
-					Image:              spec.ImageID,
-					ActiveLimitSeconds: spec.WallSeconds,
+					RunID:      spec.RunID,
+					Project:    "project",
+					ProjectKey: testProject.Key,
+					Snapshot:   prepared.Snapshot,
+					Image:      spec.ImageID,
 				})
 				if err != nil {
 					t.Fatal(err)
@@ -817,7 +810,7 @@ func TestDiscardCleansActiveAndFailedCreatingRuns(t *testing.T) {
 			backend := &fakeBackend{}
 			if initial == runstate.StateActive {
 				spec := specForManifest(manifest, manifest.Image)
-				args, err := spec.RunArgs()
+				args, err := spec.RunArgs(runstate.LifetimeSeconds)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -844,8 +837,8 @@ func TestDiscardCleansActiveAndFailedCreatingRuns(t *testing.T) {
 				}
 			}
 			// A run still running is the one case where the container must be
-			// asked to stop rather than taken: its elapsed time is only
-			// accounted for while the record it is charged against still exists.
+			// asked to stop rather than taken: what it produced reaches the
+			// project store only on the way out.
 			if initial == runstate.StateActive && !strings.Contains(joined, "stop --time") {
 				t.Errorf("an active run was discarded without being stopped:\n%s", joined)
 			}
@@ -893,7 +886,7 @@ func TestLifecycleRefusesMismatchedContainerBeforeDeletion(t *testing.T) {
 	store := runstate.NewStore(t.TempDir())
 	manifest := activeManifest(t, store)
 	spec := specForManifest(manifest, manifest.Image)
-	args, err := spec.RunArgs()
+	args, err := spec.RunArgs(runstate.LifetimeSeconds)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -933,6 +926,25 @@ func testPrepared() gitstage.PreparedStage {
 		BundlePath: "/tmp/source.bundle",
 		PatchPath:  "/tmp/tracked.patch",
 	}
+}
+
+// lastTimeoutSeconds reads the --timeout of the most recent container Podman
+// was asked to start.
+func lastTimeoutSeconds(t *testing.T, calls []backendCall) int64 {
+	t.Helper()
+	words := strings.Fields(callsString(calls))
+	for i := len(words) - 2; i >= 0; i-- {
+		if words[i] != "--timeout" {
+			continue
+		}
+		seconds, err := strconv.ParseInt(words[i+1], 10, 64)
+		if err != nil {
+			t.Fatalf("unparsable --timeout %q", words[i+1])
+		}
+		return seconds
+	}
+	t.Fatalf("no --timeout in:\n%s", callsString(calls))
+	return 0
 }
 
 func callsString(calls []backendCall) string {
@@ -1045,13 +1057,12 @@ func activeManifest(
 	spec := runcontainer.DefaultSpec(prepared.Snapshot.RunID, testProject.Key, testImage)
 	spec.Caches = caches
 	if _, err := store.Create(runstate.Manifest{
-		RunID:              spec.RunID,
-		Project:            "project",
-		ProjectKey:         testProject.Key,
-		Snapshot:           prepared.Snapshot,
-		Image:              spec.ImageID,
-		Caches:             spec.Caches,
-		ActiveLimitSeconds: spec.WallSeconds,
+		RunID:      spec.RunID,
+		Project:    "project",
+		ProjectKey: testProject.Key,
+		Snapshot:   prepared.Snapshot,
+		Image:      spec.ImageID,
+		Caches:     spec.Caches,
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -34,7 +34,7 @@ func stoppedByController(
 	t.Helper()
 	manifest := activeManifest(t, store, caches...)
 	spec := specForManifest(manifest, manifest.Image)
-	runArgs, err := spec.RunArgs()
+	runArgs, err := spec.RunArgs(runstate.LifetimeSeconds)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -226,7 +226,7 @@ func applyFixture(t *testing.T, runID string) (string, string, gitstage.Snapshot
 func stoppedRun(t *testing.T, store runstate.Store, snapshot gitstage.Snapshot) {
 	t.Helper()
 	activeRun(t, store, snapshot)
-	if _, err := store.Stop(snapshot.RunID, nil); err != nil {
+	if _, err := store.Stop(snapshot.RunID); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -234,12 +234,11 @@ func stoppedRun(t *testing.T, store runstate.Store, snapshot gitstage.Snapshot) 
 func creatingRun(t *testing.T, store runstate.Store, snapshot gitstage.Snapshot) {
 	t.Helper()
 	if _, err := store.Create(runstate.Manifest{
-		RunID:              snapshot.RunID,
-		Project:            "project",
-		ProjectKey:         testProject.Key,
-		Snapshot:           snapshot,
-		Image:              testImage,
-		ActiveLimitSeconds: 3600,
+		RunID:      snapshot.RunID,
+		Project:    "project",
+		ProjectKey: testProject.Key,
+		Snapshot:   snapshot,
+		Image:      testImage,
 	}); err != nil {
 		t.Fatal(err)
 	}

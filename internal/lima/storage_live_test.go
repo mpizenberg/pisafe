@@ -14,6 +14,8 @@ import (
 	"github.com/mpizenberg/pisafe/internal/runcontainer"
 )
 
+const testWallSeconds = int64(8 * 60 * 60)
+
 // liveCacheKeys are what a declared cache's inputs would hash to. They are
 // fixed here because this test seeds the project store directly rather than
 // running the tool that would fill it.
@@ -155,7 +157,7 @@ func TestLivePublishedGenerationsAreImmutableAndDisposable(t *testing.T) {
 	if err := vm.PrepareRunLayout(ctx, runID, spec.Caches); err != nil {
 		t.Fatal(err)
 	}
-	runArgs, err := spec.RunArgs()
+	runArgs, err := spec.RunArgs(testWallSeconds)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -421,7 +423,7 @@ func liveRun(
 	if err := vm.PrepareRunLayout(ctx, runID, spec.Caches); err != nil {
 		t.Fatal(err)
 	}
-	runArgs, err := spec.RunArgs()
+	runArgs, err := spec.RunArgs(testWallSeconds)
 	if err != nil {
 		t.Fatal(err)
 	}

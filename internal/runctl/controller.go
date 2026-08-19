@@ -57,8 +57,7 @@ type StateStore interface {
 	Activate(string, runstate.SSHConnection, gitstage.Snapshot, string) (runstate.Manifest, error)
 	Get(string) (runstate.Manifest, error)
 	List() ([]runstate.Manifest, []runstate.UnreadableRun, error)
-	Stop(string, *time.Duration) (runstate.Manifest, error)
-	Abandon(string) (runstate.Manifest, error)
+	Stop(string) (runstate.Manifest, error)
 	Resume(string, string) (runstate.Manifest, error)
 	Forget(string) error
 	BeginApply(string, gitstage.PlannedApply, []gitstage.SelectedInput) (runstate.Manifest, error)
@@ -146,13 +145,12 @@ func (controller Controller) StartPrepared(
 	spec.Caches = selected
 
 	manifest, err := controller.store.Create(runstate.Manifest{
-		RunID:              prepared.Snapshot.RunID,
-		Project:            project.Directory,
-		ProjectKey:         project.Key,
-		Snapshot:           prepared.Snapshot,
-		Image:              imageID,
-		Caches:             spec.Caches,
-		ActiveLimitSeconds: spec.WallSeconds,
+		RunID:      prepared.Snapshot.RunID,
+		Project:    project.Directory,
+		ProjectKey: project.Key,
+		Snapshot:   prepared.Snapshot,
+		Image:      imageID,
+		Caches:     spec.Caches,
 	})
 	if err != nil {
 		return runstate.Manifest{}, err
@@ -215,7 +213,7 @@ func (controller Controller) StartPrepared(
 		return runstate.Manifest{}, fmt.Errorf("configure run SSH server: %w", err)
 	}
 
-	runArgs, err := spec.RunArgs()
+	runArgs, err := spec.RunArgs(runstate.LifetimeSeconds)
 	if err != nil {
 		return runstate.Manifest{}, err
 	}

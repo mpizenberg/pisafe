@@ -20,6 +20,8 @@ import (
 	"github.com/mpizenberg/pisafe/internal/runssh"
 )
 
+const testWallSeconds = int64(8 * 60 * 60)
+
 // liveProjectKey is the project every live run in this package belongs to. It
 // is shaped like a real key so the shared filesystem it names is the same kind
 // of object a run creates.
@@ -97,7 +99,7 @@ func TestLiveSSHStageAndContainerMaterialize(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runArgs, err := spec.RunArgs()
+	runArgs, err := spec.RunArgs(testWallSeconds)
 	if err != nil {
 		t.Fatal(err)
 	}

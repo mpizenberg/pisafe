@@ -130,23 +130,22 @@ credentials in the sandbox — and are stated as rules in
 - Image pruning reads the label each image carries rather than resolving the
   recipe's ID: resolving cannot distinguish "no image for this recipe" from "the
   lookup failed", and that confusion deletes the image in use.
-- A run whose container is gone is charged nothing, through a distinct `Abandon`
-  transition. Charging the wall clock spends a whole budget on an outage the run
-  did not cause; a VM-side heartbeat is machinery for a limit that exists to stop
-  a runaway agent rather than to bill accurately.
-- Runs receive eight cumulative active hours, enforced per interval by Podman's
-  own `--timeout` so it outlives the controller; a daemon or VM-side timer would
-  add a second trusted lifecycle service. Changing accounting semantics needs a
-  manifest migration.
-- A stretch is stamped from the Mac's clock and charged the smaller of the Mac's
-  and the container's account of it. The controller starts the container, so
-  taking the start from the container's own stamp added a second clock for a
-  fact it already had: a guest lagging a suspended host by four hours set a
-  deadline four hours short, and the stop that followed charged the same gap
-  again, spending a whole budget in one call. Bounding skew in both directions
-  was rejected because it leaves the subtraction spanning two clocks, so a clock
-  that steps mid-stretch still corrupts the charge. Reversible; it is where the
-  two accounts meet in `Stop`.
+- A run expires 24 hours after creation and nothing measures how long it ran.
+  The limit exists to stop a runaway agent on a personal machine, and a run that
+  can be parked and resumed indefinitely does not stop. Accounting for active
+  time instead required a per-stretch window, an elapsed total, and a rule for
+  reconciling the Mac's clock with the container's — a guest lagging a suspended
+  host by four hours cut four hours off a run's deadline and then took the rest
+  when the run was stopped. An expiry derived from the creation time cannot
+  disagree with anything.
+- The expiry is derived, not stored: a second copy of `CreatedAt + Lifetime` is
+  a second place it can be wrong. Changing the constant therefore moves every
+  existing run's expiry, which is what is wanted from a constant on one machine.
+- Podman's own `--timeout`, set to whatever a run has left at each container
+  start, is what enforces the expiry; a daemon or VM-side timer would add a
+  second trusted lifecycle service. It measures VM-running time and so fires no
+  earlier than the record expires, which is the safe direction: the record gates
+  every route in, and the timeout is what kills a run pisafe never revisits.
 - Destructive confirmation is the repeated non-interactive form
   (`--confirm RUN`), identical in scripts and terminals; the same reasoning makes
   `cp --force` a flag rather than a prompt.

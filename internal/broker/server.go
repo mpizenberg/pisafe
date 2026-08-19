@@ -176,7 +176,7 @@ func (server *Server) relay(writer http.ResponseWriter, provider Provider, reque
 	}
 }
 
-// authorize matches the presented capability against active, in-budget runs
+// authorize matches the presented capability against active, unexpired runs
 // in constant time per candidate. Every failure mode is the same 401.
 func (server *Server) authorize(request *http.Request) (string, bool) {
 	capability := request.Header.Get(anthropicKeyHeader)

@@ -7,6 +7,8 @@ import (
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 )
 
+const testWallSeconds = int64(8 * 60 * 60)
+
 const testProjectKey = "project-3f9c2a1b"
 
 const testImageID = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -20,7 +22,7 @@ func TestEveryContainerPisafeStartsIsHardened(t *testing.T) {
 	integrity := "sha512-" + strings.Repeat("A", 86) + "=="
 	npm := CacheMount{Name: "npm", Env: []string{"npm_config_cache"}, Key: "0123456789abcdef"}
 	containers := map[string]func() ([]string, error){
-		"run":      spec.RunArgs,
+		"run":      func() ([]string, error) { return spec.RunArgs(testWallSeconds) },
 		"publish":  func() ([]string, error) { return spec.PublishArgs(npm) },
 		"resolve":  func() ([]string, error) { return PackageResolveArgs(testImageID, "is-number") },
 		"ssh-init": spec.ConfigureSSHArgs,
@@ -70,7 +72,7 @@ func TestEveryContainerPisafeStartsIsHardened(t *testing.T) {
 
 func TestRunArgsAreHardenedAndImmutable(t *testing.T) {
 	spec := DefaultSpec("run-123", testProjectKey, testImageID)
-	args, err := spec.RunArgs()
+	args, err := spec.RunArgs(testWallSeconds)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +233,7 @@ func TestExportArgsStreamOneRequestedPathReadOnly(t *testing.T) {
 // Putting a file into a run is the one inspection that writes, so its mount is
 // the one that is not read-only. Everything else the throwaway container is
 // denied has to stay denied, the network above all: an import container that
-// could reach the internet would be a way around the run's own budget.
+// could reach the internet would be a way around the run's own network policy.
 func TestImportArgsWriteOnlyToTheWorkspace(t *testing.T) {
 	spec := DefaultSpec("run-123", testProjectKey, testImageID)
 	args, err := spec.ImportArgs("project", "./plans/../plans", "note.md", false)
@@ -278,7 +280,7 @@ func TestSpecRejectsMutableImageAndUnsafeNames(t *testing.T) {
 		DefaultSpec("../escape", testProjectKey, testImageID),
 		DefaultSpec("safe", testProjectKey, "localhost/pisafe-run:latest"),
 	} {
-		if _, err := spec.RunArgs(); err == nil {
+		if _, err := spec.RunArgs(testWallSeconds); err == nil {
 			t.Fatalf("RunArgs(%#v) unexpectedly succeeded", spec)
 		}
 	}
@@ -296,7 +298,7 @@ func TestSharedLayersKeepTheProjectSideReadOnlyToTheRun(t *testing.T) {
 		Key:      "0123456789abcdef",
 		Snapshot: "fedcba9876543210",
 	}}
-	args, err := spec.RunArgs()
+	args, err := spec.RunArgs(testWallSeconds)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +348,7 @@ func TestSharedLayersKeepTheProjectSideReadOnlyToTheRun(t *testing.T) {
 // Pi's own package store, which stays part of the run's writable home so a
 // global install succeeds for the run and reaches nothing else.
 func TestTheProfileMountsOutsideEveryPathARunWrites(t *testing.T) {
-	args, err := DefaultSpec("run-123", testProjectKey, testImageID).RunArgs()
+	args, err := DefaultSpec("run-123", testProjectKey, testImageID).RunArgs(testWallSeconds)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,7 +431,7 @@ func TestInstallingAnExtensionRunsWithNetworkAndNoStorage(t *testing.T) {
 // safe by default: a repository that declares nothing gets no shared cache at
 // all, and no tool is redirected anywhere.
 func TestUndeclaredCachesShareNothing(t *testing.T) {
-	args, err := DefaultSpec("run-123", testProjectKey, testImageID).RunArgs()
+	args, err := DefaultSpec("run-123", testProjectKey, testImageID).RunArgs(testWallSeconds)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,7 +450,7 @@ func TestUndeclaredCachesShareNothing(t *testing.T) {
 func TestColdCacheStartsFromRunLocalEmptiness(t *testing.T) {
 	spec := DefaultSpec("run-123", testProjectKey, testImageID)
 	spec.Caches = []CacheMount{{Name: "npm", Env: []string{"npm_config_cache"}, Key: "0123456789abcdef"}}
-	args, err := spec.RunArgs()
+	args, err := spec.RunArgs(testWallSeconds)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,13 +519,13 @@ func TestSpecRefusesCachesItCannotAddressOrTrust(t *testing.T) {
 	for name, cache := range rejected {
 		spec := DefaultSpec("run-123", testProjectKey, testImageID)
 		spec.Caches = []CacheMount{cache}
-		if _, err := spec.RunArgs(); err == nil {
+		if _, err := spec.RunArgs(testWallSeconds); err == nil {
 			t.Errorf("%s cache was accepted", name)
 		}
 	}
 	spec := DefaultSpec("run-123", testProjectKey, testImageID)
 	spec.Caches = []CacheMount{valid, valid}
-	if _, err := spec.RunArgs(); err == nil {
+	if _, err := spec.RunArgs(testWallSeconds); err == nil {
 		t.Error("two caches sharing one namespace were accepted")
 	}
 }
@@ -531,7 +533,7 @@ func TestSpecRefusesCachesItCannotAddressOrTrust(t *testing.T) {
 func TestSpecRefusesAProjectKeyItCannotAddress(t *testing.T) {
 	for _, key := range []string{"", "../escape", "key/sub"} {
 		spec := DefaultSpec("run-123", key, testImageID)
-		if _, err := spec.RunArgs(); err == nil {
+		if _, err := spec.RunArgs(testWallSeconds); err == nil {
 			t.Errorf("project key %q was accepted", key)
 		}
 	}
@@ -542,7 +544,7 @@ func TestSpecRefusesAProjectKeyItCannotAddress(t *testing.T) {
 // later run executes, and the image's own binaries have to keep answering
 // first, so an installed tool can never decide what git means.
 func TestInstalledToolsAreReachableAndNotWritable(t *testing.T) {
-	args, err := DefaultSpec("run-123", testProjectKey, testImageID).RunArgs()
+	args, err := DefaultSpec("run-123", testProjectKey, testImageID).RunArgs(testWallSeconds)
 	if err != nil {
 		t.Fatal(err)
 	}

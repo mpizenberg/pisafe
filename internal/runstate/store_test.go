@@ -33,14 +33,13 @@ func TestStoreLifecycleAndList(t *testing.T) {
 		t.Fatalf("active = %#v", active)
 	}
 	now = now.Add(time.Minute)
-	stopped, err := store.Stop("run-one", nil)
+	stopped, err := store.Stop("run-one")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stopped.ActiveElapsedSeconds != 60 {
-		t.Fatalf("active elapsed = %d", stopped.ActiveElapsedSeconds)
+	if stopped.State != StateStopped || !stopped.UpdatedAt.Equal(now) {
+		t.Fatalf("stopped = %#v", stopped)
 	}
-
 	now = now.Add(time.Minute)
 	if _, err := store.Create(testManifest("run-two")); err != nil {
 		t.Fatal(err)
@@ -255,101 +254,16 @@ func TestStoreRejectsInvalidMaterializedBaseline(t *testing.T) {
 	}
 }
 
-func TestStoreAccountsCumulativeActiveWallClock(t *testing.T) {
+func TestStoreExpiryIsUnmovedByStoppingAndResuming(t *testing.T) {
 	root := t.TempDir()
-	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 8, 19, 7, 18, 0, 0, time.UTC)
 	store := NewStore(root)
 	store.now = func() time.Time { return now }
-	if _, err := store.Create(testManifest("run-one")); err != nil {
-		t.Fatal(err)
-	}
-	active, err := store.Activate("run-one", testSSHConnection(root, "run-one"), gitstage.Snapshot{}, testCapability())
+	created, err := store.Create(testManifest("run-one"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if active.ActiveDeadline == nil ||
-		!active.ActiveDeadline.Equal(now.Add(8*time.Hour)) {
-		t.Fatalf("active deadline = %v", active.ActiveDeadline)
-	}
-	now = now.Add(90*time.Minute + 500*time.Millisecond)
-	stopped, err := store.Stop("run-one", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stopped.ActiveElapsedSeconds != 5401 {
-		t.Fatalf("active elapsed = %d", stopped.ActiveElapsedSeconds)
-	}
-	now = now.Add(24 * time.Hour)
-	resumed, err := store.Resume("run-one", testCapability())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := RemainingSeconds(resumed, now); got != 28800-5401 {
-		t.Fatalf("remaining = %d", got)
-	}
-}
-
-func TestStoreChargesNoMoreThanEitherClockSaw(t *testing.T) {
-	for _, testCase := range []struct {
-		name      string
-		container *time.Duration
-		charged   int64
-	}{
-		// The guest clock stepped forward mid-stretch, as it does when NTP
-		// corrects a VM that was suspended with the Mac. Its account of the
-		// stretch is longer than the stretch could have been.
-		{name: "stepped guest clock", container: durationOf(9 * time.Hour), charged: 3600},
-		// The container exited at its own deadline and nothing looked until
-		// later, so only the Mac's account kept growing.
-		{name: "controller noticed late", container: durationOf(10 * time.Minute), charged: 600},
-		// A clock that stepped back leaves a negative stretch, which is a
-		// disagreement rather than time a run spent.
-		{name: "clock stepped back", container: durationOf(-time.Hour), charged: 0},
-		// Nothing to compare against leaves the Mac's account standing alone.
-		{name: "container stated nothing", container: nil, charged: 3600},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			root := t.TempDir()
-			now := time.Date(2026, 8, 19, 7, 18, 0, 0, time.UTC)
-			store := NewStore(root)
-			store.now = func() time.Time { return now }
-			if _, err := store.Create(testManifest("run-one")); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := store.Activate(
-				"run-one",
-				testSSHConnection(root, "run-one"),
-				gitstage.Snapshot{},
-				testCapability(),
-			); err != nil {
-				t.Fatal(err)
-			}
-			now = now.Add(time.Hour)
-			stopped, err := store.Stop("run-one", testCase.container)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if stopped.ActiveElapsedSeconds != testCase.charged {
-				t.Fatalf(
-					"active elapsed = %d, want %d",
-					stopped.ActiveElapsedSeconds,
-					testCase.charged,
-				)
-			}
-		})
-	}
-}
-
-func durationOf(d time.Duration) *time.Duration { return &d }
-
-func TestStoreAbandonsARunWithoutChargingForTheOutage(t *testing.T) {
-	root := t.TempDir()
-	now := time.Date(2026, 7, 24, 12, 0, 0, 0, time.UTC)
-	store := NewStore(root)
-	store.now = func() time.Time { return now }
-	if _, err := store.Create(testManifest("run-one")); err != nil {
-		t.Fatal(err)
-	}
+	expiry := created.CreatedAt.Add(Lifetime)
 	if _, err := store.Activate(
 		"run-one",
 		testSSHConnection(root, "run-one"),
@@ -358,29 +272,35 @@ func TestStoreAbandonsARunWithoutChargingForTheOutage(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	// Longer than the whole budget, which is what stopping by the wall clock
-	// would charge and what the run must not be charged.
-	now = now.Add(30 * time.Hour)
-	abandoned, err := store.Abandon("run-one")
+	now = now.Add(90 * time.Minute)
+	stopped, err := store.Stop("run-one")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if abandoned.State != StateStopped ||
-		abandoned.ActiveElapsedSeconds != 0 ||
-		abandoned.ActiveStartedAt != nil ||
-		abandoned.ActiveDeadline != nil ||
-		abandoned.InferenceCapability != "" {
-		t.Fatalf("abandoned = %#v", abandoned)
-	}
-	if got := RemainingSeconds(abandoned, now); got != abandoned.ActiveLimitSeconds {
-		t.Fatalf("remaining = %d of %d", got, abandoned.ActiveLimitSeconds)
-	}
-	if _, err := store.Abandon("run-one"); err == nil ||
-		!strings.Contains(err.Error(), "invalid run transition") {
-		t.Fatalf("error = %v", err)
-	}
-	if _, err := store.Resume("run-one", testCapability()); err != nil {
+	now = now.Add(6 * time.Hour)
+	resumed, err := store.Resume("run-one", testCapability())
+	if err != nil {
 		t.Fatal(err)
+	}
+	for _, manifest := range []Manifest{stopped, resumed} {
+		if !manifest.ExpiresAt().Equal(expiry) {
+			t.Fatalf("expiry moved to %v, want %v", manifest.ExpiresAt(), expiry)
+		}
+	}
+	if got := RemainingSeconds(resumed, now); got != 59400 {
+		t.Fatalf("remaining = %d", got)
+	}
+
+	now = expiry
+	if got := RemainingSeconds(resumed, now); got != 0 {
+		t.Fatalf("remaining at expiry = %d", got)
+	}
+	if _, err := store.Stop("run-one"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Resume("run-one", testCapability()); err == nil ||
+		!strings.Contains(err.Error(), "expired") {
+		t.Fatalf("expired run resumed: %v", err)
 	}
 }
 
@@ -411,7 +331,7 @@ func TestStoreIssuesRotatesAndRevokesInferenceCapability(t *testing.T) {
 	if active.InferenceCapability != first {
 		t.Fatalf("active capability = %q", active.InferenceCapability)
 	}
-	stopped, err := store.Stop("run-one", nil)
+	stopped, err := store.Stop("run-one")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,7 +349,7 @@ func TestStoreIssuesRotatesAndRevokesInferenceCapability(t *testing.T) {
 	if resumed.InferenceCapability != second {
 		t.Fatalf("resumed capability = %q", resumed.InferenceCapability)
 	}
-	restopped, err := store.Stop("run-one", nil)
+	restopped, err := store.Stop("run-one")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -585,7 +505,7 @@ func stoppedTestRun(t *testing.T, store Store, root, runID string) Manifest {
 	); err != nil {
 		t.Fatal(err)
 	}
-	stopped, err := store.Stop(runID, nil)
+	stopped, err := store.Stop(runID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -612,10 +532,9 @@ func testCapability() string {
 
 func testManifest(runID string) Manifest {
 	return Manifest{
-		RunID:              runID,
-		Project:            "project",
-		ProjectKey:         "project-3f9c2a1b",
-		ActiveLimitSeconds: 8 * 60 * 60,
+		RunID:      runID,
+		Project:    "project",
+		ProjectKey: "project-3f9c2a1b",
 		Snapshot: gitstage.Snapshot{
 			RunID:   runID,
 			WorkRef: "refs/heads/work/" + runID,

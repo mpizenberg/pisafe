@@ -51,8 +51,8 @@ func runStop(ctx context.Context, runID string, out io.Writer) error {
 	return nil
 }
 
-// remainingTime is how much of a run's active wall-clock budget is left, as a
-// duration a user reads rather than the seconds a record holds.
+// remainingTime is how long a run has before it expires, as a duration a user
+// reads rather than the seconds a record holds.
 func remainingTime(manifest runstate.Manifest) time.Duration {
 	return time.Duration(runstate.RemainingSeconds(manifest, time.Now())) * time.Second
 }

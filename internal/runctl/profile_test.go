@@ -98,7 +98,7 @@ func TestAProfileTheControllerCannotVouchForStopsTheRun(t *testing.T) {
 // of every project loads.
 func TestAWritableProfileIsNotAcceptedAsARunsProfile(t *testing.T) {
 	spec := runcontainer.DefaultSpec("run-123", testProject.Key, testImage)
-	runArgs, err := spec.RunArgs()
+	runArgs, err := spec.RunArgs(runstate.LifetimeSeconds)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestAWritableProfileIsNotAcceptedAsARunsProfile(t *testing.T) {
 // anything through it.
 func TestAContainerFromAnEarlierLayoutCanStillBeStopped(t *testing.T) {
 	spec := runcontainer.DefaultSpec("run-123", testProject.Key, testImage)
-	runArgs, err := spec.RunArgs()
+	runArgs, err := spec.RunArgs(runstate.LifetimeSeconds)
 	if err != nil {
 		t.Fatal(err)
 	}

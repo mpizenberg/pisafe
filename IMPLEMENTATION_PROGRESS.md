@@ -40,7 +40,7 @@ CPython 3.13.14, installed by digest-pinned uv; pnpm digest-pinned
 Run manifest version **7**; project record version **1**, never moved. Lima
 ≥ 2.2.0, instance `pisafe`, `plain: true`, 4 CPUs, 8 GiB, 64 GiB sparse disk
 plus a second 64 GiB `pisafe-state` disk carrying `/var/lib/pisafe`. Each run
-gets one sparse 10 GiB ext4 filesystem and eight cumulative active hours. `cp`
+gets one sparse 10 GiB ext4 filesystem and 24 hours from creation. `cp`
 is bounded at 4096 entries, 1 GiB total, 256 MiB per file; a run's apply
 response at 1 MiB.
 
@@ -71,13 +71,13 @@ Beyond what the design requires:
   bounded memory, swap, and PIDs, and opt-in networking. Exactly one may execute
   out of its scratch `/tmp` — the half of `packageArgs` that installs.
 - A run is active only while its container runs. Rebooting or recreating the VM
-  keeps storage and no containers, so `resume` adopts such a run and the stretch
-  costs it nothing; a container still running keeps the refusal.
-- A stretch is stamped from the Mac's clock at activation and resume, and
-  charged `min(container account, Mac account)` at stop, floored at zero and
-  held to what the run had left. The container states its account as one
-  duration read from a single inspection, so a guest clock that steps between
-  its ends is the only way the two disagree — and the smaller wins.
+  keeps storage and no containers, so `resume` adopts such a run; a container
+  still running keeps the refusal.
+- A run expires 24 hours after `created_at`, derived rather than stored, and no
+  record holds elapsed time. Stopping and resuming do not move it, `list` names
+  an expired run expired without asking the VM, and an expired run still stops,
+  diffs, copies, and applies. Each container start passes what is left to
+  Podman's `--timeout`.
 - What `--include` records is the path named plus the files under it, each with a
   SHA-256 — the copy back compares against those. A root that carried no files is
   created as a directory in the run. Included paths never enter the run's Git
@@ -173,10 +173,10 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
 git diff --check
 ```
 
-The suite is green, including a table over the ways the two clocks disagree — a
-guest that stepped forward, a controller that noticed late, a clock that stepped
-back, and a container that stated nothing — each pinned to what it may charge.
-Coverage runs from 96% (`profile`) down to 33% (`cli`) and
+The suite is green, including a run whose expiry is pinned across a stop and a
+resume, an expired run refusing to resume, and `list` naming an expired run
+expired with the VM unasked. Coverage runs from 96% (`profile`) down to 33%
+(`cli`) and
 31% (`hostnet`, whose remaining functions read the Mac's real interfaces and
 routing table); `guestcall`, `piagent`, and `providers` have no test file of
 their own and are covered through the CLI, broker, guest, and controller suites.
@@ -297,12 +297,6 @@ Lifecycle and records:
   whose timestamps are in the future; such a record is never collected.
 - `pisafe connect` hands over the terminal and reports nothing afterwards, so a
   session that ended at the wall-clock limit looks like one the user quit.
-- Podman's `--timeout` does not advance while the VM is suspended but the Mac's
-  clock does, so a run held across a long host sleep can have its record expire
-  while its container still has time. `connect`, `zed`, and `forward` then refuse
-  a container the VM is still running, and the broker refuses its capability,
-  which the design says a record may not decide on its own. Settling it means
-  deciding what the broker asks the VM and how often.
 - `pisafe zed` launches a connection saved once in Zed. Fully automatic first
   launch is intentionally absent because Zed's CLI URL cannot carry `-F`.
 

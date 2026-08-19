@@ -68,25 +68,20 @@ func TestListNamesARecordItCannotRead(t *testing.T) {
 // their combination is worth printing: a run recorded active that the VM has no
 // container for is neither running nor out of time.
 func TestListShowsDurableStateAgainstWhatTheVMHas(t *testing.T) {
-	started := time.Now().UTC().Add(-9 * time.Hour)
-	deadline := started.Add(8 * time.Hour)
+	fresh := time.Now().UTC().Add(-time.Minute)
 	runs := []runstate.Manifest{
 		{RunID: "run-123", Project: "project", State: runstate.StateCreating},
 		{
 			RunID: "run-up", Project: "project", State: runstate.StateActive,
-			ActiveLimitSeconds: 8 * 60 * 60,
-			ActiveStartedAt:    &started,
-			ActiveDeadline:     &deadline,
+			CreatedAt: fresh.Add(-runstate.Lifetime),
 		},
 		{
 			RunID: "run-gone", Project: "project", State: runstate.StateActive,
-			ActiveLimitSeconds: 8 * 60 * 60,
-			ActiveStartedAt:    &started,
-			ActiveDeadline:     &deadline,
+			CreatedAt: fresh,
 		},
 	}
-	// Both active runs are past the deadline they were given. The one the VM
-	// still has spent that time; the one it does not have was not running for it.
+	// One run is past its lifetime, which the record settles on its own; the
+	// other is within it and only the VM can say it has no container.
 	up := map[string]bool{"run-up": true}
 
 	var asked bytes.Buffer
@@ -95,7 +90,7 @@ func TestListShowsDurableStateAgainstWhatTheVMHas(t *testing.T) {
 	}
 	for _, expected := range []string{
 		"RUN", "run-123", "creating", "project",
-		"active (limit reached)",
+		"active (expired)",
 		"active (no container)",
 	} {
 		if !strings.Contains(asked.String(), expected) {
@@ -109,9 +104,12 @@ func TestListShowsDurableStateAgainstWhatTheVMHas(t *testing.T) {
 	if err := printRuns(&unasked, runs, nil, nil, false); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(unasked.String(), "no container") ||
-		strings.Contains(unasked.String(), "limit reached") {
+	if strings.Contains(unasked.String(), "no container") {
 		t.Fatalf("unasked VM was reported as answered:\n%s", unasked.String())
+	}
+	// Expiry never depended on the VM, so it survives the VM going unasked.
+	if !strings.Contains(unasked.String(), "active (expired)") {
+		t.Fatalf("expiry was withheld for want of the VM:\n%s", unasked.String())
 	}
 	if !strings.Contains(unasked.String(), "could not be asked") {
 		t.Fatalf("output does not say the VM went unasked:\n%s", unasked.String())
@@ -288,10 +286,9 @@ func TestInactiveRunIsRefusedBeforeAnythingLaunches(t *testing.T) {
 	t.Setenv("PISAFE_STATE_DIR", root)
 	store := runstate.NewStore(root)
 	if _, err := store.Create(runstate.Manifest{
-		RunID:              "inactive-run",
-		Project:            "project",
-		ProjectKey:         "project-3f9c2a1b",
-		ActiveLimitSeconds: 8 * 60 * 60,
+		RunID:      "inactive-run",
+		Project:    "project",
+		ProjectKey: "project-3f9c2a1b",
 		Snapshot: gitstage.Snapshot{
 			RunID:   "inactive-run",
 			WorkRef: "refs/heads/work/inactive-run",
@@ -321,11 +318,10 @@ func TestConnectPointsAStoppedRunAtResume(t *testing.T) {
 	t.Setenv("PISAFE_STATE_DIR", root)
 	store := runstate.NewStore(root)
 	if _, err := store.Create(runstate.Manifest{
-		RunID:              "stopped-run",
-		Project:            "project",
-		ProjectKey:         "project-3f9c2a1b",
-		ActiveLimitSeconds: 8 * 60 * 60,
-		Snapshot:           gitstage.Snapshot{RunID: "stopped-run", WorkRef: "refs/heads/work/stopped-run"},
+		RunID:      "stopped-run",
+		Project:    "project",
+		ProjectKey: "project-3f9c2a1b",
+		Snapshot:   gitstage.Snapshot{RunID: "stopped-run", WorkRef: "refs/heads/work/stopped-run"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +341,7 @@ func TestConnectPointsAStoppedRunAtResume(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Stop("stopped-run", nil); err != nil {
+	if _, err := store.Stop("stopped-run"); err != nil {
 		t.Fatal(err)
 	}
 	err := Run(context.Background(), []string{"connect", "stopped-run"}, nil, io.Discard)

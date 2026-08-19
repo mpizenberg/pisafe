@@ -258,17 +258,16 @@ Usage:
                    and it takes no work with it: every run's files, every
                    project's transcripts, and the profile sit on a disk owned by
                    Lima rather than by the instance, which the new VM mounts
-                   back. Active runs are stopped first, so each is charged only
-                   for the time its container recorded, and resume as they were.
+                   back. Active runs are stopped first and resume as they were.
                    Named no flag, it reports what the rebuild would cost and
                    changes nothing. A VM predating that disk holds all of it on
                    the disk being deleted, and only then does --discard-state
                    apply: back up first, because nothing else saves it.
   pisafe doctor    Check Phase 1 host prerequisites
   pisafe list      Show every run's record against what the VM has. A run
-                   recorded active with no container is named as one, because
-                   the record alone cannot tell a spent budget from a VM that
-                   went down. A record too old for this version to read is
+                   recorded active with no container is named as one, and one
+                   past its lifetime is named expired. A record too old for
+                   this version to read is
                    listed as unreadable rather than hidden; it still holds a
                    workspace, and discarding it is what gives that space back.
   pisafe help      Show this help
@@ -344,18 +343,17 @@ func printRuns(
 	return nil
 }
 
-// listedState renders a run's record against what the VM shows. Only the VM
-// settles what a record calling a run active means: a container gone with a
-// rebooted VM leaves the claim standing, and a deadline that passed then
-// measures an outage rather than a budget spent.
+// listedState renders a run's record against what the VM shows. Expiry is the
+// record's own fact and is reported whether or not the VM could be asked;
+// whether a run recorded active still has a container is only the VM's to say.
 func listedState(run runstate.Manifest, running map[string]bool, asked bool) string {
 	state := string(run.State)
-	if run.State == runstate.StateActive && asked {
+	if run.State == runstate.StateActive {
 		switch {
-		case !running[run.RunID]:
-			state += " (no container)"
 		case runstate.RemainingSeconds(run, time.Now()) == 0:
-			state += " (limit reached)"
+			state += " (expired)"
+		case asked && !running[run.RunID]:
+			state += " (no container)"
 		}
 	}
 	if run.LastError != "" {
@@ -507,9 +505,9 @@ func runIDArgument(ctx context.Context, args []string) (string, error) {
 // activeRun returns a run an editor or terminal can reach right now, bringing
 // back one the VM stopped rather than reporting that it is gone. Which side
 // stopped it decides that: a run the user stopped stays stopped, because
-// resuming spends a budget and is theirs to ask for, while a run the VM stopped
-// was never anyone's decision — pisafe called it active, and the record is a
-// claim to make true rather than to explain away.
+// resuming it is theirs to ask for, while a run the VM stopped was never
+// anyone's decision — pisafe called it active, and the record is a claim to
+// make true rather than to explain away.
 func activeRun(ctx context.Context, runID string, out io.Writer) (runstate.Manifest, error) {
 	manifest, err := runRecord(runID)
 	if err != nil {
@@ -527,17 +525,16 @@ func activeRun(ctx context.Context, runID string, out io.Writer) (runstate.Manif
 			hint,
 		)
 	}
-	if running, asked := runningRuns(ctx); asked && !running[runID] {
-		return restoreRun(ctx, runID, out)
-	}
-	// A container the VM still has past its deadline is a run that spent its
-	// budget, which is the only reading of a passed deadline the VM confirms.
 	if runstate.RemainingSeconds(manifest, time.Now()) == 0 {
 		return runstate.Manifest{}, fmt.Errorf(
-			"run %q reached its wall-clock limit; use pisafe stop %s to reconcile it",
+			"run %q expired %s after it was created; take its work with pisafe apply %s",
 			runID,
+			runstate.Lifetime,
 			runID,
 		)
+	}
+	if running, asked := runningRuns(ctx); asked && !running[runID] {
+		return restoreRun(ctx, runID, out)
 	}
 	if manifest.SSH == nil {
 		return runstate.Manifest{}, fmt.Errorf("run %q has no SSH connection", runID)

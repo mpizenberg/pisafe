@@ -39,30 +39,23 @@ func (credentials staticCredentials) UpstreamAuth(context.Context) (http.Header,
 }
 
 func activeRun(runID, capability string) runstate.Manifest {
-	started := time.Now().UTC().Add(-time.Minute)
-	deadline := started.Add(8 * time.Hour)
 	return runstate.Manifest{
 		RunID:               runID,
 		State:               runstate.StateActive,
 		InferenceCapability: capability,
-		ActiveLimitSeconds:  8 * 60 * 60,
-		ActiveStartedAt:     &started,
-		ActiveDeadline:      &deadline,
+		CreatedAt:           time.Now().UTC().Add(-time.Minute),
 	}
 }
 
 func TestServerRejectsMissingUnknownAndInactiveCapabilities(t *testing.T) {
 	stopped := activeRun("run-b", "")
 	stopped.State = runstate.StateStopped
-	stopped.ActiveStartedAt = nil
-	stopped.ActiveDeadline = nil
-	exhausted := activeRun("run-c", "pisafe-cap-"+strings.Repeat("cd", 32))
-	spent := time.Now().UTC().Add(-time.Minute)
-	exhausted.ActiveDeadline = &spent
+	expired := activeRun("run-c", "pisafe-cap-"+strings.Repeat("cd", 32))
+	expired.CreatedAt = time.Now().UTC().Add(-runstate.Lifetime - time.Minute)
 	server := NewServer(fakeRuns{manifests: []runstate.Manifest{
 		activeRun("run-a", testCapability()),
 		stopped,
-		exhausted,
+		expired,
 	}}, Catalog{testProvider(t, "https://upstream.example", APIAnthropicMessages)})
 
 	for name, request := range map[string]*http.Request{
@@ -71,7 +64,7 @@ func TestServerRejectsMissingUnknownAndInactiveCapabilities(t *testing.T) {
 			"pisafe-cap-" + strings.Repeat("ef", 32),
 		),
 		"malformed capability": requestWithKey("not-a-capability"),
-		"exhausted run capability": requestWithKey(
+		"expired run capability": requestWithKey(
 			"pisafe-cap-" + strings.Repeat("cd", 32),
 		),
 	} {

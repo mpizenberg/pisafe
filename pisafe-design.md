@@ -102,8 +102,8 @@ distribution, Podman, and the run image, each of which provisioning reproduces.
 Recreating the VM is therefore the cure for every drift the boundary checks
 detect without also being what destroys the work they protect, and `pisafe vm
 rebuild` is that cure as a command: it reports what the rebuild costs, stops
-every active run so the stretch is charged from its container's own account,
-replaces the instance, and verifies the boundary the new one was built to. The
+every active run so what it produced reaches the project store, replaces the
+instance, and verifies the boundary the new one was built to. The
 disk is
 identified by the filesystem label it is given the first time it is seen; a
 device carrying neither a partition table nor a filesystem is the only thing
@@ -115,8 +115,7 @@ storage, SSH endpoint, and broker capability, plus a read-only global profile
 and per-project session and cache volumes. Containers run as a non-root user
 with a read-only root, dropped capabilities, `no-new-privileges`, no container
 socket, and bounded CPU, memory, processes, and temporary filesystems. Product
-policy caps a run at 10 GiB of persistent storage and eight cumulative active
-hours. Multiple runs for one project are independent snapshots: they do not see
+policy caps a run at 10 GiB of persistent storage and 24 hours from creation. Multiple runs for one project are independent snapshots: they do not see
 one another's staged files or conversational context.
 
 ## Command-line experience
@@ -556,30 +555,22 @@ creating → active → stopped → imported → reclaimed
   that is genuinely still running refuses, because resuming would restart an
   agent mid-work. Resuming issues a fresh short-lived broker capability rather
   than extending the old one.
-- Stopped time does not consume the eight-hour active budget. A run is killed
-  independently when its remaining budget expires; the next lifecycle command
-  reconciles the durable record to stopped.
-- A stretch is stamped and charged on the Mac's clock, the one its deadline is
-  enforced against. The container's own account of how long it ran may lower
-  that charge and never raises it. A guest clock does not advance while the VM
-  is suspended with the host and steps whenever it catches up, so the two
-  disagree by hours across a night; a budget measured across both clocks spends
-  that disagreement, and charging a run for a second it could not have spent is
-  worse than losing one.
+- A run expires 24 hours after it was created, on the Mac's clock. Stopping and
+  resuming do not move that, and nothing inside a run can extend it. A container
+  is started with whatever is left, and Podman kills it at that, so a run dies
+  on time whether or not pisafe ever runs again.
+- An expired run refuses every route in and is still stopped, diffed, copied
+  from, and applied. Nothing about a run's expiry depends on the VM: `pisafe
+  list` names an expired run expired whether or not the VM could be asked.
 - A run is active only while its container runs, so rebooting or recreating the
-  VM leaves records claiming containers that are gone. Settling one of those
-  costs it nothing: the container carried the only account of how much of the
-  stretch was spent and went with the VM, and charging the wall clock instead
-  would spend a whole budget on an outage the run did not cause. Nothing inside
-  a run can bring its own container down, so this is not a budget agent code
-  can extend.
+  VM leaves records claiming containers that are gone. Settling one of those is
+  all that is left to do, and it takes nothing from the run.
 - Every route into a run asks the VM before handing over, and brings back one
   the VM stopped rather than reporting it gone. A run the user stopped stays
-  stopped — resuming spends a budget and is theirs to ask for — but a run the VM
-  stopped was nobody's decision, and the record pisafe printed as active is a
-  claim to make true. `pisafe list` reads the same answer, so a record no longer
-  asserts on its own that a run is up or that a deadline in the past was a
-  budget spent rather than an outage.
+  stopped — resuming is theirs to ask for — but a run the VM stopped was
+  nobody's decision, and the record pisafe printed as active is a claim to make
+  true. `pisafe list` reads the same answer, so a record does not assert on its
+  own that a run is up.
 - Successful `apply` marks a run imported but keeps it recoverable for seven
   days: the workspace still holds untracked leftovers the branch never took.
 - `discard` reclaims at any point, after exact run confirmation.
@@ -634,7 +625,7 @@ creating → active → stopped → imported → reclaimed
 - `pisafe vm rebuild` is what a failed boundary check names, so the cure is a
   command rather than a sequence the user assembles. Nothing an unreachable VM
   does can refuse it: a run it cannot stop is settled by the next command that
-  reaches for that run, charged nothing, and an instance too broken to shut down
+  reaches for that run, and an instance too broken to shut down
   is killed rather than waited on — with the lock it leaves on the state disk
   released, or the replacement would be refused the work it exists to keep. Only
   a VM predating that disk holds the work on the disk being deleted; that one is

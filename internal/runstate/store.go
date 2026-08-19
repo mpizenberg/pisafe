@@ -23,7 +23,7 @@ import (
 	"github.com/mpizenberg/pisafe/internal/safefile"
 )
 
-const manifestVersion = 7
+const manifestVersion = 8
 
 var (
 	gitObjectPattern  = regexp.MustCompile(`^(?:[a-f0-9]{40}|[a-f0-9]{64})$`)
@@ -80,16 +80,12 @@ type Manifest struct {
 	// Returned is the work a run handed back under the paths the user chose
 	// that has not reached the working tree yet. It outlives the ref import, so
 	// a refused copy-back is completed later rather than lost.
-	Returned             []gitstage.SelectedInput `json:"returned,omitempty"`
-	ActiveLimitSeconds   int64                    `json:"active_limit_seconds"`
-	ActiveElapsedSeconds int64                    `json:"active_elapsed_seconds"`
-	ActiveStartedAt      *time.Time               `json:"active_started_at,omitempty"`
-	ActiveDeadline       *time.Time               `json:"active_deadline,omitempty"`
-	CreatedAt            time.Time                `json:"created_at"`
-	UpdatedAt            time.Time                `json:"updated_at"`
-	ImportedAt           *time.Time               `json:"imported_at,omitempty"`
-	ImportedBranch       string                   `json:"imported_branch,omitempty"`
-	LastError            string                   `json:"last_error,omitempty"`
+	Returned       []gitstage.SelectedInput `json:"returned,omitempty"`
+	CreatedAt      time.Time                `json:"created_at"`
+	UpdatedAt      time.Time                `json:"updated_at"`
+	ImportedAt     *time.Time               `json:"imported_at,omitempty"`
+	ImportedBranch string                   `json:"imported_branch,omitempty"`
+	LastError      string                   `json:"last_error,omitempty"`
 }
 
 // Workspace is where the run's checkout is inside its container. It follows
@@ -232,12 +228,10 @@ func (store Store) List() ([]Manifest, []UnreadableRun, error) {
 	return manifests, unreadable, nil
 }
 
-// Stop closes the stretch a run spent active. containerElapsed is the
-// container's own account of how long it ran, and nil is a container that could
-// not state one; either way the Mac's account of the same stretch bounds the
-// charge. Both are single-clock differences, and taking the smaller means a
-// clock that stepped under a suspended VM costs the run nothing.
-func (store Store) Stop(runID string, containerElapsed *time.Duration) (Manifest, error) {
+// Stop settles a run whose container is down, whether it was taken down or went
+// with the VM. A run expires on its own schedule, so how long this one ran is
+// not a question the record asks.
+func (store Store) Stop(runID string) (Manifest, error) {
 	manifest, err := store.Get(runID)
 	if err != nil {
 		return Manifest{}, err
@@ -245,46 +239,11 @@ func (store Store) Stop(runID string, containerElapsed *time.Duration) (Manifest
 	if err := requireActive(manifest); err != nil {
 		return Manifest{}, err
 	}
-	if manifest.ActiveStartedAt == nil {
-		return Manifest{}, fmt.Errorf("active run has no start to measure from")
-	}
-	now := store.now().UTC()
-	elapsed := now.Sub(*manifest.ActiveStartedAt)
-	if containerElapsed != nil {
-		elapsed = min(elapsed, *containerElapsed)
-	}
-	return store.replace(endActiveStretch(manifest, now, spentSeconds(manifest, elapsed)))
-}
-
-// spentSeconds rounds a stretch up to whole seconds and holds it to what the
-// run still had. A stretch measures as negative when the clock behind it
-// stepped back, and no clock disagreement is worth charging a run for.
-func spentSeconds(manifest Manifest, elapsed time.Duration) int64 {
-	if elapsed <= 0 {
-		return 0
-	}
-	seconds := int64((elapsed + time.Second - 1) / time.Second)
-	return min(seconds, manifest.remainingBudget())
-}
-
-// Abandon records a run whose container went out from under it. Rebooting or
-// recreating the VM keeps every run's storage and leaves none of its
-// containers, so the record saying active is the stale half of the
-// disagreement. The stretch costs the run nothing: the container carried the
-// only account of how much of it was spent and went with the VM, and charging
-// the wall clock instead would spend a whole budget on an outage the run did
-// not cause. Nothing inside a run can bring its own container down, so this is
-// not a budget agent code can extend.
-func (store Store) Abandon(runID string) (Manifest, error) {
-	manifest, err := store.Get(runID)
-	if err != nil {
-		return Manifest{}, err
-	}
-	if err := requireActive(manifest); err != nil {
-		return Manifest{}, err
-	}
-	now := store.now().UTC()
-	return store.replace(endActiveStretch(manifest, now, 0))
+	manifest.InferenceCapability = ""
+	manifest.State = StateStopped
+	manifest.LastError = ""
+	manifest.UpdatedAt = store.now().UTC()
+	return store.replace(manifest)
 }
 
 func requireActive(manifest Manifest) error {
@@ -296,24 +255,6 @@ func requireActive(manifest Manifest) error {
 		)
 	}
 	return nil
-}
-
-// endActiveStretch closes the stretch a run spent active and charges
-// elapsedSeconds of its budget for it. Every route out of StateActive comes
-// through here, and they differ only in what the stretch cost.
-func endActiveStretch(
-	manifest Manifest,
-	now time.Time,
-	elapsedSeconds int64,
-) Manifest {
-	manifest.ActiveElapsedSeconds += elapsedSeconds
-	manifest.ActiveStartedAt = nil
-	manifest.ActiveDeadline = nil
-	manifest.InferenceCapability = ""
-	manifest.State = StateStopped
-	manifest.LastError = ""
-	manifest.UpdatedAt = now
-	return manifest
 }
 
 func (store Store) Resume(runID string, capability string) (Manifest, error) {
@@ -328,19 +269,14 @@ func (store Store) Resume(runID string, capability string) (Manifest, error) {
 			StateActive,
 		)
 	}
-	remaining := manifest.remainingBudget()
-	if remaining <= 0 {
-		return Manifest{}, fmt.Errorf("run %q exhausted its active wall-clock limit", runID)
+	now := store.now().UTC()
+	if RemainingSeconds(manifest, now) == 0 {
+		return Manifest{}, fmt.Errorf("run %q has expired", runID)
 	}
 	if !ValidInferenceCapability(capability) {
 		return Manifest{}, fmt.Errorf("resume requires a fresh inference capability")
 	}
-	now := store.now().UTC()
-	startedAt := now
-	deadline := startedAt.Add(time.Duration(remaining) * time.Second)
 	manifest.State = StateActive
-	manifest.ActiveStartedAt = &startedAt
-	manifest.ActiveDeadline = &deadline
 	manifest.InferenceCapability = capability
 	manifest.LastError = ""
 	manifest.UpdatedAt = now
@@ -492,17 +428,10 @@ func (store Store) Activate(
 		return Manifest{}, fmt.Errorf("activation requires an inference capability")
 	}
 	now := store.now().UTC()
-	if manifest.ActiveLimitSeconds <= 0 {
-		return Manifest{}, fmt.Errorf("active wall-clock limit is required")
-	}
-	startedAt := now
-	deadline := startedAt.Add(time.Duration(manifest.ActiveLimitSeconds) * time.Second)
 	manifest.State = StateActive
 	manifest.SSH = &connection
 	manifest.Snapshot.BaselineCommit = materialized.BaselineCommit
 	manifest.Snapshot.Submodules = baselines
-	manifest.ActiveStartedAt = &startedAt
-	manifest.ActiveDeadline = &deadline
 	manifest.InferenceCapability = capability
 	manifest.LastError = ""
 	manifest.UpdatedAt = now
@@ -623,13 +552,6 @@ func validateManifestIdentity(manifest Manifest) error {
 	if err := runid.Validate(manifest.ProjectKey); err != nil {
 		return fmt.Errorf("invalid project key: %w", err)
 	}
-	if manifest.ActiveLimitSeconds <= 0 {
-		return fmt.Errorf("active wall-clock limit is required")
-	}
-	if manifest.ActiveElapsedSeconds < 0 ||
-		manifest.ActiveElapsedSeconds > manifest.ActiveLimitSeconds {
-		return fmt.Errorf("invalid active wall-clock usage")
-	}
 	return nil
 }
 
@@ -639,6 +561,11 @@ func validateStoredManifest(manifest Manifest, expectedRunID string) error {
 	}
 	if manifest.RunID != expectedRunID {
 		return fmt.Errorf("run manifest identity mismatch")
+	}
+	// A run's expiry is its creation time plus the lifetime, so a record
+	// without one would describe a run that expired before it existed.
+	if manifest.CreatedAt.IsZero() {
+		return fmt.Errorf("run manifest records no creation time")
 	}
 	if err := validateManifestIdentity(manifest); err != nil {
 		return err
@@ -668,9 +595,6 @@ func validateStoredManifest(manifest Manifest, expectedRunID string) error {
 		if manifest.SSH != nil {
 			return fmt.Errorf("creating run cannot have an SSH connection")
 		}
-		if manifest.ActiveStartedAt != nil || manifest.ActiveDeadline != nil {
-			return fmt.Errorf("inactive run retains active wall-clock timestamps")
-		}
 	case StateActive:
 		if manifest.SSH == nil {
 			return fmt.Errorf("run state %q requires an SSH connection", manifest.State)
@@ -678,21 +602,9 @@ func validateStoredManifest(manifest Manifest, expectedRunID string) error {
 		if !ValidInferenceCapability(manifest.InferenceCapability) {
 			return fmt.Errorf("active run requires an inference capability")
 		}
-		if manifest.ActiveStartedAt == nil || manifest.ActiveDeadline == nil {
-			return fmt.Errorf("active run requires wall-clock timestamps")
-		}
-		expected := manifest.ActiveStartedAt.Add(
-			time.Duration(manifest.remainingBudget()) * time.Second,
-		)
-		if !manifest.ActiveDeadline.Equal(expected) {
-			return fmt.Errorf("active run has an inconsistent wall-clock deadline")
-		}
 	case StateStopped, StateImported:
 		if manifest.SSH == nil {
 			return fmt.Errorf("run state %q requires an SSH connection", manifest.State)
-		}
-		if manifest.ActiveStartedAt != nil || manifest.ActiveDeadline != nil {
-			return fmt.Errorf("inactive run retains active wall-clock timestamps")
 		}
 	default:
 		return fmt.Errorf("invalid stored run state %q", manifest.State)
@@ -700,29 +612,26 @@ func validateStoredManifest(manifest Manifest, expectedRunID string) error {
 	return nil
 }
 
-// remainingBudget is what a run has left of its active wall-clock limit, before
-// any deadline the stretch it is in imposes on top of that.
-func (manifest Manifest) remainingBudget() int64 {
-	return manifest.ActiveLimitSeconds - manifest.ActiveElapsedSeconds
+// Lifetime is how long a run exists after it is created. Stopping and resuming
+// do not move it, and nothing inside a run can extend it.
+const Lifetime = 24 * time.Hour
+
+// LifetimeSeconds is Lifetime as Podman's --timeout takes it.
+const LifetimeSeconds = int64(Lifetime / time.Second)
+
+// ExpiresAt is when a run ends regardless of what it is doing.
+func (manifest Manifest) ExpiresAt() time.Time {
+	return manifest.CreatedAt.Add(Lifetime)
 }
 
+// RemainingSeconds is what a run has left, rounded up, and zero once it has
+// expired.
 func RemainingSeconds(manifest Manifest, now time.Time) int64 {
-	remaining := manifest.remainingBudget()
+	remaining := manifest.ExpiresAt().Sub(now.UTC())
 	if remaining <= 0 {
 		return 0
 	}
-	if manifest.State != StateActive || manifest.ActiveDeadline == nil {
-		return remaining
-	}
-	duration := manifest.ActiveDeadline.Sub(now.UTC())
-	if duration <= 0 {
-		return 0
-	}
-	seconds := int64((duration + time.Second - 1) / time.Second)
-	if seconds > remaining {
-		return remaining
-	}
-	return seconds
+	return int64((remaining + time.Second - 1) / time.Second)
 }
 
 // validateApplyPlan bounds what a stored journal can later ask Git to do. It

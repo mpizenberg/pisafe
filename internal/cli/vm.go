@@ -153,7 +153,7 @@ func printRebuildPlan(
 	if active := activeRunIDs(runs); len(active) != 0 && !loses {
 		fmt.Fprintf(
 			out,
-			"Stops:   %d active run(s), charged for the time their containers record\n",
+			"Stops:   %d active run(s), which resume as they were\n",
 			len(active),
 		)
 	}
@@ -183,12 +183,11 @@ func printRebuildPlan(
 	}
 }
 
-// stopRunsBeforeRebuild ends every run still holding a container, so the
-// stretch it spent is charged from the container's own account and what it
+// stopRunsBeforeRebuild ends every run still holding a container, so what it
 // produced reaches the project store before the instance goes. Nothing here can
 // refuse the rebuild: a VM too broken to answer is the reason one was asked
 // for, and a run left active is settled by the next command that reaches for
-// it, charged nothing for the outage.
+// it.
 func stopRunsBeforeRebuild(ctx context.Context, runs []runstate.Manifest, out io.Writer) {
 	active := activeRunIDs(runs)
 	if len(active) == 0 {
