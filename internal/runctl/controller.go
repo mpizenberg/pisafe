@@ -54,12 +54,12 @@ type Backend interface {
 
 type StateStore interface {
 	Create(runstate.Manifest) (runstate.Manifest, error)
-	Activate(string, runstate.SSHConnection, gitstage.Snapshot, string, time.Time) (runstate.Manifest, error)
+	Activate(string, runstate.SSHConnection, gitstage.Snapshot, string) (runstate.Manifest, error)
 	Get(string) (runstate.Manifest, error)
 	List() ([]runstate.Manifest, []runstate.UnreadableRun, error)
-	Stop(string, time.Time) (runstate.Manifest, error)
+	Stop(string, *time.Duration) (runstate.Manifest, error)
 	Abandon(string) (runstate.Manifest, error)
-	Resume(string, string, time.Time) (runstate.Manifest, error)
+	Resume(string, string) (runstate.Manifest, error)
 	Forget(string) error
 	BeginApply(string, gitstage.PlannedApply, []gitstage.SelectedInput) (runstate.Manifest, error)
 	CompleteApply(string) (runstate.Manifest, error)
@@ -287,7 +287,7 @@ func (controller Controller) StartPrepared(
 		KnownHostsFile:     endpoint.KnownHostsFile,
 		ConfigFile:         endpoint.ConfigFile,
 		HostKeyFingerprint: endpoint.HostKeyFingerprint,
-	}, materialized, capability, inspection.State.StartedAt)
+	}, materialized, capability)
 	if err != nil {
 		return runstate.Manifest{}, fmt.Errorf("activate run manifest: %w", err)
 	}

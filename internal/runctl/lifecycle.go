@@ -61,7 +61,7 @@ func (controller Controller) Stop(
 		return runstate.Manifest{}, fmt.Errorf("run %q is %s, not active", runID, manifest.State)
 	}
 	spec := specForManifest(manifest, manifest.Image)
-	endedAt, err := controller.stopAndRemoveContainer(ctx, spec)
+	elapsed, found, err := controller.stopAndRemoveContainer(ctx, spec)
 	if err == nil {
 		err = controller.backend.VerifyRunStorage(ctx, runID)
 	}
@@ -71,10 +71,10 @@ func (controller Controller) Stop(
 	// Nothing to stop means the container went with a rebooted or recreated VM,
 	// taking the only account of how much of the run's budget the stretch spent.
 	var stopped runstate.Manifest
-	if endedAt.IsZero() {
+	if !found {
 		stopped, err = controller.store.Abandon(runID)
 	} else {
-		stopped, err = controller.store.Stop(runID, endedAt)
+		stopped, err = controller.store.Stop(runID, elapsed)
 	}
 	if err != nil {
 		return runstate.Manifest{}, controller.recordLifecycleError(runID, "record stop", err)
@@ -139,7 +139,7 @@ func (controller Controller) Resume(
 		return runstate.Manifest{}, controller.recordLifecycleError(runID, "resume", err)
 	}
 	if existing != nil {
-		if _, err := controller.stopAndRemoveContainer(ctx, spec); err != nil {
+		if _, _, err := controller.stopAndRemoveContainer(ctx, spec); err != nil {
 			return runstate.Manifest{}, controller.recordLifecycleError(runID, "recover resume", err)
 		}
 	}
@@ -158,7 +158,7 @@ func (controller Controller) Resume(
 		}
 		cleanupContext, cancelCleanup := lifecycleCleanupContext(ctx)
 		defer cancelCleanup()
-		_, cleanupErr := controller.stopAndRemoveContainer(cleanupContext, spec)
+		_, _, cleanupErr := controller.stopAndRemoveContainer(cleanupContext, spec)
 		returnErr = controller.recordLifecycleError(
 			runID,
 			operation,
@@ -187,7 +187,7 @@ func (controller Controller) Resume(
 		return runstate.Manifest{}, err
 	}
 	operation = "record resume"
-	return controller.store.Resume(runID, capability, inspection.State.StartedAt)
+	return controller.store.Resume(runID, capability)
 }
 
 // endWhatIsNoLongerRunning settles a record that still claims a container the
@@ -293,20 +293,21 @@ func specForManifest(manifest runstate.Manifest, imageID string) runcontainer.Sp
 	return spec
 }
 
-// stopAndRemoveContainer takes a run's container down and reports when it
-// ended. A zero time means there was nothing to take down: the container went
-// with a VM that was rebooted or recreated, and the only account of when it
-// ended went with it.
+// stopAndRemoveContainer takes a run's container down and reports the
+// container's own account of how long the stretch ran. found is false when
+// there was nothing to take down: the container went with a VM that was
+// rebooted or recreated. A found container that cannot state both ends of its
+// run reports a nil account, leaving the Mac's to stand alone.
 func (controller Controller) stopAndRemoveContainer(
 	ctx context.Context,
 	spec runcontainer.Spec,
-) (time.Time, error) {
+) (elapsed *time.Duration, found bool, err error) {
 	inspection, err := controller.inspectContainer(ctx, spec)
 	if err != nil {
-		return time.Time{}, err
+		return nil, false, err
 	}
 	if inspection == nil {
-		return time.Time{}, nil
+		return nil, false, nil
 	}
 	if inspection.State.Status == "running" {
 		if _, err := controller.podman(
@@ -314,31 +315,41 @@ func (controller Controller) stopAndRemoveContainer(
 			nil,
 			"stop", "--time", "10", spec.ContainerName(),
 		); err != nil {
-			return time.Time{}, fmt.Errorf("stop run container: %w", err)
+			return nil, false, fmt.Errorf("stop run container: %w", err)
 		}
 		inspection, err = controller.inspectContainer(ctx, spec)
 		if err != nil {
-			return time.Time{}, err
+			return nil, false, err
 		}
 		if inspection == nil {
-			return time.Now().UTC(), nil
+			return nil, true, nil
 		}
 	}
 	if inspection.State.Status == "running" {
-		return time.Time{}, errors.New("run container remained active after stop")
+		return nil, false, errors.New("run container remained active after stop")
 	}
-	endedAt := inspection.State.FinishedAt
-	if endedAt.IsZero() {
-		endedAt = time.Now().UTC()
-	}
+	elapsed = containerStretch(inspection)
 	if _, err := controller.podman(
 		ctx,
 		nil,
 		"rm", "--force", spec.ContainerName(),
 	); err != nil {
-		return time.Time{}, fmt.Errorf("remove stopped run container: %w", err)
+		return nil, false, fmt.Errorf("remove stopped run container: %w", err)
 	}
-	return endedAt, nil
+	return elapsed, true, nil
+}
+
+// containerStretch measures a finished container against its own clock alone.
+// Both ends come from one inspection, so a guest clock that stepped between
+// them is the only way this disagrees with the Mac, and Stop bounds it for
+// exactly that reason.
+func containerStretch(inspection *containerInspection) *time.Duration {
+	started, finished := inspection.State.StartedAt, inspection.State.FinishedAt
+	if started.IsZero() || finished.IsZero() {
+		return nil
+	}
+	elapsed := finished.Sub(started)
+	return &elapsed
 }
 
 func (controller Controller) inspectContainer(

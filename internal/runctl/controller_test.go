@@ -1066,7 +1066,6 @@ func activeManifest(
 		},
 		gitstage.Snapshot{BaselineCommit: strings.Repeat("b", 40)},
 		"pisafe-cap-"+strings.Repeat("ab", 32),
-		time.Time{},
 	)
 	if err != nil {
 		t.Fatal(err)

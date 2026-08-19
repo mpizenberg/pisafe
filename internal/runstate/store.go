@@ -87,7 +87,6 @@ type Manifest struct {
 	ActiveDeadline       *time.Time               `json:"active_deadline,omitempty"`
 	CreatedAt            time.Time                `json:"created_at"`
 	UpdatedAt            time.Time                `json:"updated_at"`
-	StoppedAt            *time.Time               `json:"stopped_at,omitempty"`
 	ImportedAt           *time.Time               `json:"imported_at,omitempty"`
 	ImportedBranch       string                   `json:"imported_branch,omitempty"`
 	LastError            string                   `json:"last_error,omitempty"`
@@ -233,7 +232,12 @@ func (store Store) List() ([]Manifest, []UnreadableRun, error) {
 	return manifests, unreadable, nil
 }
 
-func (store Store) Stop(runID string, endedAt time.Time) (Manifest, error) {
+// Stop closes the stretch a run spent active. containerElapsed is the
+// container's own account of how long it ran, and nil is a container that could
+// not state one; either way the Mac's account of the same stretch bounds the
+// charge. Both are single-clock differences, and taking the smaller means a
+// clock that stepped under a suspended VM costs the run nothing.
+func (store Store) Stop(runID string, containerElapsed *time.Duration) (Manifest, error) {
 	manifest, err := store.Get(runID)
 	if err != nil {
 		return Manifest{}, err
@@ -241,20 +245,26 @@ func (store Store) Stop(runID string, endedAt time.Time) (Manifest, error) {
 	if err := requireActive(manifest); err != nil {
 		return Manifest{}, err
 	}
+	if manifest.ActiveStartedAt == nil {
+		return Manifest{}, fmt.Errorf("active run has no start to measure from")
+	}
 	now := store.now().UTC()
-	endedAt, err = containerTime(endedAt, now, "stop")
-	if err != nil {
-		return Manifest{}, err
+	elapsed := now.Sub(*manifest.ActiveStartedAt)
+	if containerElapsed != nil {
+		elapsed = min(elapsed, *containerElapsed)
 	}
-	if manifest.ActiveStartedAt == nil || endedAt.Before(*manifest.ActiveStartedAt) {
-		return Manifest{}, fmt.Errorf("container stop time precedes activation")
+	return store.replace(endActiveStretch(manifest, now, spentSeconds(manifest, elapsed)))
+}
+
+// spentSeconds rounds a stretch up to whole seconds and holds it to what the
+// run still had. A stretch measures as negative when the clock behind it
+// stepped back, and no clock disagreement is worth charging a run for.
+func spentSeconds(manifest Manifest, elapsed time.Duration) int64 {
+	if elapsed <= 0 {
+		return 0
 	}
-	elapsed := endedAt.Sub(*manifest.ActiveStartedAt)
-	elapsedSeconds := int64((elapsed + time.Second - 1) / time.Second)
-	if remaining := manifest.remainingBudget(); elapsedSeconds > remaining {
-		elapsedSeconds = remaining
-	}
-	return store.replace(endActiveStretch(manifest, now, endedAt, elapsedSeconds))
+	seconds := int64((elapsed + time.Second - 1) / time.Second)
+	return min(seconds, manifest.remainingBudget())
 }
 
 // Abandon records a run whose container went out from under it. Rebooting or
@@ -274,7 +284,7 @@ func (store Store) Abandon(runID string) (Manifest, error) {
 		return Manifest{}, err
 	}
 	now := store.now().UTC()
-	return store.replace(endActiveStretch(manifest, now, now, 0))
+	return store.replace(endActiveStretch(manifest, now, 0))
 }
 
 func requireActive(manifest Manifest) error {
@@ -294,7 +304,6 @@ func requireActive(manifest Manifest) error {
 func endActiveStretch(
 	manifest Manifest,
 	now time.Time,
-	endedAt time.Time,
 	elapsedSeconds int64,
 ) Manifest {
 	manifest.ActiveElapsedSeconds += elapsedSeconds
@@ -304,11 +313,10 @@ func endActiveStretch(
 	manifest.State = StateStopped
 	manifest.LastError = ""
 	manifest.UpdatedAt = now
-	manifest.StoppedAt = &endedAt
 	return manifest
 }
 
-func (store Store) Resume(runID string, capability string, startedAt time.Time) (Manifest, error) {
+func (store Store) Resume(runID string, capability string) (Manifest, error) {
 	manifest, err := store.Get(runID)
 	if err != nil {
 		return Manifest{}, err
@@ -328,10 +336,7 @@ func (store Store) Resume(runID string, capability string, startedAt time.Time) 
 		return Manifest{}, fmt.Errorf("resume requires a fresh inference capability")
 	}
 	now := store.now().UTC()
-	startedAt, err = containerTime(startedAt, now, "start")
-	if err != nil {
-		return Manifest{}, err
-	}
+	startedAt := now
 	deadline := startedAt.Add(time.Duration(remaining) * time.Second)
 	manifest.State = StateActive
 	manifest.ActiveStartedAt = &startedAt
@@ -464,7 +469,6 @@ func (store Store) Activate(
 	connection SSHConnection,
 	materialized gitstage.Snapshot,
 	capability string,
-	startedAt time.Time,
 ) (Manifest, error) {
 	manifest, err := store.Get(runID)
 	if err != nil {
@@ -491,10 +495,7 @@ func (store Store) Activate(
 	if manifest.ActiveLimitSeconds <= 0 {
 		return Manifest{}, fmt.Errorf("active wall-clock limit is required")
 	}
-	startedAt, err = containerTime(startedAt, now, "start")
-	if err != nil {
-		return Manifest{}, err
-	}
+	startedAt := now
 	deadline := startedAt.Add(time.Duration(manifest.ActiveLimitSeconds) * time.Second)
 	manifest.State = StateActive
 	manifest.SSH = &connection
@@ -554,29 +555,6 @@ func (store Store) RecordError(runID string, operationErr error) (Manifest, erro
 	manifest.LastError = operationErr.Error()
 	manifest.UpdatedAt = store.now().UTC()
 	return store.replace(manifest)
-}
-
-// clockSkewAllowance is how far ahead of the Mac a container's clock may be
-// before its account of when it started or stopped is refused outright.
-const clockSkewAllowance = 5 * time.Second
-
-// containerTime reconciles a time the container reported with the Mac's. Zero
-// means the container never said, and a little skew is clamped rather than
-// refused, because charging a run for a second it could not have spent is worse
-// than losing one. Beyond that the two clocks disagree about something pisafe
-// bills a budget against, and it will not guess which is right.
-func containerTime(reported, now time.Time, moment string) (time.Time, error) {
-	reported = reported.UTC()
-	if reported.IsZero() {
-		return now, nil
-	}
-	if reported.After(now.Add(clockSkewAllowance)) {
-		return time.Time{}, fmt.Errorf("container %s time is in the future", moment)
-	}
-	if reported.After(now) {
-		return now, nil
-	}
-	return reported, nil
 }
 
 func (store Store) replace(manifest Manifest) (Manifest, error) {

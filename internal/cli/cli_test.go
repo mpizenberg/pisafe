@@ -342,11 +342,10 @@ func TestConnectPointsAStoppedRunAtResume(t *testing.T) {
 		},
 		gitstage.Snapshot{BaselineCommit: strings.Repeat("a", 40)},
 		"pisafe-cap-"+strings.Repeat("b", 64),
-		time.Now(),
 	); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Stop("stopped-run", time.Now()); err != nil {
+	if _, err := store.Stop("stopped-run", nil); err != nil {
 		t.Fatal(err)
 	}
 	err := Run(context.Background(), []string{"connect", "stopped-run"}, nil, io.Discard)

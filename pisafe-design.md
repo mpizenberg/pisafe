@@ -559,6 +559,13 @@ creating → active → stopped → imported → reclaimed
 - Stopped time does not consume the eight-hour active budget. A run is killed
   independently when its remaining budget expires; the next lifecycle command
   reconciles the durable record to stopped.
+- A stretch is stamped and charged on the Mac's clock, the one its deadline is
+  enforced against. The container's own account of how long it ran may lower
+  that charge and never raises it. A guest clock does not advance while the VM
+  is suspended with the host and steps whenever it catches up, so the two
+  disagree by hours across a night; a budget measured across both clocks spends
+  that disagreement, and charging a run for a second it could not have spent is
+  worse than losing one.
 - A run is active only while its container runs, so rebooting or recreating the
   VM leaves records claiming containers that are gone. Settling one of those
   costs it nothing: the container carried the only account of how much of the

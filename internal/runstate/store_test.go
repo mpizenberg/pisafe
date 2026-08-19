@@ -25,7 +25,7 @@ func TestStoreLifecycleAndList(t *testing.T) {
 		t.Fatalf("created = %#v", created)
 	}
 	now = now.Add(time.Minute)
-	active, err := store.Activate("run-one", testSSHConnection(root, "run-one"), gitstage.Snapshot{}, testCapability(), time.Time{})
+	active, err := store.Activate("run-one", testSSHConnection(root, "run-one"), gitstage.Snapshot{}, testCapability())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,12 +33,9 @@ func TestStoreLifecycleAndList(t *testing.T) {
 		t.Fatalf("active = %#v", active)
 	}
 	now = now.Add(time.Minute)
-	stopped, err := store.Stop("run-one", now)
+	stopped, err := store.Stop("run-one", nil)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if stopped.StoppedAt == nil || !stopped.StoppedAt.Equal(now) {
-		t.Fatalf("stopped = %#v", stopped)
 	}
 	if stopped.ActiveElapsedSeconds != 60 {
 		t.Fatalf("active elapsed = %d", stopped.ActiveElapsedSeconds)
@@ -76,7 +73,6 @@ func TestStoreRejectsInvalidTransitions(t *testing.T) {
 		testSSHConnection(root, "run-one"),
 		gitstage.Snapshot{},
 		testCapability(),
-		time.Time{},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -84,10 +80,10 @@ func TestStoreRejectsInvalidTransitions(t *testing.T) {
 		!strings.Contains(err.Error(), "not stopped") {
 		t.Fatalf("error = %v", err)
 	}
-	if _, err := store.Resume("run-one", testCapability(), time.Now()); err == nil {
+	if _, err := store.Resume("run-one", testCapability()); err == nil {
 		t.Fatal("active run resumed")
 	}
-	if _, err := store.Resume("../escape", testCapability(), time.Now()); err == nil {
+	if _, err := store.Resume("../escape", testCapability()); err == nil {
 		t.Fatal("unsafe run ID was accepted")
 	}
 }
@@ -191,7 +187,6 @@ func TestStoreRecordsAndClearsOperationError(t *testing.T) {
 		testSSHConnection(store.root, "run-one"),
 		gitstage.Snapshot{},
 		testCapability(),
-		time.Time{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -213,7 +208,6 @@ func TestStoreActivatesWithRunScopedSSHConnection(t *testing.T) {
 		connection,
 		gitstage.Snapshot{BaselineCommit: strings.Repeat("a", 40)},
 		testCapability(),
-		time.Time{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -240,7 +234,7 @@ func TestStoreRejectsMismatchedSSHConnection(t *testing.T) {
 	}
 	if _, err := store.Activate("run-one", SSHConnection{
 		Alias: "pisafe-other",
-	}, gitstage.Snapshot{}, testCapability(), time.Time{}); err == nil {
+	}, gitstage.Snapshot{}, testCapability()); err == nil {
 		t.Fatal("mismatched SSH connection was accepted")
 	}
 }
@@ -256,7 +250,6 @@ func TestStoreRejectsInvalidMaterializedBaseline(t *testing.T) {
 		testSSHConnection(root, "run-one"),
 		gitstage.Snapshot{BaselineCommit: "not-a-git-object"},
 		testCapability(),
-		time.Time{},
 	); err == nil {
 		t.Fatal("invalid baseline commit was accepted")
 	}
@@ -270,7 +263,7 @@ func TestStoreAccountsCumulativeActiveWallClock(t *testing.T) {
 	if _, err := store.Create(testManifest("run-one")); err != nil {
 		t.Fatal(err)
 	}
-	active, err := store.Activate("run-one", testSSHConnection(root, "run-one"), gitstage.Snapshot{}, testCapability(), time.Time{})
+	active, err := store.Activate("run-one", testSSHConnection(root, "run-one"), gitstage.Snapshot{}, testCapability())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +272,7 @@ func TestStoreAccountsCumulativeActiveWallClock(t *testing.T) {
 		t.Fatalf("active deadline = %v", active.ActiveDeadline)
 	}
 	now = now.Add(90*time.Minute + 500*time.Millisecond)
-	stopped, err := store.Stop("run-one", now)
+	stopped, err := store.Stop("run-one", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +280,7 @@ func TestStoreAccountsCumulativeActiveWallClock(t *testing.T) {
 		t.Fatalf("active elapsed = %d", stopped.ActiveElapsedSeconds)
 	}
 	now = now.Add(24 * time.Hour)
-	resumed, err := store.Resume("run-one", testCapability(), now)
+	resumed, err := store.Resume("run-one", testCapability())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,6 +288,59 @@ func TestStoreAccountsCumulativeActiveWallClock(t *testing.T) {
 		t.Fatalf("remaining = %d", got)
 	}
 }
+
+func TestStoreChargesNoMoreThanEitherClockSaw(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		container *time.Duration
+		charged   int64
+	}{
+		// The guest clock stepped forward mid-stretch, as it does when NTP
+		// corrects a VM that was suspended with the Mac. Its account of the
+		// stretch is longer than the stretch could have been.
+		{name: "stepped guest clock", container: durationOf(9 * time.Hour), charged: 3600},
+		// The container exited at its own deadline and nothing looked until
+		// later, so only the Mac's account kept growing.
+		{name: "controller noticed late", container: durationOf(10 * time.Minute), charged: 600},
+		// A clock that stepped back leaves a negative stretch, which is a
+		// disagreement rather than time a run spent.
+		{name: "clock stepped back", container: durationOf(-time.Hour), charged: 0},
+		// Nothing to compare against leaves the Mac's account standing alone.
+		{name: "container stated nothing", container: nil, charged: 3600},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			root := t.TempDir()
+			now := time.Date(2026, 8, 19, 7, 18, 0, 0, time.UTC)
+			store := NewStore(root)
+			store.now = func() time.Time { return now }
+			if _, err := store.Create(testManifest("run-one")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Activate(
+				"run-one",
+				testSSHConnection(root, "run-one"),
+				gitstage.Snapshot{},
+				testCapability(),
+			); err != nil {
+				t.Fatal(err)
+			}
+			now = now.Add(time.Hour)
+			stopped, err := store.Stop("run-one", testCase.container)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stopped.ActiveElapsedSeconds != testCase.charged {
+				t.Fatalf(
+					"active elapsed = %d, want %d",
+					stopped.ActiveElapsedSeconds,
+					testCase.charged,
+				)
+			}
+		})
+	}
+}
+
+func durationOf(d time.Duration) *time.Duration { return &d }
 
 func TestStoreAbandonsARunWithoutChargingForTheOutage(t *testing.T) {
 	root := t.TempDir()
@@ -309,7 +355,6 @@ func TestStoreAbandonsARunWithoutChargingForTheOutage(t *testing.T) {
 		testSSHConnection(root, "run-one"),
 		gitstage.Snapshot{},
 		testCapability(),
-		time.Time{},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +379,7 @@ func TestStoreAbandonsARunWithoutChargingForTheOutage(t *testing.T) {
 		!strings.Contains(err.Error(), "invalid run transition") {
 		t.Fatalf("error = %v", err)
 	}
-	if _, err := store.Resume("run-one", testCapability(), now); err != nil {
+	if _, err := store.Resume("run-one", testCapability()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -350,7 +395,6 @@ func TestStoreIssuesRotatesAndRevokesInferenceCapability(t *testing.T) {
 		testSSHConnection(root, "run-one"),
 		gitstage.Snapshot{},
 		"not-a-capability",
-		time.Time{},
 	); err == nil {
 		t.Fatal("invalid inference capability was accepted")
 	}
@@ -360,7 +404,6 @@ func TestStoreIssuesRotatesAndRevokesInferenceCapability(t *testing.T) {
 		testSSHConnection(root, "run-one"),
 		gitstage.Snapshot{},
 		first,
-		time.Time{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -368,25 +411,25 @@ func TestStoreIssuesRotatesAndRevokesInferenceCapability(t *testing.T) {
 	if active.InferenceCapability != first {
 		t.Fatalf("active capability = %q", active.InferenceCapability)
 	}
-	stopped, err := store.Stop("run-one", time.Time{})
+	stopped, err := store.Stop("run-one", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if stopped.InferenceCapability != "" {
 		t.Fatal("stopped run retained its inference capability")
 	}
-	if _, err := store.Resume("run-one", "", time.Now()); err == nil {
+	if _, err := store.Resume("run-one", ""); err == nil {
 		t.Fatal("resume without a fresh capability was accepted")
 	}
 	second := "pisafe-cap-" + strings.Repeat("cd", 32)
-	resumed, err := store.Resume("run-one", second, time.Now())
+	resumed, err := store.Resume("run-one", second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if resumed.InferenceCapability != second {
 		t.Fatalf("resumed capability = %q", resumed.InferenceCapability)
 	}
-	restopped, err := store.Stop("run-one", time.Time{})
+	restopped, err := store.Stop("run-one", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,7 +502,7 @@ func TestStoreRecordsApplyPlanUntilEveryRefIsImported(t *testing.T) {
 		imported.Apply != nil {
 		t.Fatalf("imported = %#v", imported)
 	}
-	if _, err := store.Resume("run-apply", testCapability(), time.Time{}); err == nil {
+	if _, err := store.Resume("run-apply", testCapability()); err == nil {
 		t.Fatal("an imported run was resumed")
 	}
 	if stopped.State != StateStopped {
@@ -539,11 +582,10 @@ func stoppedTestRun(t *testing.T, store Store, root, runID string) Manifest {
 		testSSHConnection(root, runID),
 		gitstage.Snapshot{},
 		testCapability(),
-		time.Time{},
 	); err != nil {
 		t.Fatal(err)
 	}
-	stopped, err := store.Stop(runID, time.Time{})
+	stopped, err := store.Stop(runID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -618,7 +660,6 @@ func TestStoreRecordsMaterializedSubmoduleBaselines(t *testing.T) {
 		testSSHConnection(root, "run-one"),
 		materialized,
 		testCapability(),
-		time.Time{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -646,7 +687,6 @@ func TestStoreRecordsMaterializedSubmoduleBaselines(t *testing.T) {
 			testSSHConnection(root, "run-one"),
 			wrongSnapshot,
 			testCapability(),
-			time.Time{},
 		); err == nil {
 			t.Fatalf("activation accepted submodules %#v", wrong)
 		}

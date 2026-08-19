@@ -138,6 +138,15 @@ credentials in the sandbox — and are stated as rules in
   own `--timeout` so it outlives the controller; a daemon or VM-side timer would
   add a second trusted lifecycle service. Changing accounting semantics needs a
   manifest migration.
+- A stretch is stamped from the Mac's clock and charged the smaller of the Mac's
+  and the container's account of it. The controller starts the container, so
+  taking the start from the container's own stamp added a second clock for a
+  fact it already had: a guest lagging a suspended host by four hours set a
+  deadline four hours short, and the stop that followed charged the same gap
+  again, spending a whole budget in one call. Bounding skew in both directions
+  was rejected because it leaves the subtraction spanning two clocks, so a clock
+  that steps mid-stretch still corrupts the charge. Reversible; it is where the
+  two accounts meet in `Stop`.
 - Destructive confirmation is the repeated non-interactive form
   (`--confirm RUN`), identical in scripts and terminals; the same reasoning makes
   `cp --force` a flag rather than a prompt.

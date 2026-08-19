@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/mpizenberg/pisafe/internal/gitstage"
 	"github.com/mpizenberg/pisafe/internal/runstate"
@@ -227,7 +226,7 @@ func applyFixture(t *testing.T, runID string) (string, string, gitstage.Snapshot
 func stoppedRun(t *testing.T, store runstate.Store, snapshot gitstage.Snapshot) {
 	t.Helper()
 	activeRun(t, store, snapshot)
-	if _, err := store.Stop(snapshot.RunID, time.Now().UTC()); err != nil {
+	if _, err := store.Stop(snapshot.RunID, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -253,14 +252,13 @@ func activeRun(t *testing.T, store runstate.Store, snapshot gitstage.Snapshot) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	started := time.Now().UTC().Add(-time.Minute)
 	if _, err := store.Activate(snapshot.RunID, runstate.SSHConnection{
 		Alias:              "pisafe-" + snapshot.RunID,
 		IdentityFile:       "/state/ssh/" + snapshot.RunID + "/id_ed25519",
 		KnownHostsFile:     "/state/ssh/" + snapshot.RunID + "/known_hosts",
 		ConfigFile:         "/state/ssh/" + snapshot.RunID + "/ssh.config",
 		HostKeyFingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-	}, gitstage.Snapshot{BaselineCommit: snapshot.BaselineCommit}, capability, started); err != nil {
+	}, gitstage.Snapshot{BaselineCommit: snapshot.BaselineCommit}, capability); err != nil {
 		t.Fatal(err)
 	}
 }
