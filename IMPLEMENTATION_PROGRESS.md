@@ -71,7 +71,9 @@ Beyond what the design requires:
   gave up while the guest carried on; `pisafe vm rebuild` reports it without
   inviting another rebuild. Incomplete names `pisafe vm rebuild` in `Start` and
   is let through by `StartUnverified`. A VM that cannot be asked is neither.
-  The boot marker is Lima-internal, pinned by `minimumLimaVersion: 2.2.0`.
+  The boot marker is Lima-internal, pinned by `minimumLimaVersion: 2.2.0`, and
+  was observed live: absent while a fresh VM set up — when both `resume` and
+  `stop` reported setting up — and written beside the record once it finished.
   `VM.StartUnverified` serves the commands deliberately exempt from it, which
   start a stopped VM rather than reporting one.
 - Any state Lima calls neither running nor stopped is `StatusBroken`: the
@@ -175,8 +177,10 @@ Podman, Lima, or Pi bump.
 - Zed applies a new saved connection's arguments at a 100 ms file-watcher delay
   and not at none.
 - Lima 2.2.0 repeatedly booted a stopped VZ VM without restoring SSH, `vzNAT`
-  failing identically. Fresh creation is reliable; stopped-VM restart remains an
-  upstream gap.
+  failing identically, while every boot still re-ran `dnf install`. Once that
+  install was skipped, a stopped VM came back through a pisafe command in 15 s,
+  setup taking 5 s from boot. One restart does not show the gap is gone, nor
+  whether the network wait was its cause.
 
 ## Tests and verification
 
@@ -222,7 +226,9 @@ PISAFE_LIVE_STATE_DISK=1 go test -v ./internal/lima -run TestLiveStateDisk
 Anything that mounts a run needs the immutable ID of a locally built run image,
 which is why the image list comes before the last command. Any change to the VM
 definition moves the security profile digest, so the VM must be deleted and
-recreated before these pass. The state-disk test is separate because it proves
+recreated before these pass — with `pisafe vm rebuild`, since the suites give a
+VM they create 15 minutes and a slow network's first setup takes longer. The
+state-disk test is separate because it proves
 its property by deleting the instance holding it, on a throwaway instance.
 
 Verified against a real ARM64 VM: the boundary (no `/Users`, no Podman socket,
@@ -239,9 +245,12 @@ on three scratch repositories; `gc` by aging real timestamps; the broker relay
 and a real ChatGPT subscription driving Pi with no provider credential anywhere
 in the run; shared project layers, cache selection and publishing, and session
 promotion; the profile staying read-only while `pi install` succeeds in a run;
-pinned installs, offers, and the toolchain; project reclamation and rebind; and
+pinned installs, offers, and the toolchain; project reclamation and rebind;
 backup and restore end to end, including a second backup into the same directory
-adding without removing.
+adding without removing; a rebuild keeping the state disk, refused as still
+setting up rather than stale while provisioning ran; the same VM verifying
+without a rebuild after the Mac moved from one private network to another; and a
+stopped VM restarting without reaching the network.
 
 `pisafe profile reset` has no live test, deliberately: there is one profile and
 nothing scopes a test to a profile of its own, so a live test would empty
@@ -250,12 +259,13 @@ whatever the user has installed.
 ## Live VM state
 
 A persistent Lima instance named `pisafe` is left running with security profile
-`sha256:906c5bd13b53594ed1513187e804705e301873b3f0969758eac460d8345fb20c`,
-holding the current managed run image:
+`sha256:defb79e682f953bd847fb01ce0ab7aa6c5976dde791bc88593a847b5760864ac`
+— the one every network inside the fixed deny set gives — holding the current
+managed run image:
 
 ```text
-recipe digest: sha256:4305e790f9baf24b9b44ee350006192fe166f364ba559b96b71e04b25d3db91d
-image ID:      sha256:2e6d954bbbc57ad81193d03285bd60ca25eebb3a806a5a81803629b7f90925c5
+recipe digest: sha256:227e2594fee14acf80c15eefb60d317a3f37e2479f699633206d2d5fbd85200a
+image ID:      sha256:4192be21e81d3064a55cbad73e77a08362204774197381a2cce0b2a7ef271e4c
 ```
 
 When a recorded digest and a rebuild disagree, the rebuild is right: the recipe

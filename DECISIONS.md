@@ -42,6 +42,35 @@ credentials in the sandbox — and are stated as rules in
   failed check deletes every run's storage, so the check destroyed exactly the
   work it was asked to protect. `restore` is not exempt because it installs over
   the network; `backup` is, being the half that runs against a stale VM.
+- The security profile is written to `/run`, as provisioning's last command.
+  The same write moved to the end in `/etc` was rejected: provisioning runs on
+  every boot and is what mounts the state disk, so the previous boot's record
+  would already vouch for a VM still setting up. tmpfs makes the record mean
+  this boot's setup completed.
+- `/run/lima-boot-done` tells a setup still running from one that ended without
+  completing; Lima's boot script writes it even when provisioning failed.
+  `cloud-init status` was rejected: while degraded it exits 2, which hides its
+  output, and once setup ends it crashes for the Lima user. A pisafe failure
+  marker was rejected too: it cannot tell a VM predating the `/run` record from
+  one not yet provisioning. The marker is Lima-internal, so a Lima upgrade must
+  re-check it.
+- `StartUnverified` refuses only a setup still running. An incomplete setup is
+  let through as a stale record is, because the commands it serves are the ones
+  a VM whose setup failed still needs.
+- A VM that cannot be asked for its setup state names no cure. A rebuild over a
+  transient SSH failure costs hours on a slow network, and an unanswered
+  question is not a failed boundary check. `pisafe vm rebuild` rewrites
+  "still setting up" rather than repeating it, because running the rebuild again
+  deletes a VM about to be ready.
+- `dnf install` runs only when `rpm -q` finds a package missing. `dnf
+  --cacheonly` fails on a cache never filled; a first-boot marker can disagree
+  with what is installed; a longer `metadata_expire` still loads repositories.
+  Nothing is lost, since `dnf install` never upgraded an installed package.
+- `limactl start` waits two hours. Lima's ten minutes abandons a first setup
+  on a slow network while the guest carries on; an unbounded wait hangs on a
+  boot that never comes up. Two hours is sized from ~85 MiB of setup at
+  ~30 KiB/s with margin. Whether Lima counts a first image download against it
+  is unverified.
 - VM size is three constants outside the security-profile digest: it bounds
   nothing a run may do, so changing it must not demand the recreation that
   destroys every project store.

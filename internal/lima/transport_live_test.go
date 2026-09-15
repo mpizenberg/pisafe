@@ -62,6 +62,9 @@ func TestLiveSSHStageAndContainerMaterialize(t *testing.T) {
 	}()
 
 	spec := runcontainer.DefaultSpec(runID, liveProjectKey, imageID)
+	if err := vm.EnsureGlobalStorage(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if err := vm.EnsureProjectStorage(ctx, liveProjectKey); err != nil {
 		t.Fatal(err)
 	}
