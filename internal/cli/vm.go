@@ -108,6 +108,15 @@ func rebuildVM(ctx context.Context, request vmRebuildRequest, out io.Writer) err
 
 	fmt.Fprintln(out, "Creating the VM and verifying its boundary...")
 	if err := vm.Ensure(ctx, prefixes); err != nil {
+		// The reflex after a failed rebuild is to ask for it again, which here
+		// would delete a VM about to be ready and start its slow setup over.
+		if errors.Is(err, lima.ErrSettingUp) {
+			return errors.New(
+				"the new VM is still setting up, and its run image is not built yet; " +
+					"once setup finishes, the next command that needs the image builds it. " +
+					"Rebuilding again would start the setup over",
+			)
+		}
 		return err
 	}
 	// A run image is built inside the instance, so it goes with one. Building it

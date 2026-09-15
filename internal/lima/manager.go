@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/netip"
@@ -296,9 +297,21 @@ func (vm VM) Start(ctx context.Context, hostPrefixes []netip.Prefix) error {
 // that fails it is a rebuild, which ends every run that is working. Holding
 // these commands to the profile would make handing back a finished run's diff
 // cost every other run's session.
+//
+// A VM whose setup is still running is refused all the same: that setup is what
+// mounts the state disk these commands reach. One whose setup ended without
+// completing is not, because the commands that rescue a failed VM's work are
+// the ones exempt here.
 func (vm VM) StartUnverified(ctx context.Context) error {
 	if err := vm.bringUp(ctx); err != nil {
 		return err
+	}
+	setup, _, err := vm.readSetup(ctx)
+	if err != nil {
+		return err
+	}
+	if setup == setupRunning {
+		return ErrSettingUp
 	}
 	return vm.SyncClock(ctx)
 }
@@ -325,6 +338,11 @@ func (vm VM) bringUp(ctx context.Context) error {
 			"--timeout="+startTimeout.String(),
 			vm.instance,
 		); err != nil {
+			// Lima stops waiting while the guest carries on, so an instance it
+			// gave up on may still be setting up, and would finish.
+			if setup, _, readErr := vm.readSetup(ctx); readErr == nil && setup == setupRunning {
+				return ErrSettingUp
+			}
 			return fmt.Errorf("start Lima instance: %w", err)
 		}
 		return nil
@@ -337,23 +355,66 @@ func (vm VM) bringUp(ctx context.Context) error {
 	}
 }
 
+// ErrSettingUp reports a VM whose setup on this boot has not finished. Waiting
+// is the cure: a rebuild would start the same setup over.
+var ErrSettingUp = errors.New("the VM is still setting up; run the command again once it finishes")
+
+type setupState string
+
+const (
+	setupReady      setupState = "ready"
+	setupRunning    setupState = "setting-up"
+	setupIncomplete setupState = "incomplete"
+)
+
+// setupStateScript answers in one round trip how far this boot's setup got,
+// with a ready VM's record on the lines after. The record exists only once
+// setup completed. Lima's boot marker exists once its boot script ended, even
+// when provisioning failed. Both live on tmpfs, so neither survives a boot.
+const setupStateScript = `if [ -e /run/pisafe/security-profile ]; then
+  echo ready
+  cat /run/pisafe/security-profile
+elif [ -e /run/lima-boot-done ]; then
+  echo incomplete
+else
+  echo setting-up
+fi`
+
+// readSetup reads the VM's setup state. A VM that cannot be asked is an error
+// of its own, never mistaken for either unfinished state.
+func (vm VM) readSetup(ctx context.Context) (setupState, string, error) {
+	output, err := vm.shellScript(ctx, nil, setupStateScript)
+	if err != nil {
+		return "", "", fmt.Errorf("read VM setup state: %w", err)
+	}
+	answer, record, _ := strings.Cut(string(output), "\n")
+	switch setup := setupState(answer); setup {
+	case setupReady, setupRunning, setupIncomplete:
+		return setup, strings.TrimSpace(record), nil
+	}
+	return "", "", fmt.Errorf("read VM setup state: unrecognised answer %q", answer)
+}
+
 // verifySecurityProfile detects an instance provisioned by an older or locally
 // modified VM definition. The record is root-owned, immutable to the
 // unprivileged Lima user, and written by each boot's setup only once that setup
 // completed. The prefixes are already canonical: what the digest is taken over
 // is decided once, by Start.
 func (vm VM) verifySecurityProfile(ctx context.Context, prefixes []string) error {
-	expected := securityProfileDigest(prefixes)
-	output, err := vm.runner.Run(ctx, nil, vm.inVM([]string{
-		"cat", "/run/pisafe/security-profile",
-	})...)
+	setup, record, err := vm.readSetup(ctx)
 	if err != nil {
+		return err
+	}
+	switch setup {
+	case setupRunning:
+		return ErrSettingUp
+	case setupIncomplete:
 		return fmt.Errorf(
-			"read VM security profile: %w; rebuild the VM with pisafe vm rebuild",
-			err,
+			"VM setup did not complete on this boot, or the VM predates its " +
+				"current definition; rebuild the VM with pisafe vm rebuild",
 		)
 	}
-	if strings.TrimSpace(string(output)) != expected {
+	if record != securityProfileDigest(prefixes) {
 		return fmt.Errorf(
 			"VM security profile is stale: the VM definition changed, or the Mac " +
 				"joined a network outside the fixed deny set; " +

@@ -2,6 +2,7 @@ package lima
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/netip"
@@ -95,7 +96,7 @@ func TestManagerEnsureCreatesStartsAndVerifiesAbsentVM(t *testing.T) {
 		nil,
 		nil,
 		[]byte("pisafe\tRunning\n"),
-		[]byte(securityProfileDigest([]string{prefix.String()}) + "\n"),
+		readyOutput(prefix.String()),
 		nil,
 	}}
 	vm := VM{instance: InstanceName, runner: runner}
@@ -111,10 +112,7 @@ func TestManagerEnsureCreatesStartsAndVerifiesAbsentVM(t *testing.T) {
 	assertArgs(t, runner.calls[4],
 		"--tty=false", "create", "--name=pisafe", runner.calls[4].args[3],
 	)
-	assertArgs(
-		t, runner.calls[6],
-		"shell", "pisafe", "cat", "/run/pisafe/security-profile",
-	)
+	assertSetupRead(t, runner.calls[6])
 }
 
 // The disk outlives the instance, so a VM being recreated has to find the one
@@ -128,7 +126,7 @@ func TestManagerEnsureAdoptsAnExistingStateDisk(t *testing.T) {
 		nil,
 		nil,
 		[]byte("pisafe\tRunning\n"),
-		[]byte(securityProfileDigest([]string{prefix.String()}) + "\n"),
+		readyOutput(prefix.String()),
 		nil,
 	}}
 	vm := VM{instance: InstanceName, runner: runner}
@@ -153,7 +151,7 @@ func TestManagerEnsureLeavesDisksAloneWhenTheVMExists(t *testing.T) {
 	runner := &fakeRunner{outputs: [][]byte{
 		[]byte("pisafe\tRunning\n"),
 		[]byte("pisafe\tRunning\n"),
-		[]byte(securityProfileDigest([]string{prefix.String()}) + "\n"),
+		readyOutput(prefix.String()),
 		nil,
 	}}
 	vm := VM{instance: InstanceName, runner: runner}
@@ -168,10 +166,12 @@ func TestManagerEnsureLeavesDisksAloneWhenTheVMExists(t *testing.T) {
 	}
 }
 
+// The setup state and the record it vouches for come back together, so holding
+// a ready VM to its record costs no more round trips than reading the record.
 func TestManagerStartIsIdempotent(t *testing.T) {
 	runner := &fakeRunner{outputs: [][]byte{
 		[]byte("pisafe\tRunning\n"),
-		[]byte(securityProfileDigest([]string{"198.51.100.0/24"}) + "\n"),
+		readyOutput("198.51.100.0/24"),
 		nil,
 	}}
 	vm := VM{instance: InstanceName, runner: runner}
@@ -182,10 +182,7 @@ func TestManagerStartIsIdempotent(t *testing.T) {
 	if len(runner.calls) != 3 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
-	assertArgs(
-		t, runner.calls[1],
-		"shell", "pisafe", "cat", "/run/pisafe/security-profile",
-	)
+	assertSetupRead(t, runner.calls[1])
 	assertArgs(t, runner.calls[2], "shell", "pisafe", "sudo", "/usr/local/sbin/pisafe-clock-step")
 }
 
@@ -193,7 +190,7 @@ func TestManagerStartRefreshesAfterResume(t *testing.T) {
 	runner := &fakeRunner{outputs: [][]byte{
 		[]byte("pisafe\tStopped\n"),
 		nil,
-		[]byte(securityProfileDigest([]string{"198.51.100.0/24"}) + "\n"),
+		readyOutput("198.51.100.0/24"),
 		nil,
 	}}
 	vm := VM{instance: InstanceName, runner: runner}
@@ -205,10 +202,7 @@ func TestManagerStartRefreshesAfterResume(t *testing.T) {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
 	assertArgs(t, runner.calls[1], "--tty=false", "start", "--timeout=2h0m0s", "pisafe")
-	assertArgs(
-		t, runner.calls[2],
-		"shell", "pisafe", "cat", "/run/pisafe/security-profile",
-	)
+	assertSetupRead(t, runner.calls[2])
 	assertArgs(t, runner.calls[3], "shell", "pisafe", "sudo", "/usr/local/sbin/pisafe-clock-step")
 }
 
@@ -221,7 +215,7 @@ func TestManagerStartKeepsTheVMAcrossPrivateNetworks(t *testing.T) {
 	}
 	runner := &fakeRunner{outputs: [][]byte{
 		[]byte("pisafe\tRunning\n"),
-		[]byte(securityProfileDigest(built) + "\n"),
+		readyOutput(built...),
 		nil,
 	}}
 	vm := VM{instance: InstanceName, runner: runner}
@@ -232,28 +226,12 @@ func TestManagerStartKeepsTheVMAcrossPrivateNetworks(t *testing.T) {
 }
 
 // Handing a run's work back, and letting go of the run, are what is left on a
-// VM that can no longer start one, so the security profile may not be read
-// here: a drifted one would refuse exactly the commands that rescue the work.
+// VM that can no longer start one, so the security profile is not held against
+// it here: a drifted one would refuse exactly the commands that rescue the work.
 func TestManagerStartUnverifiedSkipsBoundaryVerification(t *testing.T) {
 	runner := &fakeRunner{outputs: [][]byte{
 		[]byte("pisafe\tRunning\n"),
-		nil,
-	}}
-	vm := VM{instance: InstanceName, runner: runner}
-
-	if err := vm.StartUnverified(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if len(runner.calls) != 2 {
-		t.Fatalf("calls = %#v", runner.calls)
-	}
-	assertArgs(t, runner.calls[1], "shell", "pisafe", "sudo", "/usr/local/sbin/pisafe-clock-step")
-}
-
-func TestManagerStartUnverifiedStartsStoppedInstance(t *testing.T) {
-	runner := &fakeRunner{outputs: [][]byte{
-		[]byte("pisafe\tStopped\n"),
-		nil,
+		[]byte("ready\nsha256:stale\n"),
 		nil,
 	}}
 	vm := VM{instance: InstanceName, runner: runner}
@@ -264,8 +242,128 @@ func TestManagerStartUnverifiedStartsStoppedInstance(t *testing.T) {
 	if len(runner.calls) != 3 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
-	assertArgs(t, runner.calls[1], "--tty=false", "start", "--timeout=2h0m0s", "pisafe")
+	assertSetupRead(t, runner.calls[1])
 	assertArgs(t, runner.calls[2], "shell", "pisafe", "sudo", "/usr/local/sbin/pisafe-clock-step")
+}
+
+// A VM whose setup ended without completing is the one whose work most needs
+// rescuing, so the exempt commands still reach it.
+func TestManagerStartUnverifiedStartsStoppedInstance(t *testing.T) {
+	runner := &fakeRunner{outputs: [][]byte{
+		[]byte("pisafe\tStopped\n"),
+		nil,
+		[]byte("incomplete\n"),
+		nil,
+	}}
+	vm := VM{instance: InstanceName, runner: runner}
+
+	if err := vm.StartUnverified(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 4 {
+		t.Fatalf("calls = %#v", runner.calls)
+	}
+	assertArgs(t, runner.calls[1], "--tty=false", "start", "--timeout=2h0m0s", "pisafe")
+	assertSetupRead(t, runner.calls[2])
+	assertArgs(t, runner.calls[3], "shell", "pisafe", "sudo", "/usr/local/sbin/pisafe-clock-step")
+}
+
+// Setup still running is waited on by every command, verified or not: it is
+// what mounts the state disk and narrows sudo, and a rebuild would only start
+// it over.
+func TestManagerRefusesAVMStillSettingUpWithoutNamingRebuild(t *testing.T) {
+	for name, start := range map[string]func(VM) error{
+		"Start": func(vm VM) error {
+			return vm.Start(context.Background(), testPrefixes("198.51.100.0/24"))
+		},
+		"StartUnverified": func(vm VM) error {
+			return vm.StartUnverified(context.Background())
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			runner := &fakeRunner{outputs: [][]byte{
+				[]byte("pisafe\tRunning\n"),
+				[]byte("setting-up\n"),
+			}}
+			err := start(VM{instance: InstanceName, runner: runner})
+			if !errors.Is(err, ErrSettingUp) || strings.Contains(err.Error(), "rebuild") {
+				t.Fatalf("error = %v", err)
+			}
+			if len(runner.calls) != 2 {
+				t.Fatalf("continued on a VM still setting up: %#v", runner.calls)
+			}
+		})
+	}
+}
+
+// Lima gives up on a slow first setup while the guest carries on, so its
+// failure is reported as the wait it is when the setup is still going.
+func TestManagerStartReportsAnAbandonedStartThatIsStillSettingUp(t *testing.T) {
+	runner := &fakeRunner{
+		outputs: [][]byte{
+			[]byte("pisafe\tStopped\n"),
+			nil,
+			[]byte("setting-up\n"),
+		},
+		errors: []error{nil, fmt.Errorf("did not receive an event with the running status")},
+	}
+	vm := VM{instance: InstanceName, runner: runner}
+
+	err := vm.Start(context.Background(), testPrefixes("198.51.100.0/24"))
+	if !errors.Is(err, ErrSettingUp) {
+		t.Fatalf("error = %v", err)
+	}
+	assertSetupRead(t, runner.calls[2])
+}
+
+func TestManagerStartReportsLimaWhenAFailedStartIsNotSettingUp(t *testing.T) {
+	runner := &fakeRunner{
+		outputs: [][]byte{
+			[]byte("pisafe\tStopped\n"),
+			nil,
+			nil,
+		},
+		errors: []error{
+			nil,
+			fmt.Errorf("did not receive an event with the running status"),
+			fmt.Errorf("instance is not running"),
+		},
+	}
+	vm := VM{instance: InstanceName, runner: runner}
+
+	err := vm.Start(context.Background(), testPrefixes("198.51.100.0/24"))
+	if err == nil || errors.Is(err, ErrSettingUp) ||
+		!strings.Contains(err.Error(), "start Lima instance: did not receive") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+// A VM that cannot be asked has told nothing about its setup, so it must not
+// be reported as waiting on one or as needing a rebuild.
+func TestManagerSetupReadFailureIsNeitherUnfinishedState(t *testing.T) {
+	for _, output := range []struct {
+		name   string
+		answer []byte
+		err    error
+	}{
+		{name: "unreachable", err: fmt.Errorf("ssh: connection reset")},
+		{name: "unrecognised", answer: []byte("sha256:old-record\n")},
+	} {
+		t.Run(output.name, func(t *testing.T) {
+			runner := &fakeRunner{
+				outputs: [][]byte{[]byte("pisafe\tRunning\n"), output.answer},
+				errors:  []error{nil, output.err},
+			}
+			vm := VM{instance: InstanceName, runner: runner}
+
+			err := vm.Start(context.Background(), testPrefixes("198.51.100.0/24"))
+			if err == nil || errors.Is(err, ErrSettingUp) ||
+				!strings.Contains(err.Error(), "read VM setup state") ||
+				strings.Contains(err.Error(), "rebuild") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
 }
 
 func TestManagerStartUnverifiedRefusesAbsentInstance(t *testing.T) {
@@ -281,7 +379,7 @@ func TestManagerStartUnverifiedRefusesAbsentInstance(t *testing.T) {
 func TestManagerStartFailsClosedOnSecurityProfileDrift(t *testing.T) {
 	runner := &fakeRunner{outputs: [][]byte{
 		[]byte("pisafe\tRunning\n"),
-		[]byte("sha256:stale\n"),
+		[]byte("ready\nsha256:stale\n"),
 	}}
 	vm := VM{instance: InstanceName, runner: runner}
 
@@ -294,16 +392,23 @@ func TestManagerStartFailsClosedOnSecurityProfileDrift(t *testing.T) {
 	}
 }
 
-func TestManagerStartFailsClosedWhenSecurityProfileIsMissing(t *testing.T) {
-	runner := &fakeRunner{
-		outputs: [][]byte{[]byte("pisafe\tRunning\n")},
-		errors:  []error{nil, fmt.Errorf("missing")},
-	}
+// Setup that ended this boot without writing the record either failed or
+// belongs to a VM built before the record moved, and only a rebuild settles
+// either.
+func TestManagerStartFailsClosedWhenSetupDidNotComplete(t *testing.T) {
+	runner := &fakeRunner{outputs: [][]byte{
+		[]byte("pisafe\tRunning\n"),
+		[]byte("incomplete\n"),
+	}}
 	vm := VM{instance: InstanceName, runner: runner}
 
 	err := vm.Start(context.Background(), testPrefixes("192.168.2.0/24"))
-	if err == nil || !strings.Contains(err.Error(), "pisafe vm rebuild") {
+	if err == nil || errors.Is(err, ErrSettingUp) ||
+		!strings.Contains(err.Error(), "pisafe vm rebuild") {
 		t.Fatalf("error = %v", err)
+	}
+	if len(runner.calls) != 2 {
+		t.Fatalf("Start continued on an incomplete setup: %#v", runner.calls)
 	}
 }
 
@@ -440,6 +545,15 @@ func TestManagerHasStateDiskDistinguishesTheDiskFromAnyOther(t *testing.T) {
 			}
 		})
 	}
+}
+
+func readyOutput(prefixes ...string) []byte {
+	return []byte("ready\n" + securityProfileDigest(prefixes) + "\n")
+}
+
+func assertSetupRead(t *testing.T, call recordedCall) {
+	t.Helper()
+	assertArgs(t, call, "shell", "pisafe", "sh", "-ceu", setupStateScript, "pisafe-remote")
 }
 
 func assertArgs(t *testing.T, call recordedCall, want ...string) {

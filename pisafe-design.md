@@ -111,7 +111,12 @@ fails the boot.
 
 Provisioning runs again on every boot. A boot that finds every package already
 installed needs no network to finish it, so restarting a VM never waits on the
-network.
+network. A VM is held to its security profile only once this boot's setup has
+completed, and the record attesting it is written as that setup's last step. A
+setup still running is waited on, never rebuilt: every command refuses the VM
+until it finishes and says so, because a rebuild would only start the same
+setup over. A setup that ended without completing is a failed boundary check
+like any other.
 
 Each run gets its own container, staged repository, quota-backed writable
 storage, SSH endpoint, and broker capability, plus a read-only global profile

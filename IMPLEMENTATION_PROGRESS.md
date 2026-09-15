@@ -63,6 +63,15 @@ Beyond what the design requires:
 - `limactl start` waits two hours rather than Lima's ten minutes. A first setup
   downloading its packages over a slow network outlasts the default, and Lima
   stops waiting while the guest carries on. Later boots install nothing.
+- One `limactl shell` call reads the setup state together with the record:
+  **ready** (record present), **setting up** (no record, no
+  `/run/lima-boot-done`), or **incomplete** (no record, but Lima's boot script
+  ended — setup failed, or the VM predates the `/run` record). Setting up is
+  `lima.ErrSettingUp` for `Start`, `StartUnverified`, and a `limactl start` that
+  gave up while the guest carried on; `pisafe vm rebuild` reports it without
+  inviting another rebuild. Incomplete names `pisafe vm rebuild` in `Start` and
+  is let through by `StartUnverified`. A VM that cannot be asked is neither.
+  The boot marker is Lima-internal, pinned by `minimumLimaVersion: 2.2.0`.
   `VM.StartUnverified` serves the commands deliberately exempt from it, which
   start a stopped VM rather than reporting one.
 - Any state Lima calls neither running nor stopped is `StatusBroken`: the
