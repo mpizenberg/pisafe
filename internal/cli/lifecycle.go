@@ -212,7 +212,7 @@ func runDiscard(ctx context.Context, runID string, out io.Writer) error {
 // prepareUnverified builds the controller for a command that starts no run:
 // one that reads or writes a run's workspace from outside it, or one that only
 // ends or removes what a run already holds. Such a command is not held to the
-// VM's boundary records, for the reasons on lima.VM.StartUnverified.
+// VM's security profile, for the reasons on lima.VM.StartUnverified.
 func prepareUnverified(ctx context.Context) (runctl.Controller, error) {
 	controller, _, err := newController(ctx)
 	if err != nil {

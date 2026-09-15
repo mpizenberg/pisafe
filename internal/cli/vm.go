@@ -40,9 +40,9 @@ func runVM(ctx context.Context, args []string, out io.Writer) error {
 }
 
 // rebuildVM replaces the instance with one built from the current definition.
-// It is the cure every boundary check prescribes: a stale security profile or a
-// firewall built around networks this Mac has left is drift in the instance,
-// and nothing short of a new one settles it.
+// It is the cure every boundary check prescribes: a stale security profile,
+// whether from a changed definition or a network outside the fixed deny set, is
+// drift in the instance, and nothing short of a new one settles it.
 func rebuildVM(ctx context.Context, request vmRebuildRequest, out io.Writer) error {
 	vm := lima.New()
 	status, err := vm.Status(ctx)

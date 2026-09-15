@@ -102,6 +102,10 @@ func checkGeneratedLimaConfig(ctx context.Context, out io.Writer) error {
 	if output, err := command.CombinedOutput(); err != nil {
 		return fmt.Errorf("validate Lima configuration: %s", output)
 	}
-	fmt.Fprintf(out, "OK       Boundary %d host IPv4 prefixes; Lima config valid\n", len(boundary))
+	fmt.Fprintf(
+		out,
+		"OK       Boundary %d host IPv4 prefixes beyond the fixed deny set; Lima config valid\n",
+		len(boundary),
+	)
 	return nil
 }

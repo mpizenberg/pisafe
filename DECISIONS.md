@@ -29,7 +29,14 @@ credentials in the sandbox — and are stated as rules in
   static exception `192.0.2.1:18080`; a syntax-valid refresh helper would still
   let an escaped process swap the LAN set for an unrelated valid prefix. Changing
   the port or address requires VM recreation.
-- The boundary records are verified before a command that may start a run or
+- Host on-link prefixes the fixed deny set already covers are dropped from the
+  host set and its digest. Keeping them made every new private network demand a
+  rebuild that changed nothing the VM could reach, and a rebuild on a slow
+  network costs hours. Keeping them in the set but out of the digest was
+  rejected: the firewall would differ from what its digest attests. The host
+  set is attested by the digest alone; a separate `host-prefixes` record only
+  ever confirmed a digest that had already matched.
+- The boundary record is verified before a command that may start a run or
   fetch over the network, not before one that only reaches what is there.
   Verifying everywhere looked safer and is the one rejected: the only cure for a
   failed check deletes every run's storage, so the check destroyed exactly the

@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/mpizenberg/pisafe/internal/safefile"
@@ -264,9 +263,9 @@ func (vm VM) unlockStateDisk(ctx context.Context) error {
 	return nil
 }
 
-// Start starts (or reuses) the VM and verifies that its immutable host-network
-// deny set and generated security profile still match the controller. Callers
-// must not start run containers if this fails.
+// Start starts (or reuses) the VM and verifies that its generated security
+// profile, host-network deny set included, still matches the controller.
+// Callers must not start run containers if this fails.
 func (vm VM) Start(ctx context.Context, hostPrefixes []netip.Prefix) error {
 	prefixes, err := CanonicalIPv4Prefixes(hostPrefixes)
 	if err != nil {
@@ -278,19 +277,16 @@ func (vm VM) Start(ctx context.Context, hostPrefixes []netip.Prefix) error {
 	if err := vm.verifySecurityProfile(ctx, prefixes); err != nil {
 		return err
 	}
-	if err := vm.SyncClock(ctx); err != nil {
-		return err
-	}
-	return vm.verifyFirewall(ctx, prefixes)
+	return vm.SyncClock(ctx)
 }
 
-// StartUnverified starts (or reuses) the VM without holding it to the boundary
-// records, for a command that starts no run: one that reads or writes a run's
+// StartUnverified starts (or reuses) the VM without holding it to its security
+// profile, for a command that starts no run: one that reads or writes a run's
 // own workspace through a container with no network, no home, and none of the
 // shared profile, or one that only ends or removes what a run already holds.
-// Neither record bears on what such a command reaches, and the cure for a VM
-// that fails either is a rebuild, which ends every run that is working. Holding
-// these commands to the records would make handing back a finished run's diff
+// The profile bears on nothing such a command reaches, and the cure for a VM
+// that fails it is a rebuild, which ends every run that is working. Holding
+// these commands to the profile would make handing back a finished run's diff
 // cost every other run's session.
 func (vm VM) StartUnverified(ctx context.Context) error {
 	if err := vm.bringUp(ctx); err != nil {
@@ -349,7 +345,9 @@ func (vm VM) verifySecurityProfile(ctx context.Context, prefixes []string) error
 	}
 	if strings.TrimSpace(string(output)) != expected {
 		return fmt.Errorf(
-			"VM security profile is stale; rebuild the VM with pisafe vm rebuild",
+			"VM security profile is stale: the VM definition changed, or the Mac " +
+				"joined a network outside the fixed deny set; " +
+				"rebuild the VM with pisafe vm rebuild",
 		)
 	}
 	return nil
@@ -362,38 +360,6 @@ func (vm VM) SyncClock(ctx context.Context) error {
 		"sudo", "/usr/local/sbin/pisafe-clock-step",
 	})...); err != nil {
 		return fmt.Errorf("synchronize VM clock: %w", err)
-	}
-	return nil
-}
-
-// verifyFirewall refuses to reuse a VM after the Mac's on-link networks change.
-// The prefix set is immutable at runtime so a process that escapes to the Lima
-// user cannot use a privileged refresh operation to weaken it. The VM's copy is
-// the one deny set pisafe did not compose, so it is parsed rather than trusted:
-// a line that is not an IPv4 prefix fails the check instead of being skipped.
-func (vm VM) verifyFirewall(ctx context.Context, prefixes []string) error {
-	output, err := vm.runner.Run(ctx, nil, vm.inVM([]string{
-		"cat", "/etc/pisafe/host-prefixes",
-	})...)
-	if err != nil {
-		return fmt.Errorf("read VM firewall networks: %w", err)
-	}
-	installed := make([]netip.Prefix, 0, len(prefixes))
-	for _, field := range strings.Fields(string(output)) {
-		prefix, err := netip.ParsePrefix(field)
-		if err != nil || !prefix.Addr().Is4() {
-			return fmt.Errorf("validate VM firewall networks: invalid IPv4 prefix %q", field)
-		}
-		installed = append(installed, prefix)
-	}
-	actual, err := CanonicalIPv4Prefixes(installed)
-	if err != nil {
-		return fmt.Errorf("validate VM firewall networks: %w", err)
-	}
-	if !slices.Equal(actual, prefixes) {
-		return fmt.Errorf(
-			"VM firewall networks are stale; rebuild the VM with pisafe vm rebuild",
-		)
 	}
 	return nil
 }

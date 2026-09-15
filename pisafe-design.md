@@ -407,7 +407,9 @@ nftables rules:
   and the VM's own gateway and host-side addresses.
 - Additionally deny the Mac's directly connected on-link prefixes, gathered at
   VM start/resume, so a LAN using globally routed IPv4 space is still covered;
-  fail closed if they cannot be determined.
+  fail closed if they cannot be determined. A prefix the fixed ranges above
+  already cover adds nothing and is dropped, so moving between private networks
+  leaves the VM current; only a network outside them makes it stale.
 - Allow one exact exception: the inference broker relay address and port. It is
   fixed at provisioning time. The VM user has no firewall-mutation privilege of
   any kind, so there is nothing to extend at runtime.
@@ -613,10 +615,10 @@ creating → active → stopped → imported → reclaimed
   with no network, no home, and none of the shared profile; `stop` and `discard`
   only end what a run holds; `backup` reads the VM and writes to the Mac;
   `extension list`, `extension remove`, `tool list`, `tool remove`, and `profile
-  reset` read the profile or take things out of it. Neither the host-network
-  deny set nor the security profile bears on those, and neither is verified
+  reset` read the profile or take things out of it. The security profile, its
+  host-network deny set included, bears on none of those and is not verified
   before them. Only a command that may start a run or fetch over the network is
-  held to the records. `restore` stays verified because it installs over the
+  held to it. `restore` stays verified because it installs over the
   network, and the VM it puts a backup into is the new one, never the VM that
   failed.
 - A command that reaches the profile without fetching starts the VM it needs.

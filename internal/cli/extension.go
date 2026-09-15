@@ -356,7 +356,7 @@ func validatePackageSpec(packageSpec string) error {
 }
 
 // ensureProfileStorage brings up the VM a profile command reaches and lays out
-// the filesystem the profile lives on. The boundary records go unchecked
+// the filesystem the profile lives on. The security profile goes unchecked
 // because nothing reaching the profile this way fetches: reading it or emptying
 // it admits nothing the deny set governs, while the cure for a record that no
 // longer holds is a rebuild that ends every run that is working. Taking an

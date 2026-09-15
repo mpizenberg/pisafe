@@ -13,8 +13,9 @@ import (
 func TestRenderConfigContainsSecurityBoundary(t *testing.T) {
 	config, err := RenderConfig([]netip.Prefix{
 		netip.MustParsePrefix("203.0.113.8/24"),
+		netip.MustParsePrefix("198.51.100.2/24"),
+		netip.MustParsePrefix("198.51.100.1/32"),
 		netip.MustParsePrefix("192.168.4.2/24"),
-		netip.MustParsePrefix("192.168.4.1/32"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +32,7 @@ func TestRenderConfigContainsSecurityBoundary(t *testing.T) {
 		"ip daddr @host_onlink_v4 reject",
 		"type filter hook output",
 		"type filter hook forward",
-		"elements = { 192.168.4.0/24, 203.0.113.0/24 }",
+		"elements = { 198.51.100.0/24, 203.0.113.0/24 }",
 		"net.ipv6.conf.all.disable_ipv6 = 1",
 		"PermitListen 192.0.2.1:18080",
 		"ip daddr 192.0.2.1 tcp dport 18080 accept",
@@ -41,7 +42,6 @@ func TestRenderConfigContainsSecurityBoundary(t *testing.T) {
 		"usermod --add-subuids 100000-165535",
 		"podman system migrate",
 		"podman unshare cat /proc/self/uid_map",
-		"/etc/pisafe/host-prefixes",
 		"/etc/pisafe/security-profile",
 		"sha256:",
 		"pisafe-clock-step",
@@ -69,6 +69,11 @@ func TestRenderConfigContainsSecurityBoundary(t *testing.T) {
 	for _, fragment := range required {
 		if !strings.Contains(text, fragment) {
 			t.Errorf("config does not contain %q", fragment)
+		}
+	}
+	for _, prefix := range fixedDeniedIPv4 {
+		if !strings.Contains(text, "\n          "+prefix.String()) {
+			t.Errorf("fixed deny set does not render %s", prefix)
 		}
 	}
 	if count := strings.Count(text, "ct state established,related accept"); count != 3 {
@@ -102,9 +107,9 @@ func TestRenderConfigContainsSecurityBoundary(t *testing.T) {
 }
 
 func TestSecurityProfileChangesWithTemplateOrNetworks(t *testing.T) {
-	first := securityProfileDigest([]string{"192.168.4.0/24"})
-	equivalent := securityProfileDigest([]string{"192.168.4.0/24"})
-	different := securityProfileDigest([]string{"10.20.30.0/24"})
+	first := securityProfileDigest([]string{"198.51.100.0/24"})
+	equivalent := securityProfileDigest([]string{"198.51.100.0/24"})
+	different := securityProfileDigest([]string{"203.0.113.0/24"})
 	if first != equivalent {
 		t.Fatal("equivalent security profiles have different digests")
 	}
@@ -119,17 +124,17 @@ func TestSecurityProfileChangesWithTemplateOrNetworks(t *testing.T) {
 // when the networks themselves changed.
 func TestSecurityProfileDependsOnTheCanonicalSetAlone(t *testing.T) {
 	observed, err := CanonicalIPv4Prefixes([]netip.Prefix{
-		netip.MustParsePrefix("192.168.7.23/24"),
-		netip.MustParsePrefix("100.64.4.2/30"),
-		netip.MustParsePrefix("192.168.7.1/32"),
-		netip.MustParsePrefix("192.168.7.99/24"),
+		netip.MustParsePrefix("198.51.100.23/24"),
+		netip.MustParsePrefix("203.0.113.2/30"),
+		netip.MustParsePrefix("198.51.100.1/32"),
+		netip.MustParsePrefix("198.51.100.99/24"),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	collapsed, err := CanonicalIPv4Prefixes([]netip.Prefix{
-		netip.MustParsePrefix("100.64.4.0/30"),
-		netip.MustParsePrefix("192.168.7.0/24"),
+		netip.MustParsePrefix("203.0.113.0/30"),
+		netip.MustParsePrefix("198.51.100.0/24"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -139,6 +144,56 @@ func TestSecurityProfileDependsOnTheCanonicalSetAlone(t *testing.T) {
 	}
 	if securityProfileDigest(observed) != securityProfileDigest(collapsed) {
 		t.Fatal("equivalent host networks produced different security profiles")
+	}
+}
+
+// Nearly every network a Mac joins is private, and the fixed deny set already
+// refuses all of those addresses, so joining one must neither add to the host
+// set nor move the digest a VM is held to.
+func TestCanonicalIPv4PrefixesDropsWhatTheFixedSetDenies(t *testing.T) {
+	train, err := CanonicalIPv4Prefixes(testPrefixes("10.16.3.7/21"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hotspot, err := CanonicalIPv4Prefixes(testPrefixes("172.20.10.2/28", "192.168.1.9/24"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(train) != 0 || len(hotspot) != 0 {
+		t.Fatalf("private networks survived canonicalization: %v and %v", train, hotspot)
+	}
+	if securityProfileDigest(train) != securityProfileDigest(hotspot) {
+		t.Fatal("moving between private networks changed the security profile")
+	}
+
+	mixed, err := CanonicalIPv4Prefixes(testPrefixes(
+		"10.16.3.7/21",
+		"203.0.113.8/24",
+		"172.0.0.0/8",
+		"192.0.0.0/16",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"172.0.0.0/8", "192.0.0.0/16", "203.0.113.0/24"}
+	if !slices.Equal(mixed, want) {
+		t.Fatalf("canonical set = %v, want %v (prefixes only partly denied must stay)", mixed, want)
+	}
+}
+
+// nft refuses an empty elements list, so a Mac with nothing beyond the fixed
+// set still gets the host set declared, with nothing in it.
+func TestRenderConfigDeclaresAnEmptyHostSetWithoutElements(t *testing.T) {
+	config, err := RenderConfig(testPrefixes("192.168.4.2/24"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(config)
+	if !strings.Contains(text, "set host_onlink_v4 {\n        type ipv4_addr\n        flags interval\n") {
+		t.Error("config does not declare the host set")
+	}
+	if count := strings.Count(text, "elements ="); count != 1 {
+		t.Errorf("%d elements lines, want only the fixed set's", count)
 	}
 }
 

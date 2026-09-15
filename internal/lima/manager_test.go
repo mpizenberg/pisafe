@@ -87,7 +87,7 @@ func TestManagerCreateValidatesBeforeCreating(t *testing.T) {
 }
 
 func TestManagerEnsureCreatesStartsAndVerifiesAbsentVM(t *testing.T) {
-	prefix := netip.MustParsePrefix("192.168.2.0/24")
+	prefix := netip.MustParsePrefix("198.51.100.0/24")
 	runner := &fakeRunner{outputs: [][]byte{
 		nil,
 		nil,
@@ -97,14 +97,13 @@ func TestManagerEnsureCreatesStartsAndVerifiesAbsentVM(t *testing.T) {
 		[]byte("pisafe\tRunning\n"),
 		[]byte(securityProfileDigest([]string{prefix.String()}) + "\n"),
 		nil,
-		[]byte(prefix.String() + "\n"),
 	}}
 	vm := VM{instance: InstanceName, runner: runner}
 
 	if err := vm.Ensure(context.Background(), []netip.Prefix{prefix}); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 9 {
+	if len(runner.calls) != 8 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
 	assertArgs(t, runner.calls[1], "disk", "list", "--json")
@@ -121,7 +120,7 @@ func TestManagerEnsureCreatesStartsAndVerifiesAbsentVM(t *testing.T) {
 // The disk outlives the instance, so a VM being recreated has to find the one
 // already holding every run's storage rather than ask for a second, empty one.
 func TestManagerEnsureAdoptsAnExistingStateDisk(t *testing.T) {
-	prefix := netip.MustParsePrefix("192.168.2.0/24")
+	prefix := netip.MustParsePrefix("198.51.100.0/24")
 	runner := &fakeRunner{outputs: [][]byte{
 		nil,
 		[]byte(`{"name":"other","size":1}` + "\n" +
@@ -131,7 +130,6 @@ func TestManagerEnsureAdoptsAnExistingStateDisk(t *testing.T) {
 		[]byte("pisafe\tRunning\n"),
 		[]byte(securityProfileDigest([]string{prefix.String()}) + "\n"),
 		nil,
-		[]byte(prefix.String() + "\n"),
 	}}
 	vm := VM{instance: InstanceName, runner: runner}
 
@@ -143,7 +141,7 @@ func TestManagerEnsureAdoptsAnExistingStateDisk(t *testing.T) {
 			t.Fatalf("Ensure recreated a state disk that already exists: %#v", call)
 		}
 	}
-	if len(runner.calls) != 8 {
+	if len(runner.calls) != 7 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
 }
@@ -151,13 +149,12 @@ func TestManagerEnsureAdoptsAnExistingStateDisk(t *testing.T) {
 // A VM that is already there keeps the disk it was created with, so nothing
 // asks Lima about disks on the path every run takes.
 func TestManagerEnsureLeavesDisksAloneWhenTheVMExists(t *testing.T) {
-	prefix := netip.MustParsePrefix("192.168.2.0/24")
+	prefix := netip.MustParsePrefix("198.51.100.0/24")
 	runner := &fakeRunner{outputs: [][]byte{
 		[]byte("pisafe\tRunning\n"),
 		[]byte("pisafe\tRunning\n"),
 		[]byte(securityProfileDigest([]string{prefix.String()}) + "\n"),
 		nil,
-		[]byte(prefix.String() + "\n"),
 	}}
 	vm := VM{instance: InstanceName, runner: runner}
 
@@ -174,16 +171,15 @@ func TestManagerEnsureLeavesDisksAloneWhenTheVMExists(t *testing.T) {
 func TestManagerStartIsIdempotent(t *testing.T) {
 	runner := &fakeRunner{outputs: [][]byte{
 		[]byte("pisafe\tRunning\n"),
-		[]byte(securityProfileDigest([]string{"192.168.2.0/24"}) + "\n"),
+		[]byte(securityProfileDigest([]string{"198.51.100.0/24"}) + "\n"),
 		nil,
-		[]byte("192.168.2.0/24\n"),
 	}}
 	vm := VM{instance: InstanceName, runner: runner}
 
-	if err := vm.Start(context.Background(), testPrefixes("192.168.2.0/24")); err != nil {
+	if err := vm.Start(context.Background(), testPrefixes("198.51.100.0/24")); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 4 {
+	if len(runner.calls) != 3 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
 	assertArgs(
@@ -191,27 +187,21 @@ func TestManagerStartIsIdempotent(t *testing.T) {
 		"shell", "pisafe", "cat", "/etc/pisafe/security-profile",
 	)
 	assertArgs(t, runner.calls[2], "shell", "pisafe", "sudo", "/usr/local/sbin/pisafe-clock-step")
-	assertArgs(
-		t,
-		runner.calls[3],
-		"shell", "pisafe", "cat", "/etc/pisafe/host-prefixes",
-	)
 }
 
 func TestManagerStartRefreshesAfterResume(t *testing.T) {
 	runner := &fakeRunner{outputs: [][]byte{
 		[]byte("pisafe\tStopped\n"),
 		nil,
-		[]byte(securityProfileDigest([]string{"192.168.2.0/24"}) + "\n"),
+		[]byte(securityProfileDigest([]string{"198.51.100.0/24"}) + "\n"),
 		nil,
-		[]byte("192.168.2.0/24\n"),
 	}}
 	vm := VM{instance: InstanceName, runner: runner}
 
-	if err := vm.Start(context.Background(), testPrefixes("192.168.2.0/24")); err != nil {
+	if err := vm.Start(context.Background(), testPrefixes("198.51.100.0/24")); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.calls) != 5 {
+	if len(runner.calls) != 4 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
 	assertArgs(t, runner.calls[1], "--tty=false", "start", "pisafe")
@@ -220,16 +210,30 @@ func TestManagerStartRefreshesAfterResume(t *testing.T) {
 		"shell", "pisafe", "cat", "/etc/pisafe/security-profile",
 	)
 	assertArgs(t, runner.calls[3], "shell", "pisafe", "sudo", "/usr/local/sbin/pisafe-clock-step")
-	assertArgs(
-		t,
-		runner.calls[4],
-		"shell", "pisafe", "cat", "/etc/pisafe/host-prefixes",
-	)
+}
+
+// A Mac that moved from one private network to another is denied the same
+// addresses on both, so the VM built on the first stays current on the second.
+func TestManagerStartKeepsTheVMAcrossPrivateNetworks(t *testing.T) {
+	built, err := CanonicalIPv4Prefixes(testPrefixes("172.20.10.2/28"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{outputs: [][]byte{
+		[]byte("pisafe\tRunning\n"),
+		[]byte(securityProfileDigest(built) + "\n"),
+		nil,
+	}}
+	vm := VM{instance: InstanceName, runner: runner}
+
+	if err := vm.Start(context.Background(), testPrefixes("10.16.3.7/21")); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // Handing a run's work back, and letting go of the run, are what is left on a
-// VM that can no longer start one, so neither boundary record may be read here:
-// a drifted one would refuse exactly the commands that rescue the work.
+// VM that can no longer start one, so the security profile may not be read
+// here: a drifted one would refuse exactly the commands that rescue the work.
 func TestManagerStartUnverifiedSkipsBoundaryVerification(t *testing.T) {
 	runner := &fakeRunner{outputs: [][]byte{
 		[]byte("pisafe\tRunning\n"),
@@ -312,55 +316,6 @@ func TestManagerStartFailsBeforeLimaWhenPrefixesAreMissing(t *testing.T) {
 	}
 	if len(runner.calls) != 0 {
 		t.Fatalf("calls = %#v", runner.calls)
-	}
-}
-
-func TestVerifyFirewallAcceptsCanonicalEquivalentPrefixes(t *testing.T) {
-	runner := &fakeRunner{outputs: [][]byte{
-		[]byte("203.0.113.9/32\n192.168.2.0/24\n"),
-	}}
-	vm := VM{instance: InstanceName, runner: runner}
-
-	prefixes, err := CanonicalIPv4Prefixes(
-		testPrefixes("192.168.2.0/24", "192.168.2.1/32", "203.0.113.9/32"),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := vm.verifyFirewall(context.Background(), prefixes); err != nil {
-		t.Fatal(err)
-	}
-	if len(runner.calls) != 1 {
-		t.Fatalf("calls = %#v", runner.calls)
-	}
-	assertArgs(
-		t,
-		runner.calls[0],
-		"shell", "pisafe", "cat", "/etc/pisafe/host-prefixes",
-	)
-}
-
-// The deny set the VM holds is the one pisafe did not compose, so a line of it
-// that is not an IPv4 prefix fails the check rather than being skipped past.
-func TestVerifyFirewallRejectsInjectedPrefix(t *testing.T) {
-	runner := &fakeRunner{outputs: [][]byte{
-		[]byte("10.0.0.0/8 } delete table inet pisafe\n"),
-	}}
-	vm := VM{instance: InstanceName, runner: runner}
-	err := vm.verifyFirewall(context.Background(), []string{"10.0.0.0/8"})
-	if err == nil || !strings.Contains(err.Error(), "invalid IPv4 prefix") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestVerifyFirewallFailsClosedOnNetworkChange(t *testing.T) {
-	runner := &fakeRunner{outputs: [][]byte{
-		[]byte("192.168.2.0/24\n"),
-	}}
-	vm := VM{instance: InstanceName, runner: runner}
-	err := vm.verifyFirewall(context.Background(), []string{"10.20.30.0/24"})
-	if err == nil || !strings.Contains(err.Error(), "stale") {
-		t.Fatalf("error = %v", err)
 	}
 }
 

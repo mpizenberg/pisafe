@@ -53,9 +53,11 @@ unit test fails the build if those digests do not move with `PiVersion`.
 
 Beyond what the design requires:
 
-- Every VM records a root-owned SHA-256 of its complete generated definition and
-  the canonical host-network set, checked before clock or firewall verification.
-  Both that check and the firewall check name `pisafe vm rebuild`.
+- Every VM records a root-owned SHA-256 of its complete generated definition,
+  its fixed deny set, and the canonical host-network set — the on-link prefixes
+  that set does not already cover, so on a private network none — checked
+  before clock synchronization. A mismatch names both causes and `pisafe vm
+  rebuild`.
   `VM.StartUnverified` serves the commands deliberately exempt from it, which
   start a stopped VM rather than reporting one.
 - Any state Lima calls neither running nor stopped is `StatusBroken`: the

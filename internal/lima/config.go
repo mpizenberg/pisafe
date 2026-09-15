@@ -30,6 +30,20 @@ const (
 	vmDiskGiB   = 64
 )
 
+// fixedDeniedIPv4 is what a run is denied whatever network the Mac is on.
+var fixedDeniedIPv4 = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+}
+
 func RenderConfig(hostIPv4Prefixes []netip.Prefix) ([]byte, error) {
 	prefixes, err := CanonicalIPv4Prefixes(hostIPv4Prefixes)
 	if err != nil {
@@ -38,13 +52,19 @@ func RenderConfig(hostIPv4Prefixes []netip.Prefix) ([]byte, error) {
 	securityProfile := securityProfileDigest(prefixes)
 	namespaces := strings.Join(runcontainer.ProjectNamespaces(), " ")
 	globalNamespaces := strings.Join(runcontainer.GlobalNamespaces(), " ")
+	// nft refuses an empty elements list, while a set declared without one is
+	// valid and matches nothing.
+	hostElements := ""
+	if len(prefixes) != 0 {
+		hostElements = "elements = { " + strings.Join(prefixes, ", ") + " }"
+	}
 
 	replacements := strings.NewReplacer(
 		"@@CPUS@@", strconv.Itoa(vmCPUs),
 		"@@MEMORY@@", strconv.Itoa(vmMemoryGiB)+"GiB",
 		"@@DISK@@", strconv.Itoa(vmDiskGiB)+"GiB",
-		"@@HOST_PREFIXES@@", strings.Join(prefixes, ", "),
-		"@@HOST_PREFIX_LINES@@", strings.Join(prefixes, "\n    "),
+		"@@FIXED_DENIED@@", strings.Join(fixedDeniedStrings(), ",\n          "),
+		"@@HOST_ELEMENTS@@", hostElements,
 		"@@SECURITY_PROFILE_DIGEST@@", securityProfile,
 		"@@RUN_STORAGE_BYTES@@", strconv.FormatInt(runcontainer.DefaultPersistent, 10),
 		"@@PROJECT_STORAGE_BYTES@@", strconv.FormatInt(runcontainer.DefaultProject, 10),
@@ -58,15 +78,25 @@ func RenderConfig(hostIPv4Prefixes []netip.Prefix) ([]byte, error) {
 	return []byte(replacements.Replace(configTemplate)), nil
 }
 
+func fixedDeniedStrings() []string {
+	result := make([]string, 0, len(fixedDeniedIPv4))
+	for _, prefix := range fixedDeniedIPv4 {
+		result = append(result, prefix.String())
+	}
+	return result
+}
+
 // securityProfileDigest changes whenever the generated VM definition, its
-// immutable host-network deny set, its persistent storage quotas, or the sets
-// of namespaces runs share change. The template is hashed before substitution, so
-// every value substituted into it has to be hashed here too. VM sizing is
-// deliberately excluded because it does not weaken a run boundary.
+// immutable deny sets, its persistent storage quotas, or the sets of namespaces
+// runs share change. The template is hashed before substitution, so every value
+// substituted into it has to be hashed here too. VM sizing is deliberately
+// excluded because it does not weaken a run boundary.
 func securityProfileDigest(prefixes []string) string {
 	digest := sha256.New()
-	_, _ = digest.Write([]byte("pisafe-lima-security-profile-v4\x00"))
+	_, _ = digest.Write([]byte("pisafe-lima-security-profile-v5\x00"))
 	_, _ = digest.Write([]byte(configTemplate))
+	_, _ = digest.Write([]byte{0})
+	_, _ = digest.Write([]byte(strings.Join(fixedDeniedStrings(), "\n")))
 	_, _ = digest.Write([]byte{0})
 	_, _ = digest.Write([]byte(strings.Join(prefixes, "\n")))
 	_, _ = digest.Write([]byte{0})
@@ -86,10 +116,13 @@ func securityProfileDigest(prefixes []string) string {
 	return "sha256:" + hex.EncodeToString(digest.Sum(nil))
 }
 
-// CanonicalIPv4Prefixes is the deny set as the VM definition and its digest
-// state it: masked, deduplicated, ordered, and with any prefix another already
-// covers removed. Everything that builds or checks the boundary reads it from
-// here, so the set a VM was built with and the set it is held to are one answer.
+// CanonicalIPv4Prefixes is the host deny set as the VM definition and its
+// digest state it: masked, deduplicated, ordered, and with any prefix that
+// another host prefix or the fixed deny set already covers removed. Everything
+// that builds or checks the boundary reads it from here, so the set a VM was
+// built with and the set it is held to are one answer. A Mac on a private
+// network therefore adds nothing, and moving between such networks leaves the
+// VM current: it is denied the same addresses either way.
 func CanonicalIPv4Prefixes(prefixes []netip.Prefix) ([]string, error) {
 	if len(prefixes) == 0 {
 		return nil, errors.New("host IPv4 prefixes are required; refusing an incomplete firewall")
@@ -113,14 +146,7 @@ func CanonicalIPv4Prefixes(prefixes []netip.Prefix) ([]string, error) {
 	})
 	collapsed := make([]netip.Prefix, 0, len(candidates))
 	for _, candidate := range candidates {
-		covered := false
-		for _, existing := range collapsed {
-			if existing.Contains(candidate.Addr()) {
-				covered = true
-				break
-			}
-		}
-		if !covered {
+		if !coveredBy(candidate, fixedDeniedIPv4) && !coveredBy(candidate, collapsed) {
 			collapsed = append(collapsed, candidate)
 		}
 	}
@@ -131,6 +157,17 @@ func CanonicalIPv4Prefixes(prefixes []netip.Prefix) ([]string, error) {
 	}
 	sort.Strings(result)
 	return result, nil
+}
+
+// coveredBy reports whether every address of prefix lies inside one of wider.
+// A prefix only partly inside one still denies addresses nothing else does.
+func coveredBy(prefix netip.Prefix, wider []netip.Prefix) bool {
+	for _, candidate := range wider {
+		if candidate.Bits() <= prefix.Bits() && candidate.Contains(prefix.Addr()) {
+			return true
+		}
+	}
+	return false
 }
 
 const configTemplate = `minimumLimaVersion: 2.2.0
@@ -250,23 +287,14 @@ provision:
         type ipv4_addr
         flags interval
         elements = {
-          0.0.0.0/8,
-          10.0.0.0/8,
-          100.64.0.0/10,
-          127.0.0.0/8,
-          169.254.0.0/16,
-          172.16.0.0/12,
-          192.0.2.0/24,
-          192.168.0.0/16,
-          224.0.0.0/4,
-          240.0.0.0/4
+          @@FIXED_DENIED@@
         }
       }
 
       set host_onlink_v4 {
         type ipv4_addr
         flags interval
-        elements = { @@HOST_PREFIXES@@ }
+        @@HOST_ELEMENTS@@
       }
 
       chain input {
@@ -301,11 +329,6 @@ provision:
       }
     }
     PISAFE_NFT
-
-    tee /etc/pisafe/host-prefixes >/dev/null <<'PISAFE_PREFIXES'
-    @@HOST_PREFIX_LINES@@
-    PISAFE_PREFIXES
-    chmod 0444 /etc/pisafe/host-prefixes
 
     tee /etc/pisafe/security-profile >/dev/null <<'PISAFE_SECURITY_PROFILE'
     @@SECURITY_PROFILE_DIGEST@@
