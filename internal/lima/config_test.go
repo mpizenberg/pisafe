@@ -172,6 +172,34 @@ func TestRenderConfigWritesTheSecurityProfileLast(t *testing.T) {
 	}
 }
 
+// Setup runs on every boot, so an unconditional install would make restarting
+// a VM with everything installed wait on the network.
+func TestRenderConfigInstallsOnlyWhatIsMissing(t *testing.T) {
+	config, err := RenderConfig(testPrefixes("198.51.100.0/24"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(config)
+	guard := `if ! rpm -q "${packages[@]}" >/dev/null; then` + "\n" +
+		`      dnf -y install --best --setopt=install_weak_deps=False "${packages[@]}"` + "\n" +
+		"    fi\n"
+	if !strings.Contains(text, guard) {
+		t.Error("config does not guard the package install on what is installed")
+	}
+	calls := 0
+	for _, line := range strings.Split(text, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "dnf ") {
+			calls++
+		}
+	}
+	if calls != 1 {
+		t.Errorf("%d dnf calls, want only the guarded install", calls)
+	}
+	if !strings.Contains(text, "packages=(chrony e2fsprogs git nftables openssh-server podman)") {
+		t.Error("config does not name the packages it needs")
+	}
+}
+
 // Nearly every network a Mac joins is private, and the fixed deny set already
 // refuses all of those addresses, so joining one must neither add to the host
 // set nor move the digest a VM is held to.

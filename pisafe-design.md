@@ -103,12 +103,15 @@ Recreating the VM is therefore the cure for every drift the boundary checks
 detect without also being what destroys the work they protect, and `pisafe vm
 rebuild` is that cure as a command: it reports what the rebuild costs, stops
 every active run so what it produced reaches the project store, replaces the
-instance, and verifies the boundary the new one was built to. The
-disk is
+instance, and verifies the boundary the new one was built to. The disk is
 identified by the filesystem label it is given the first time it is seen; a
 device carrying neither a partition table nor a filesystem is the only thing
 provisioning will ever format, and finding anything but exactly one of those
 fails the boot.
+
+Provisioning runs again on every boot. A boot that finds every package already
+installed needs no network to finish it, so restarting a VM never waits on the
+network.
 
 Each run gets its own container, staged repository, quota-backed writable
 storage, SSH endpoint, and broker capability, plus a read-only global profile

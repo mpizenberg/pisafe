@@ -211,8 +211,13 @@ provision:
     #!/bin/bash
     set -eux -o pipefail
 
-    dnf -y install --best --setopt=install_weak_deps=False \
-      chrony e2fsprogs git nftables openssh-server podman
+    # This script runs on every boot, and dnf reaches the network for expired
+    # repository metadata even with nothing to install, so a restart would
+    # otherwise wait on the network before the state disk is mounted.
+    packages=(chrony e2fsprogs git nftables openssh-server podman)
+    if ! rpm -q "${packages[@]}" >/dev/null; then
+      dnf -y install --best --setopt=install_weak_deps=False "${packages[@]}"
+    fi
     systemctl disable --now firewalld 2>/dev/null || true
     systemctl enable --now chronyd.service
 
