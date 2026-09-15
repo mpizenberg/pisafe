@@ -60,6 +60,9 @@ Beyond what the design requires:
   rebuild`. Provisioning runs on every boot, and the record is
   `/run/pisafe/security-profile`, renamed into place as its last step, so it
   exists only once this boot's setup completed — firewall up, sudo narrowed.
+- `limactl start` waits two hours rather than Lima's ten minutes. A first setup
+  downloading its packages over a slow network outlasts the default, and Lima
+  stops waiting while the guest carries on. Later boots install nothing.
   `VM.StartUnverified` serves the commands deliberately exempt from it, which
   start a stopped VM rather than reporting one.
 - Any state Lima calls neither running nor stopped is `StatusBroken`: the

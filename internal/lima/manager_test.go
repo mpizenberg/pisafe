@@ -204,7 +204,7 @@ func TestManagerStartRefreshesAfterResume(t *testing.T) {
 	if len(runner.calls) != 4 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
-	assertArgs(t, runner.calls[1], "--tty=false", "start", "pisafe")
+	assertArgs(t, runner.calls[1], "--tty=false", "start", "--timeout=2h0m0s", "pisafe")
 	assertArgs(
 		t, runner.calls[2],
 		"shell", "pisafe", "cat", "/run/pisafe/security-profile",
@@ -264,7 +264,7 @@ func TestManagerStartUnverifiedStartsStoppedInstance(t *testing.T) {
 	if len(runner.calls) != 3 {
 		t.Fatalf("calls = %#v", runner.calls)
 	}
-	assertArgs(t, runner.calls[1], "--tty=false", "start", "pisafe")
+	assertArgs(t, runner.calls[1], "--tty=false", "start", "--timeout=2h0m0s", "pisafe")
 	assertArgs(t, runner.calls[2], "shell", "pisafe", "sudo", "/usr/local/sbin/pisafe-clock-step")
 }
 

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/mpizenberg/pisafe/internal/safefile"
 )
@@ -26,6 +27,13 @@ const (
 	// be concluded about what is inside it.
 	StatusBroken Status = "broken"
 )
+
+// startTimeout is how long `limactl start` waits for the instance, provisioning
+// included. Lima's own ten minutes are shorter than a first setup downloading
+// its packages over a slow network, and Lima stops waiting while the guest
+// carries on, so a VM that would have come up is reported as failed. Only a
+// first setup is slow: every later boot finds its packages installed.
+const startTimeout = 2 * time.Hour
 
 type Runner interface {
 	Run(ctx context.Context, stdin io.Reader, args ...string) ([]byte, error)
@@ -314,6 +322,7 @@ func (vm VM) bringUp(ctx context.Context) error {
 			nil,
 			"--tty=false",
 			"start",
+			"--timeout="+startTimeout.String(),
 			vm.instance,
 		); err != nil {
 			return fmt.Errorf("start Lima instance: %w", err)
