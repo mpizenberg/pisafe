@@ -57,7 +57,9 @@ Beyond what the design requires:
   its fixed deny set, and the canonical host-network set — the on-link prefixes
   that set does not already cover, so on a private network none — checked
   before clock synchronization. A mismatch names both causes and `pisafe vm
-  rebuild`.
+  rebuild`. Provisioning runs on every boot, and the record is
+  `/run/pisafe/security-profile`, renamed into place as its last step, so it
+  exists only once this boot's setup completed — firewall up, sudo narrowed.
   `VM.StartUnverified` serves the commands deliberately exempt from it, which
   start a stopped VM rather than reporting one.
 - Any state Lima calls neither running nor stopped is `StatusBroken`: the

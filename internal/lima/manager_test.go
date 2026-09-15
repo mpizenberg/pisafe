@@ -113,7 +113,7 @@ func TestManagerEnsureCreatesStartsAndVerifiesAbsentVM(t *testing.T) {
 	)
 	assertArgs(
 		t, runner.calls[6],
-		"shell", "pisafe", "cat", "/etc/pisafe/security-profile",
+		"shell", "pisafe", "cat", "/run/pisafe/security-profile",
 	)
 }
 
@@ -184,7 +184,7 @@ func TestManagerStartIsIdempotent(t *testing.T) {
 	}
 	assertArgs(
 		t, runner.calls[1],
-		"shell", "pisafe", "cat", "/etc/pisafe/security-profile",
+		"shell", "pisafe", "cat", "/run/pisafe/security-profile",
 	)
 	assertArgs(t, runner.calls[2], "shell", "pisafe", "sudo", "/usr/local/sbin/pisafe-clock-step")
 }
@@ -207,7 +207,7 @@ func TestManagerStartRefreshesAfterResume(t *testing.T) {
 	assertArgs(t, runner.calls[1], "--tty=false", "start", "pisafe")
 	assertArgs(
 		t, runner.calls[2],
-		"shell", "pisafe", "cat", "/etc/pisafe/security-profile",
+		"shell", "pisafe", "cat", "/run/pisafe/security-profile",
 	)
 	assertArgs(t, runner.calls[3], "shell", "pisafe", "sudo", "/usr/local/sbin/pisafe-clock-step")
 }

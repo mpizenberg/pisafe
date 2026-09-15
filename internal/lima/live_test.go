@@ -44,8 +44,9 @@ if sudo -n true 2>/dev/null; then
   echo "Lima user still has unrestricted passwordless sudo" >&2
   exit 1
 fi
-test -r /etc/pisafe/security-profile
-test "$(stat -c '%a:%U:%G' /etc/pisafe/security-profile)" = "444:root:root"
+test -r /run/pisafe/security-profile
+test "$(stat -c '%a:%U:%G' /run/pisafe/security-profile)" = "444:root:root"
+test "$(stat -c '%a:%U:%G' /run/pisafe)" = "755:root:root"
 `)
 	runLive(t, ctx, "podman", "run", "--rm", "docker.io/library/alpine:3.22", "sh", "-ec", `
 wget -qO- https://example.com >/dev/null

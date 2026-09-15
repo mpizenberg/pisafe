@@ -329,13 +329,14 @@ func (vm VM) bringUp(ctx context.Context) error {
 }
 
 // verifySecurityProfile detects an instance provisioned by an older or locally
-// modified VM definition. The record is root-owned and immutable to the
-// unprivileged Lima user after provisioning. The prefixes are already canonical:
-// what the digest is taken over is decided once, by Start.
+// modified VM definition. The record is root-owned, immutable to the
+// unprivileged Lima user, and written by each boot's setup only once that setup
+// completed. The prefixes are already canonical: what the digest is taken over
+// is decided once, by Start.
 func (vm VM) verifySecurityProfile(ctx context.Context, prefixes []string) error {
 	expected := securityProfileDigest(prefixes)
 	output, err := vm.runner.Run(ctx, nil, vm.inVM([]string{
-		"cat", "/etc/pisafe/security-profile",
+		"cat", "/run/pisafe/security-profile",
 	})...)
 	if err != nil {
 		return fmt.Errorf(

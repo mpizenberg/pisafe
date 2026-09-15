@@ -42,7 +42,6 @@ func TestRenderConfigContainsSecurityBoundary(t *testing.T) {
 		"usermod --add-subuids 100000-165535",
 		"podman system migrate",
 		"podman unshare cat /proc/self/uid_map",
-		"/etc/pisafe/security-profile",
 		"sha256:",
 		"pisafe-clock-step",
 		"pisafe-storage",
@@ -99,6 +98,9 @@ func TestRenderConfigContainsSecurityBoundary(t *testing.T) {
 	if mountIndex < 0 || rootsIndex < 0 || mountIndex > rootsIndex {
 		t.Error("storage roots are created before the state disk is mounted")
 	}
+	if strings.Contains(text, "/etc/pisafe/security-profile") {
+		t.Error("config writes a security profile that outlives the boot it attests")
+	}
 	trapIndex := strings.Index(text, "trap 'cleanup_partial || true' ERR")
 	truncateIndex := strings.Index(text, `truncate -s "$storage_bytes" "$image"`)
 	if trapIndex < 0 || truncateIndex < 0 || trapIndex > truncateIndex {
@@ -144,6 +146,29 @@ func TestSecurityProfileDependsOnTheCanonicalSetAlone(t *testing.T) {
 	}
 	if securityProfileDigest(observed) != securityProfileDigest(collapsed) {
 		t.Fatal("equivalent host networks produced different security profiles")
+	}
+}
+
+// The controller holds a VM to the record alone, so a record present while
+// any part of setup has yet to hold would vouch for a VM with no firewall or
+// with unrestricted sudo. Narrowing sudo is the last step it attests.
+func TestRenderConfigWritesTheSecurityProfileLast(t *testing.T) {
+	config, err := RenderConfig(testPrefixes("198.51.100.0/24"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(config)
+	sudoIndex := strings.Index(text, "visudo --check")
+	recordIndex := strings.Index(text, "/run/pisafe/security-profile")
+	if sudoIndex < 0 || recordIndex < 0 || recordIndex < sudoIndex {
+		t.Fatal("security profile is written before sudo is narrowed")
+	}
+	final := "mv -f /run/pisafe/security-profile.new /run/pisafe/security-profile\n"
+	finalIndex := strings.Index(text, final)
+	probesIndex := strings.Index(text, "\nprobes:")
+	if finalIndex < 0 || probesIndex < 0 ||
+		strings.TrimSpace(text[finalIndex+len(final):probesIndex]) != "" {
+		t.Error("the security profile's rename is not the provisioning script's last command")
 	}
 }
 

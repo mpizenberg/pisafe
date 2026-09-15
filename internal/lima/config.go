@@ -330,11 +330,6 @@ provision:
     }
     PISAFE_NFT
 
-    tee /etc/pisafe/security-profile >/dev/null <<'PISAFE_SECURITY_PROFILE'
-    @@SECURITY_PROFILE_DIGEST@@
-    PISAFE_SECURITY_PROFILE
-    chmod 0444 /etc/pisafe/security-profile
-
     tee /usr/local/sbin/pisafe-firewall >/dev/null <<'PISAFE_FIREWALL'
     #!/bin/bash
     set -eux -o pipefail
@@ -547,6 +542,16 @@ provision:
     fi
     gpasswd --delete "${pisafe_user}" wheel 2>/dev/null || true
     visudo --check --file=/etc/sudoers.d/90-pisafe-controller
+
+    # The record is what the controller holds the VM to, so it may exist only
+    # once everything above held on this boot: it lives on tmpfs, which every
+    # boot starts without, and it appears whole, by rename, as the last step.
+    install -d -m 0755 -o root -g root /run/pisafe
+    tee /run/pisafe/security-profile.new >/dev/null <<'PISAFE_SECURITY_PROFILE'
+    @@SECURITY_PROFILE_DIGEST@@
+    PISAFE_SECURITY_PROFILE
+    chmod 0444 /run/pisafe/security-profile.new
+    mv -f /run/pisafe/security-profile.new /run/pisafe/security-profile
 
 probes:
 - description: pisafe VM security boundary
